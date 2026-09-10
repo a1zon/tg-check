@@ -1,0 +1,51 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Вход — Telegram панель</title>
+<style>
+  :root{--bg:#f5f6f8;--card:#fff;--ink:#1a1d21;--mut:#6b7280;--line:#e2e5e9;--acc:#2481cc;--no:#b42318}
+  @media(prefers-color-scheme:dark){:root{--bg:#141619;--card:#1d2025;--ink:#e8eaed;--mut:#98a1ab;--line:#2b2f35}}
+  *{box-sizing:border-box}
+  body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+       background:var(--bg);color:var(--ink);font:14px/1.55 -apple-system,system-ui,sans-serif;padding:20px}
+  form{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:26px;
+       width:100%;max-width:340px}
+  h1{margin:0 0 4px;font-size:18px}
+  p{margin:0 0 20px;color:var(--mut);font-size:13px}
+  label{display:block;font-size:12px;color:var(--mut);margin:0 0 5px}
+  input{width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:8px;
+        background:transparent;color:var(--ink);font-size:14px;margin-bottom:14px}
+  input:focus{outline:2px solid var(--acc);outline-offset:-1px;border-color:transparent}
+  button{width:100%;border:0;border-radius:8px;padding:12px;font-size:14px;font-weight:600;
+         background:var(--acc);color:#fff;cursor:pointer}
+  button:disabled{opacity:.5;cursor:default}
+  .err{color:var(--no);font-size:13px;margin:12px 0 0;min-height:18px}
+</style>
+<form id="f">
+  <h1>Telegram — панель</h1>
+  <p>Вход только по логину и паролю.</p>
+  <label for="u">Логин</label>
+  <input id="u" name="username" autocomplete="username" autofocus required>
+  <label for="p">Пароль</label>
+  <input id="p" name="password" type="password" autocomplete="current-password" required>
+  <button id="b">Войти</button>
+  <div class="err" id="e"></div>
+</form>
+<script>
+const f = document.querySelector('#f'), e = document.querySelector('#e'), b = document.querySelector('#b');
+f.onsubmit = async (ev) => {
+  ev.preventDefault();
+  b.disabled = true; e.textContent = '';
+  try {
+    const r = await (await fetch('/api/login', {
+      method: 'POST',
+      headers: {'content-type': 'application/json', 'x-panel': '1'},
+      body: JSON.stringify({user: document.querySelector('#u').value,
+                            pass: document.querySelector('#p').value}),
+    })).json();
+    if (r.ok) { location.href = '/'; return; }
+    e.textContent = r.reason || 'не пустили';
+  } catch { e.textContent = 'панель не отвечает'; }
+  b.disabled = false;
+};
+</script>

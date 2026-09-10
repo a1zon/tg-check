@@ -1,0 +1,240 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Telegram — панель</title>
+<link rel="stylesheet" href="/app.css">
+<div class="wrap">
+  <h1>Telegram — панель</h1>
+  <p class="lead" id="acct">подключаюсь…</p>
+  <button class="ghost mini" id="logout" style="position:absolute;top:22px;right:22px">Выйти</button>
+
+  <!-- 1. КТО РАБОТАЕТ — единственный выбор на всю панель -->
+  <div class="card">
+    <div class="step" id="s1">
+      <div class="n">1</div>
+      <div class="body">
+        <h3>Кто работает</h3>
+        <p>Поставь галочки. <b>Всё, что ниже, делают только отмеченные аккаунты</b> —
+           они делят базу между собой, и одному человеку пишет ровно один из них.</p>
+        <div id="accs"></div>
+        <div id="selcount" class="selline"></div>
+        <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
+          <button class="primary" id="b-add" data-busy>+ Добавить аккаунт</button>
+          <button class="ghost" id="b-bulk" data-busy>Залить пачку сессий</button>
+          <button class="ghost" id="b-pack" data-busy>Открыть пачку в Desktop</button>
+          <button class="ghost" data-t="login" id="b-login">Войти заново</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="notready" class="warn" hidden style="margin:-6px 0 16px">
+    Ни один отмеченный аккаунт <b>не вошёл</b> — запуск заблокирован.
+    Войди по QR или залей готовую сессию в шаге 1.
+  </div>
+
+  <!-- 2. ЗАПУСК — главный блок, делает всё -->
+  <div class="card hero">
+    <div class="step" id="s5">
+      <div class="n">▶</div>
+      <div class="body">
+        <h3>Запуск — панель делает всё сама</h3>
+        <p>Одна кнопка — дальше сама. Аккаунты делят базу на части, каждый
+           проверяет свою (у кого есть Telegram), и <b>пишет всем найденным
+           из своей части</b>. Потом берут следующую часть — и так до конца базы.
+           Нажимать больше ничего не нужно.</p>
+        <p style="margin-top:-6px">Сначала идёт проверка, сообщения начинаются
+           чуть позже — писать можно только тем, кто уже проверен.</p>
+
+        <!-- ── таблица ── -->
+        <div class="fieldset">
+          <div class="fh"><span class="fn">1</span> Таблица с номерами</div>
+          <div class="basenow" id="basenow"><span style="color:var(--mut)">загружаю…</span></div>
+          <div class="drop" id="drop">
+            <b>Перетащи сюда файл</b>
+            Excel или CSV. Колонку с номерами панель найдёт сама.
+          </div>
+          <input type="file" id="file" accept=".xlsx,.xlsm,.csv,.tsv,.txt" hidden>
+          <div class="peek" id="peek"></div>
+          <details style="margin-top:10px">
+            <summary>файл уже лежит на этом компьютере — указать путь</summary>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
+              <input id="basepath" type="text" placeholder="/Users/.../base.xlsx"
+                     style="flex:1;min-width:240px;padding:9px 10px;border:1px solid var(--line);
+                     border-radius:8px;background:transparent;color:var(--ink);font-size:13px">
+              <button class="ghost" id="b-load" data-busy>Загрузить по пути</button>
+            </div>
+          </details>
+        </div>
+
+        <!-- ── что делать ── -->
+        <div class="fieldset">
+          <div class="fh"><span class="fn">2</span> Что делать</div>
+          <div class="frow">
+            <select id="amode">
+              <option value="full">проверить базу и написать найденным</option>
+              <option value="check">только проверить базу (никому не писать)</option>
+              <option value="write">только написать тем, кого уже нашли</option>
+            </select>
+          </div>
+          <label class="bigopt" id="opt-draft">
+            <input type="radio" name="sendmode" id="sm-draft" checked>
+            <span><b>Оставлять черновик</b> — текст ляжет в чат, но человеку
+              <b>не уйдёт</b>. Отправишь сам, руками. Безопасно, можно проверять.</span>
+          </label>
+          <label class="bigopt danger-opt" id="opt-send">
+            <input type="radio" name="sendmode" id="sm-send">
+            <span><b>Отправлять сразу</b> — сообщение <b>уйдёт человеку</b>
+              по-настоящему. Отозвать нельзя.</span>
+          </label>
+          <input type="checkbox" id="send" hidden>
+          <div id="autowarn" class="warn" hidden></div>
+        </div>
+
+        <!-- ── скорость ── -->
+        <div class="fieldset">
+          <div class="fh"><span class="fn">3</span> Скорость и лимиты</div>
+          <div class="frow"><input id="ddelay" type="number" value="20" min="3">
+            <span><b>секунд между двумя сообщениями одного аккаунта.</b>
+              Чем больше пауза, тем меньше шанс, что Telegram забанит аккаунт
+              за рассылку. Меньше 15 — рискованно.</span></div>
+          <div class="frow"><input id="acap" type="number" value="25" min="0">
+            <span><b>сообщений в сутки с одного аккаунта.</b> Набрал столько —
+              уходит отдыхать до завтра, остальные продолжают. <b>0</b> — без предела
+              (не советую для свежих аккаунтов).</span></div>
+          <div class="frow"><input id="delay" type="number" value="15" min="5">
+            <span><b>секунд между номерами при проверке базы.</b>
+              Проверка тоже тратит лимит Telegram, спешить нельзя.</span></div>
+          <label class="bigopt" style="margin-top:12px">
+            <input type="checkbox" id="warmon" checked>
+            <span><b>Беречь новые аккаунты (прогрев)</b> — свежий аккаунт сутки
+              отлёживается, потом пишет 2 в день, через пару дней 5, дальше больше,
+              до 15. Так они не «отлетают» в первый же день. Выключать не советую.</span>
+          </label>
+          <details style="margin-top:10px">
+            <summary>тонкие настройки — можно не трогать</summary>
+            <div class="frow" style="margin-top:10px"><input id="limit" type="number" value="20" min="1">
+              <span>номеров за один заход проверки (на аккаунт)</span></div>
+            <div class="frow"><input id="dlimit" type="number" value="25" min="1">
+              <span>сообщений за один заход рассылки (на аккаунт). Большое число —
+                аккаунт пишет всем своим подряд, не останавливаясь; защищает
+                пауза между сообщениями, а не размер захода</span></div>
+            <div class="frow"><input id="apause" type="number" value="30" min="10">
+              <span>секунд отдыха между заходами</span></div>
+          </details>
+        </div>
+
+        <button class="primary big" id="b-auto">Запустить</button>
+        <div id="stage" class="stage" hidden></div>
+        <div id="autostate" style="margin-top:10px"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 3. РЕЗУЛЬТАТ -->
+  <div class="card">
+    <div class="cardtitle">Результат</div>
+    <div class="nums">
+      <div><b id="n-base">—</b><span>номеров в базе</span></div>
+      <div><b id="n-checked">—</b><span>проверено</span></div>
+      <div><b id="n-found" style="color:var(--ok)">—</b><span>есть в Telegram</span></div>
+      <div><b id="n-sent">—</b><span>написано</span></div>
+      <div><b id="n-replies" style="color:var(--acc)">—</b><span>ответили</span></div>
+    </div>
+    <div id="alltime" hidden></div>
+    <div style="margin-top:14px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <button class="ghost mini" data-t="stats" id="b-stats">Проверить, кто ответил</button>
+      <span style="color:var(--mut);font-size:12px">заглянет в чаты отмеченных аккаунтов</span>
+    </div>
+    <div id="replies"></div>
+    <table style="margin-top:14px"><thead><tr><th>Номер</th><th>Имя</th><th>Звонил</th><th>Сообщение</th></tr></thead>
+    <tbody id="rows"></tbody></table>
+  </div>
+
+  <!-- 4. ТЕКСТ СООБЩЕНИЯ -->
+  <div class="card">
+    <div class="step" id="s4">
+      <div class="n">✎</div>
+      <div class="body">
+        <h3>Что напишем</h3>
+        <p>Этот текст уйдёт каждому найденному. <b>{name}</b> подставит имя из
+           Telegram, <b>{date}</b> — дату его звонка.</p>
+        <textarea id="msg" spellcheck="true" placeholder="Здравствуйте{name}! …"></textarea>
+        <div class="msgbar">
+          <button class="ghost mini" id="msg-save">Сохранить текст</button>
+          <span id="msg-note">подстановки: <b>{name}</b> — имя, <b>{date}</b> — дата звонка</span>
+        </div>
+        <div class="peek" id="msg-prev"></div>
+
+        <div class="voicebox">
+          <div class="vhead"><b>🎤 Голосовое вместо текста</b>
+            <span id="voice-state">не загружено</span></div>
+          <div class="msgbar">
+            <button class="ghost mini" id="voice-pick">Загрузить голосовое</button>
+            <button class="ghost mini" id="voice-del" hidden>Убрать</button>
+          </div>
+          <audio id="voice-play" controls hidden preload="none"></audio>
+          <label class="vopt"><input type="checkbox" id="voicemode">
+            отправлять <b>голосовым</b>, а не текстом</label>
+          <div class="vnote">Голосовое нельзя оставить черновиком — оно уходит человеку
+            сразу, даже в режиме «черновик». Любой аудиофайл подойдёт.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ход работы: статус виден всегда, журнал свёрнут -->
+  <div class="card">
+    <div id="status"><span class="run"></span><span id="status-t">готов</span>
+      <span id="claims" style="color:var(--mut)"></span>
+      <button class="danger" id="stop" disabled style="margin-left:auto;padding:6px 12px">Остановить</button>
+    </div>
+    <div id="qr" hidden style="margin:12px 0;text-align:center">
+      <img id="qr-img" alt="QR для входа" style="width:220px;height:220px;background:#fff;
+           border-radius:8px;padding:8px">
+      <div style="color:var(--mut);font-size:13px;margin-top:6px">
+        Telegram на телефоне → Настройки → Устройства → Подключить устройство
+      </div>
+    </div>
+    <details>
+      <summary>Журнал — подробности для отладки</summary>
+      <div id="log" style="margin-top:10px"></div>
+    </details>
+  </div>
+
+  <!-- вручную, по шагам -->
+  <div class="card">
+    <details>
+      <summary>Сделать по шагам вручную (обычно не нужно)</summary>
+      <p style="color:var(--mut);font-size:13px;margin:10px 0">
+        Один заход и стоп — вместо непрерывного автопрогона. Аккаунты и все
+        настройки берутся те же, что выше.</p>
+      <div class="maint">
+        <button class="ghost" data-t="check" id="b-check">Проверить базу — один заход</button>
+        <button class="ghost" data-t="drafts" id="b-drafts">Написать — один заход</button>
+      </div>
+    </details>
+  </div>
+
+  <!-- обслуживание -->
+  <div class="card">
+    <details>
+      <summary>Обслуживание</summary>
+      <div class="maint">
+        <button class="ghost" data-t="clean" id="b-clean">Почистить контакты</button>
+        <button class="danger" id="b-reset" style="margin-left:auto">Выйти из всех аккаунтов и очистить</button>
+      </div>
+      <p style="color:var(--mut);font-size:12px;margin:10px 0 0">
+        «Почистить» убирает служебные контакты выбранного аккаунта, если что-то
+        осталось после сбоя.<br>
+        «Выйти из всех аккаунтов и очистить» — панель становится как новая:
+        каждый аккаунт <b>выходит из Telegram по-настоящему</b> (сессия
+        отзывается, в «Устройствах» её больше нет) и пропадает из списка.
+        База, результаты, история сообщений и файлы сессий уезжают в бэкап-папку
+        рядом с панелью — оттуда их можно вернуть. Вход в панель и текст
+        сообщения остаются. <b>Сводка за всё время не пропадает</b>: числа
+        складываются в кеш панели и продолжают считаться дальше.</p>
+    </details>
+  </div>
+</div>
+<script src="/app.js"></script>

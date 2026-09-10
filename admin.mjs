@@ -23,9 +23,23 @@ import { fileURLToPath } from 'node:url';
 import * as accounts from './accounts.mjs';
 import * as claims from './claims.mjs';
 import * as auth from './auth.mjs';
+import { makeReadCsv } from './server/csv.mjs';
+import { makeStats } from './server/stats.mjs';
+import { makeWarmup } from './server/warmup.mjs';
+import * as desktop from './server/desktop.mjs';
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
 const arg = (n, d) => { const i = process.argv.indexOf(`--${n}`); return i === -1 ? d : process.argv[i + 1]; };
+
+// Модули собираем здесь: им нужны папка панели и чтение CSV, а решать, где
+// что лежит, — дело точки входа, а не самих модулей.
+const readCsv = makeReadCsv(DIR);
+const stats = makeStats({ DIR, readCsv });
+const { counts, replies, total: statsTotal } = stats;
+const statsFold = stats.fold;
+const { warm, doneToday } = makeWarmup({ readCsv, accounts });
+const { TDESK_HINT, tdesktopApp, launchDesktop, unpackTdata } = desktop;
+const DESKTOP = path.join(DIR, 'desktop');
 
 const PORT = Number(arg('port', process.env.PORT || 8787));
 const HOST = arg('host', process.env.HOST || '127.0.0.1');
@@ -57,68 +71,8 @@ const running = new Map();
 const log = [];                       // кольцевой буфер строк
 const push = (line) => { log.push(line); if (log.length > 1000) log.shift(); };
 
-const readCsv = (f) => {
-  const p = path.join(DIR, f);
-  if (!fs.existsSync(p)) return [];
-  const [head, ...lines] = fs.readFileSync(p, 'utf8').trim().split('\n');
-  const cols = head.split(',');
-  return lines.filter(Boolean).map((l) => {
-    const v = l.split(',');
-    return Object.fromEntries(cols.map((c, i) => [c, v[i] ?? '']));
-  });
-};
-
 /** Метка строки с итогом пачки: её печатает tglib.state() в конце задачи. */
 const STATE_MARK = '\u2301STATE ';
-
-/** Текущие числа по файлам: их показывает панель и из них копится сводка. */
-function counts() {
-  const res = readCsv('results.csv');
-  const dr = readCsv('drafts.csv');
-  return {
-    checked: res.filter((r) => r.tg === 'true' || r.tg === 'false').length,
-    found: res.filter((r) => r.tg === 'true').length,
-    none: res.filter((r) => r.tg === 'false').length,
-    drafts: dr.filter((r) => r.ok === 'true').length,
-    sent: dr.filter((r) => r.sent === 'true').length,
-  };
-}
-
-/**
- * Сводка за всё время. Чистка уносит results.csv и drafts.csv в бэкап, и
- * вместе с ними исчезли бы все числа — поэтому перед тем, как унести, панель
- * складывает их сюда. Показываем всегда кеш + то, что лежит в файлах сейчас:
- * так после чистки итог не меняется ни на единицу.
- */
-const STATS = path.join(DIR, 'stats-cache.json');
-const KEEP_WIPES = 20;
-
-const statsRead = () => {
-  try {
-    const o = JSON.parse(fs.readFileSync(STATS, 'utf8'));
-    return { checked: 0, found: 0, none: 0, drafts: 0, sent: 0, since: '', wipes: [], ...o };
-  } catch {
-    return { checked: 0, found: 0, none: 0, drafts: 0, sent: 0, since: '', wipes: [] };
-  }
-};
-
-/** Прибавить к кешу то, что сейчас в файлах, и запомнить саму чистку. */
-function statsFold(now, about) {
-  const c = statsRead();
-  for (const k of ['checked', 'found', 'none', 'drafts', 'sent']) c[k] += now[k];
-  if (!c.since) c.since = about.at;
-  c.wipes = [{ ...about, ...now }, ...c.wipes].slice(0, KEEP_WIPES);
-  fs.writeFileSync(STATS, JSON.stringify(c, null, 2) + '\n');
-  return c;
-}
-
-/** Что показывать как «за всё время»: кеш плюс нынешние файлы. */
-function statsTotal(now) {
-  const c = statsRead();
-  const t = {};
-  for (const k of ['checked', 'found', 'none', 'drafts', 'sent']) t[k] = c[k] + now[k];
-  return { ...t, since: c.since, last: c.wipes[0] || null, wipes: c.wipes.length };
-}
 
 /**
  * Уборка после выхода из аккаунтов: панель становится как новая, а числа
@@ -157,7 +111,9 @@ function wipeAll() {
 
   // и только теперь — в кеш: чистку начисто в историю не пишем, иначе она
   // копила бы пустые строки с папками, которых нет
-  const total = saved || had ? statsFold(now, { at, accounts: had, backup: rel }) : statsRead();
+  const total = saved || had
+    ? statsFold(now, { at, accounts: had, backup: rel })
+    : statsTotal({ checked: 0, found: 0, none: 0, drafts: 0, sent: 0 });
 
   push(`🧹 чисто: аккаунтов в панели нет` + (rel ? `, данные в ${rel}` : ''));
   push(`   сводка за всё время осталась: проверено ${total.checked} · найдено ${total.found}` +
@@ -309,92 +265,6 @@ function work() {
 
   return { check, write };
 }
-
-/**
- * Кто ответил. Считает stats.py и кладёт в replies.json по аккаунтам —
- * панель показывает это числом, чтобы не заставлять читать журнал.
- */
-const REPLIES = path.join(DIR, 'replies.json');
-function replies() {
-  let data = {};
-  try { data = JSON.parse(fs.readFileSync(REPLIES, 'utf8')) || {}; } catch { return { n: 0, list: [], at: '' }; }
-  const seen = new Map();
-  let at = '';
-  for (const [, v] of Object.entries(data)) {
-    if (v?.at && v.at > at) at = v.at;
-    for (const r of v?.replies || []) if (r?.who && !seen.has(r.who)) seen.set(r.who, r);
-  }
-  return { n: seen.size, at, list: [...seen.values()].slice(0, 30) };
-}
-
-/**
- * Сколько этот аккаунт СЕГОДНЯ уже написал людям. Считаем и черновики, и
- * отправленные: рискует аккаунт одинаково — в обоих случаях он добавляет
- * контакт и заводит чат, а Telegram смотрит именно на это.
- */
-function doneToday(id) {
-  const today = new Date().toDateString();
-  return readCsv('drafts.csv').filter((r) => r.account === id
-    && (r.ok === 'true' || r.sent === 'true')
-    && new Date(r.at).toDateString() === today).length;
-}
-
-/* ---------------------------------------------------------------- прогрев
- *
- * Свежекупленный аккаунт, который сразу пишет полсотне незнакомых людей, —
- * это мёртвый аккаунт: Telegram выдаёт PEER_FLOOD в первые же часы. Живые
- * аккаунты так себя не ведут, поэтому новый сначала отлёживается сутки, а
- * потом наращивает объём постепенно.
- *
- * Расписание — сколько человек в сутки можно писать с аккаунта:
- */
-const WARM_PLAN = [
-  { day: 0,  cap: 0,  note: 'отлёжка — сутки ничего не делаем' },
-  { day: 1,  cap: 2,  note: 'первые шаги: 2 в сутки' },
-  { day: 3,  cap: 5,  note: 'разгон: 5 в сутки' },
-  { day: 5,  cap: 8,  note: '8 в сутки' },
-  { day: 7,  cap: 12, note: '12 в сутки' },
-  { day: 10, cap: 15, note: 'прогрет: 15 в сутки' },
-];
-
-/**
- * С какого момента считать возраст. Ставим один раз и запоминаем в реестре.
- * Аккаунт, который уже успел поработать до появления прогрева, в отлёжку не
- * загоняем — он своё «детство» прожил, ему засчитываем зрелый возраст.
- */
-function warmFrom(acc) {
-  if (acc.warmFrom) return Date.parse(acc.warmFrom);
-  const worked = readCsv('drafts.csv').some((r) => r.account === acc.id
-    && (r.ok === 'true' || r.sent === 'true'));
-  const from = worked
-    ? new Date(Date.now() - 10 * 864e5).toISOString()   // уже в строю — считаем прогретым
-    : (acc.added || new Date().toISOString());
-  accounts.setField(acc.id, { warmFrom: from });
-  return Date.parse(from);
-}
-
-/** Состояние прогрева аккаунта: возраст, дневной предел, отдыхает ли ещё. */
-function warm(acc) {
-  const from = warmFrom(acc);
-  const ms = Date.now() - from;
-  const day = Math.floor(ms / 864e5);
-  let step = WARM_PLAN[0];
-  for (const p of WARM_PLAN) if (day >= p.day) step = p;
-  const resting = step.cap === 0;
-  return {
-    day, cap: step.cap, note: step.note, resting,
-    // сколько ещё отлёживаться, сек
-    restLeft: resting ? Math.max(0, Math.ceil((from + 864e5 - Date.now()) / 1000)) : 0,
-    left: Math.max(0, step.cap - doneToday(acc.id)),
-  };
-}
-
-/** До начала следующих суток — столько ждёт аккаунт, выбравший дневной предел. */
-const untilTomorrow = () => {
-  const d = new Date();
-  d.setHours(24, 5, 0, 0);
-  return d.getTime();
-};
 
 /** Чем занять этот аккаунт прямо сейчас. null — пока нечем. */
 function pickJob(left, id) {
@@ -621,62 +491,6 @@ function startMany(name, ids, opts) {
   return { ok: true, started, skipped };
 }
 
-/* ------------------------------------------------- Telegram Desktop -------
- * Каждому аккаунту — своя рабочая папка desktop/<id>: у Telegram Desktop
- * это ключ -workdir, поэтому несколько аккаунтов спокойно живут рядом.
- */
-const DESKTOP = path.join(DIR, 'desktop');
-const TDESK_HINT =
-  'Не найден Telegram Desktop. Похоже, стоит нативный клиент Telegram для macOS ' +
-  '(ru.keepcoder.Telegram) — он формат tdata не понимает, это другое приложение.\n\n' +
-  'Поставь именно Telegram Desktop:\n' +
-  '  brew install --cask telegram-desktop\n' +
-  'либо скачай с desktop.telegram.org и положи в /Applications.';
-
-/**
- * Путь к Telegram Desktop. Важно не перепутать с нативным клиентом для macOS
- * (ru.keepcoder.Telegram): тот про tdata ничего не знает и -workdir не умеет.
- */
-function tdesktopApp() {
-  const win = process.platform === 'win32';
-  if (win) {
-    const p = path.join(process.env.APPDATA || '', 'Telegram Desktop', 'Telegram.exe');
-    return fs.existsSync(p) ? p : '';
-  }
-  const cands = ['/Applications/Telegram Desktop.app', '/Applications/Telegram.app',
-                 path.join(process.env.HOME || '', 'Applications/Telegram Desktop.app')];
-  for (const app of cands) {
-    const bin = path.join(app, 'Contents/MacOS/Telegram');
-    if (!fs.existsSync(bin)) continue;
-    try {
-      const id = execFileSync('defaults',
-        ['read', path.join(app, 'Contents/Info.plist'), 'CFBundleIdentifier'],
-        { encoding: 'utf8' }).trim();
-      if (id === 'com.tdesktop.Telegram') return bin;
-    } catch {}
-  }
-  return '';
-}
-
-/** Ищет папку tdata внутри распакованного архива, на любой глубине. */
-function findTdata(root, depth = 0) {
-  if (depth > 4) return null;
-  for (const e of fs.readdirSync(root, { withFileTypes: true })) {
-    if (!e.isDirectory()) continue;
-    const full = path.join(root, e.name);
-    if (e.name === 'tdata') return full;
-    const deeper = findTdata(full, depth + 1);
-    if (deeper) return deeper;
-  }
-  return null;
-}
-
-/** Пускаем десктоп отдельно от панели: он живёт своей жизнью и её не держит. */
-function launchDesktop(app, workdir) {
-  const child = spawn(app, ['-workdir', workdir], { detached: true, stdio: 'ignore' });
-  child.unref();
-}
-
 /** Python для разбора базы: venv-tg (openpyxl+opentele), потом venv, потом системный. */
 function pythonCmd() {
   const win = process.platform === 'win32';
@@ -758,11 +572,27 @@ function importAccount(accId, file) {
   return { ok: true, kind: tdata ? 'TDATA' : 'session' };
 }
 
-/** Разбирает файл базы по указанному пути в numbers.csv (тот же extract_numbers.py). */
+/**
+ * Разбирает файл базы по указанному пути в numbers.csv.
+ *
+ * Путь приходит из браузера, поэтому он опасен: на сервере, доступном снаружи,
+ * это чтение чужих файлов. Поэтому «загрузить по пути» работает ТОЛЬКО когда
+ * панель слушает локальный адрес — там это просто удобство для своего же
+ * компьютера. Наружу остаётся загрузка файлом, она безопасна.
+ */
 function loadBase(file) {
   if (running.has('_base')) return { ok: false, reason: 'база уже разбирается' };
-  const clean = file.replace(/^~(?=\/)/, process.env.HOME || '~').trim();
-  if (!fs.existsSync(clean)) return { ok: false, reason: `файл не найден: ${clean}` };
+  if (!LOCAL) {
+    return { ok: false, reason: 'загрузка по пути доступна только на локальной панели — ' +
+      'перетащи файл в окно, так безопаснее' };
+  }
+  const clean = path.resolve(String(file).replace(/^~(?=\/)/, process.env.HOME || '~').trim());
+  if (!BASE_EXT.test(clean)) {
+    return { ok: false, reason: 'нужен файл .xlsx, .xlsm, .csv или .tsv' };
+  }
+  let st;
+  try { st = fs.statSync(clean); } catch { st = null; }
+  if (!st || !st.isFile()) return { ok: false, reason: `файл не найден: ${clean}` };
   run('_base', 'база', 'Загрузка базы', pythonCmd(),
       [path.join(DIR, 'extract_numbers.py'), clean, path.join(DIR, 'numbers.csv')],
       (code) => {
@@ -793,11 +623,31 @@ const rawBody = (req, limit = 50 * 1024 * 1024) => new Promise((ok, no) => {
   req.on('error', no);
 });
 
+const WEB = path.join(DIR, 'web');
+
 const page = (res, file) => {
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8',
                        'cache-control': 'no-store' });
-  res.end(fs.readFileSync(path.join(DIR, file)));
+  res.end(fs.readFileSync(path.join(WEB, file)));
 };
+
+/**
+ * Отдача статики из web/. Список файлов закрытый: собирать путь из того, что
+ * прислал браузер, нельзя — так уходят за пределы папки и читают чужое.
+ */
+const STATIC = {
+  '/app.css': 'text/css; charset=utf-8',
+  '/app.js': 'text/javascript; charset=utf-8',
+};
+function serveStatic(res, pathname) {
+  const type = STATIC[pathname];
+  if (!type) return false;
+  const file = path.join(WEB, path.basename(pathname));
+  if (!fs.existsSync(file)) return false;
+  res.writeHead(200, { 'content-type': type, 'cache-control': 'no-store' });
+  res.end(fs.readFileSync(file));
+  return true;
+}
 
 async function handler(req, res) {
   try {
@@ -818,6 +668,8 @@ async function handler(req, res) {
       }
       if (req.headers['x-panel'] !== '1') return json(res, 403, { error: 'запрос не из панели' });
     }
+
+    if (req.method === 'GET' && serveStatic(res, u.pathname)) return;
 
     const token = auth.cookieFrom(req.headers.cookie)[auth.COOKIE];
     const authed = auth.valid(token);
@@ -855,7 +707,7 @@ async function handler(req, res) {
       return json(res, 401, { error: 'нужен вход' });
     }
 
-    if (u.pathname === '/') return page(res, 'admin.html');
+    if (u.pathname === '/') return page(res, 'index.html');
     if (u.pathname === '/login') { res.writeHead(302, { location: '/' }); return res.end(); }
 
     if (u.pathname === '/api/accounts') {
@@ -1006,20 +858,7 @@ async function handler(req, res) {
           'аккаунт, залитый как TDATA (.zip). Перезалей его кнопкой «Сессия».' });
       }
       try {
-        const tmp = fs.mkdtempSync(path.join(DESKTOP, '_x'));
-        // достаём ТОЛЬКО tdata: рядом в архиве часто лежит заметка с паролем,
-        // и её имя в не-UTF8 кодировке роняет unzip целиком («Illegal byte
-        // sequence»). Нам она не нужна, а ошибку распаковки прочего глотаем —
-        // важно лишь, добралась ли tdata.
-        try {
-          execFileSync('unzip', ['-qo', path.join(UPLOADS, src), '*tdata/*', '-d', tmp],
-                       { stdio: 'ignore' });
-        } catch {}
-        const found = findTdata(tmp);
-        if (!found) throw new Error('внутри архива нет папки tdata');
-        fs.rmSync(path.join(wd, 'tdata'), { recursive: true, force: true });
-        fs.cpSync(found, path.join(wd, 'tdata'), { recursive: true });
-        fs.rmSync(tmp, { recursive: true, force: true });
+        unpackTdata(path.join(UPLOADS, src), wd, DESKTOP);
       } catch (e) {
         return json(res, 200, { ok: false, reason: 'не смог достать tdata: ' + e.message });
       }

@@ -14,6 +14,27 @@
  *   node admin.mjs                        -> http://localhost:8787
  *   node admin.mjs --host 0.0.0.0 --cert cert.pem --key key.pem
  */
+
+/*
+ * КАРТА ФАЙЛА — он большой, и листать его вслепую незачем.
+ *
+ *    157  РЕЕСТР ЗАДАЧ — какой скрипт за что отвечает
+ *    326  ЗАПУСК ЗАДАЧ — порождение процесса и разбор его вывода
+ *    731  ПРОГРЕВ — что показываем в панели
+ *    927  ЕГРЮЛ: СВОЯ ТАБЛИЦА И СВОЙ СБОРЩИК
+ *   1691  ФАЙЛЫ И ВНЕШНИЕ ПРОГРАММЫ — python, ffmpeg, база, голосовое
+ *   1881  HTTP — статика, вход, маршруты API
+ *     1957  АККАУНТЫ — список, заведение, профиль, прокси, Desktop
+ *     2365  БАЗА ПОЛУЧАТЕЛЕЙ — набор, загрузка, участники чатов
+ *     2504  ТЕКСТЫ ПИСЕМ И ГОЛОСОВОЕ
+ *     2633  СОСТОЯНИЕ ПАНЕЛИ — счётчики, журнал, лента, результаты
+ *     2877  ПРОКСИ, ЗЕРКАЛА И ЛИМИТЫ
+ *     3003  ПРОГРЕВ И АВТОПРОГОН — включение и настройки
+ *     3039  РУЧНОЙ ЗАПУСК И ОСТАНОВКА ЗАДАЧ
+ *
+ * Правило чтения: всё, что выше раздела HTTP, — «как панель работает»,
+ * всё, что ниже, — «что она отвечает браузеру».
+ */
 import http from 'node:http';
 import https from 'node:https';
 import fs from 'node:fs';
@@ -132,6 +153,8 @@ const HOST = arg('host', process.env.HOST || '127.0.0.1');
 const CERT = arg('cert', ''), KEY = arg('key', '');
 const TLS = !!(CERT && KEY);
 const LOCAL = /^(127\.|::1|localhost$)/.test(HOST);
+
+/* ═══════════ РЕЕСТР ЗАДАЧ — какой скрипт за что отвечает ═══════════ */
 
 /**
  * Задачи панели. Работа идёт родным каналом Telegram (MTProto) через
@@ -300,6 +323,8 @@ function manualHold() {
   }
   return false;
 }
+/* ═══════════ ЗАПУСК ЗАДАЧ — порождение процесса и разбор его вывода ═══════════ */
+
 
 function run(key, tag, title, cmd, args, onDone, set = baseSet) {
   // Python-задаче говорим, с каким набором получателей работать (tglib.py)
@@ -702,6 +727,8 @@ function warmActPhrase(r) {
     default:      return r.action || '';
   }
 }
+
+/* ═══════════ ПРОГРЕВ — что показываем в панели ═══════════ */
 
 /** Что показывать в панели про прогрев. */
 function warmView() {
@@ -1661,6 +1688,8 @@ function startMany(name, ids, opts) {
   return { ok: true, started, skipped };
 }
 
+/* ═══════════ ФАЙЛЫ И ВНЕШНИЕ ПРОГРАММЫ — python, ffmpeg, база, голосовое ═══════════ */
+
 /** Python для разбора базы: venv-tg (openpyxl+opentele), потом venv, потом системный. */
 function pythonCmd() {
   const win = process.platform === 'win32';
@@ -1849,6 +1878,8 @@ const STATIC = {
   '/app.css': 'text/css; charset=utf-8',
   '/app.js': 'text/javascript; charset=utf-8',
 };
+/* ═══════════ HTTP — статика, вход, маршруты API ═══════════ */
+
 function serveStatic(res, pathname) {
   const type = STATIC[pathname];
   if (!type) return false;
@@ -1922,6 +1953,8 @@ async function handler(req, res) {
 
     if (u.pathname === '/') return page(res, 'index.html');
     if (u.pathname === '/login') { res.writeHead(302, { location: '/' }); return res.end(); }
+
+    /* ───────── АККАУНТЫ — список, заведение, профиль, прокси, Desktop ───────── */
 
     /** Аватарка аккаунта — её кладёт tglib.save_avatar при подключении. */
     if (u.pathname === '/api/avatar') {
@@ -2329,6 +2362,8 @@ async function handler(req, res) {
       return json(res, 200, { ok: accounts.rename(id, title) });
     }
 
+    /* ───────── БАЗА ПОЛУЧАТЕЛЕЙ — набор, загрузка, участники чатов ───────── */
+
     /** Какой набор получателей в работе: «по номерам» или «по чатам». */
     if (u.pathname === '/api/base-set') {
       if (req.method !== 'POST') return json(res, 200, { set: baseSet });
@@ -2466,6 +2501,8 @@ async function handler(req, res) {
       return json(res, 200, loadBase(dest));
     }
 
+    /* ───────── ТЕКСТЫ ПИСЕМ И ГОЛОСОВОЕ ───────── */
+
     /**
      * Текст рассылки правится прямо в панели: message.txt открывать руками
      * неудобно, а ошибиться в нём дороже всего — он уходит людям.
@@ -2593,6 +2630,8 @@ async function handler(req, res) {
           [path.join(CODE, 'logout-accounts.py')], () => wipeAll());
       return json(res, 200, { ok: true, started: true });
     }
+    /* ───────── СОСТОЯНИЕ ПАНЕЛИ — счётчики, журнал, лента, результаты ───────── */
+
 
     if (u.pathname === '/api/state') {
       const now = counts();
@@ -2835,6 +2874,8 @@ async function handler(req, res) {
      * Автопрогон: панель сама гоняет пачки всеми выбранными аккаунтами,
      * пока база не кончится. {on:false} — остановить.
      */
+    /* ───────── ПРОКСИ, ЗЕРКАЛА И ЛИМИТЫ ───────── */
+
     /**
      * Проверка ссылки на смену IP: нажал — увидел, что ответил прокси.
      * Без этого настройку можно проверить только запуском прогона, а узнать,
@@ -2959,6 +3000,8 @@ async function handler(req, res) {
       push(`\n📊 лимит «${acc.title}»: ${Number(cap) > 0 ? Number(cap) + ' в сутки' : 'как у всех'}`);
       return json(res, 200, { ok: true });
     }
+    /* ───────── ПРОГРЕВ И АВТОПРОГОН — включение и настройки ───────── */
+
 
     if (u.pathname === '/api/warmup') {
       if (req.method !== 'POST') return json(res, 200, warmView());
@@ -2993,6 +3036,8 @@ async function handler(req, res) {
       if (o.on === false) { autoStop('остановлено вручную'); return json(res, 200, { ok: true }); }
       return json(res, 200, autoStart(o));
     }
+    /* ───────── РУЧНОЙ ЗАПУСК И ОСТАНОВКА ЗАДАЧ ───────── */
+
 
     if (u.pathname === '/api/start' && req.method === 'POST') {
       const { name, account, accounts: many, limit, delay, delayMax, hold, holdMax,

@@ -41,13 +41,17 @@ async def main():
     acc = tglib.resolve(tglib.arg("account", ""))
     say(f"аккаунт: {acc['title']}  |  {tglib.proxy_label(acc.get('proxy'))}  |  Telethon")
 
-    # имена и номера людей из базы — по ним отделяем рабочие чаты от личных
-    known_names, known_phones = set(), set()
+    # имена, номера и @username людей из базы — по ним отделяем рабочие чаты
+    # от личных. @username нужен для тех, кого взяли из чата: номера у них нет
+    known_names, known_phones, known_users = set(), set(), set()
     for r in tglib.read_csv(tglib.RESULTS):
         if r.get("tg") == "true":
             if r.get("name"):
                 known_names.add(r["name"].strip().lower())
-            known_phones.add(r["phone"].lstrip("+"))
+            if r.get("username"):
+                known_users.add(r["username"].strip().lstrip("@").lower())
+            if tglib.is_phone(r.get("phone")):
+                known_phones.add(r["phone"].lstrip("+"))
 
     client = await tglib.connect(acc)
     try:
@@ -56,7 +60,8 @@ async def main():
         for d in dialogs:
             title = (d.name or "").strip()
             ours = title.lower() in known_names or \
-                (getattr(d.entity, "phone", None) or "").lstrip("+") in known_phones
+                (getattr(d.entity, "phone", None) or "").lstrip("+") in known_phones or \
+                (getattr(d.entity, "username", None) or "").lower() in known_users
             text = ""
             if d.draft and (d.draft.text or "").strip():
                 text = d.draft.text.strip().replace("\n", " ")[:80]

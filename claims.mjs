@@ -16,7 +16,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const DIR = path.dirname(fileURLToPath(import.meta.url));
+// Папка данных профиля (брони): её задаёт панель через TG_PANEL_DIR,
+// иначе — там же, где код.
+const DIR = process.env.TG_PANEL_DIR
+  ? path.resolve(process.env.TG_PANEL_DIR)
+  : path.dirname(fileURLToPath(import.meta.url));
 const FILE = path.join(DIR, 'claims.json');
 const LOCK = path.join(DIR, 'claims.lock');
 const TTL = 60 * 60_000;               // сколько живёт бронь

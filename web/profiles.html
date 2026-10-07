@@ -1,0 +1,111 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Профили — Telegram панель</title>
+<link rel="stylesheet" href="/app.css?v=r35">
+<style>
+  body{padding:28px 20px;display:flex;justify-content:center}
+  .wrap{width:100%;max-width:640px}
+  h1{margin:0 0 4px;font-size:20px}
+  .sub{color:var(--mut);font-size:13px;margin:0 0 22px}
+  .prof{display:flex;align-items:center;gap:12px;padding:14px 16px;border:1px solid var(--line);
+        border-radius:12px;background:var(--glass);margin-bottom:10px}
+  .prof b{font-size:15px}
+  .prof .who{color:var(--mut);font-size:12.5px;display:block;margin-top:2px}
+  .prof .acts{margin-left:auto;display:flex;gap:6px;flex-wrap:wrap}
+  .tag{font-size:11px;color:var(--mut);border:1px solid var(--line);border-radius:999px;
+       padding:2px 9px;margin-left:8px;vertical-align:2px}
+  .tag.on{color:var(--ok);border-color:rgba(70,209,138,.4)}
+  form.add{border:1px solid var(--line);border-radius:12px;padding:16px;background:var(--glass);margin-top:22px}
+  form.add h2{margin:0 0 4px;font-size:15px}
+  form.add p{margin:0 0 14px;color:var(--mut);font-size:13px}
+  .row{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+  .row input{flex:1;min-width:170px;padding:9px 11px;border:1px solid var(--line);border-radius:9px;
+             background:rgba(8,18,44,.5);color:var(--ink);font:inherit}
+  .note{color:var(--mut);font-size:12.5px;min-height:18px;margin:8px 0 0}
+  .back{display:inline-block;margin-bottom:18px;color:var(--acc);text-decoration:none;font-size:13px}
+</style>
+<div class="wrap">
+  <a class="back" href="/">← в панель</a>
+  <h1>Профили</h1>
+  <p class="sub">У каждого профиля свои аккаунты, прокси, база, результаты и прогрев.
+     Профили друг о друге не знают; заходишь в нужный своим логином.</p>
+
+  <div id="list"></div>
+
+  <form class="add" id="add">
+    <h2>Завести профиль</h2>
+    <p>Новый профиль пустой: ни аккаунтов, ни прокси, ни базы. Заполняешь его сам,
+       войдя под этим логином.</p>
+    <div class="row">
+      <input id="t" placeholder="название, например «Клиент Б»" required>
+    </div>
+    <div class="row">
+      <input id="u" placeholder="логин для входа" autocomplete="off" required>
+      <input id="p" placeholder="пароль, от 8 знаков" autocomplete="new-password" required>
+    </div>
+    <button class="primary" id="b">Завести</button>
+    <p class="note" id="note"></p>
+  </form>
+</div>
+<script>
+const $ = (s) => document.querySelector(s);
+const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const post = (url, data) => fetch(url, {
+  method: 'POST', headers: {'content-type': 'application/json', 'x-panel': '1'},
+  body: JSON.stringify(data),
+}).then((r) => r.json());
+
+async function paint() {
+  const list = await (await fetch('/api/profiles/list')).json();
+  $('#list').innerHTML = list.map((p) => `
+    <div class="prof">
+      <span>
+        <b>${esc(p.title)}</b>
+        ${p.admin ? '<span class="tag">основной</span>' : ''}
+        <span class="tag ${p.running ? 'on' : ''}">${p.running ? 'работает' : 'стоит'}</span>
+        <span class="who">вход: ${esc(p.user || 'не задан')} · аккаунтов: ${p.accounts}</span>
+      </span>
+      <span class="acts">
+        <button class="softbtn mini" data-pass="${esc(p.id)}">Сменить вход</button>
+        ${p.admin ? '' : `<button class="softbtn mini" data-del="${esc(p.id)}">Убрать</button>`}
+      </span>
+    </div>`).join('');
+}
+
+$('#list').addEventListener('click', async (e) => {
+  const b = e.target.closest('button'); if (!b) return;
+  if (b.dataset.pass) {
+    const user = prompt('Новый логин профиля');
+    if (!user) return;
+    const pass = prompt('Новый пароль (от 8 знаков)');
+    if (!pass) return;
+    const r = await post('/api/profiles/password', {id: b.dataset.pass, user, pass});
+    alert(r.ok ? 'Вход изменён. Кто сидел в этом профиле — разлогинится.' : (r.reason || 'не вышло'));
+    paint();
+  }
+  if (b.dataset.del) {
+    if (!confirm('Убрать профиль из панели?\n\nДанные НЕ удаляются — папка остаётся на сервере. ' +
+                 'Аккаунты в ней останутся в сети, пока их не отключишь.')) return;
+    const r = await post('/api/profiles/remove', {id: b.dataset.del});
+    if (!r.ok) { alert(r.reason || 'не вышло'); return; }
+    alert('Профиль убран. Данные остались в ' + r.dir);
+    paint();
+  }
+});
+
+$('#add').onsubmit = async (ev) => {
+  ev.preventDefault();
+  $('#b').disabled = true; $('#note').textContent = 'завожу…';
+  const r = await post('/api/profiles/add', {title: $('#t').value, user: $('#u').value, pass: $('#p').value});
+  $('#b').disabled = false;
+  if (!r.ok) { $('#note').textContent = r.reason || 'не вышло'; return; }
+  $('#note').textContent = 'готово — заходи в него этим логином';
+  $('#t').value = $('#u').value = $('#p').value = '';
+  paint();
+};
+
+paint();
+setInterval(paint, 5000);
+</script>

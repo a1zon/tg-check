@@ -43,10 +43,13 @@ async def main():
     from telethon.tl.types import InputPhoneContact
     from telethon.errors import FloodWaitError, PeerFloodError
 
-    base = tglib.read_csv(tglib.NUMBERS)
+    # в базе рядом с номерами могут лежать люди из разбора чата (@username):
+    # проверять у них нечего — они в Telegram уже по факту, и запрос по номеру
+    # для них бессмыслен
+    base = [r for r in tglib.read_csv(tglib.NUMBERS) if tglib.is_phone(r.get("phone"))]
     res = tglib.read_csv(tglib.RESULTS)
     # ??? не считается проверенным — такой номер вернётся в очередь
-    done = {r["phone"] for r in res if r.get("tg") in ("true", "false")}
+    done = {r["phone"] for r in res if r.get("tg") in ("true", "false", "idle")}
     # ...но не бесконечно: номер, который не дался MAX_TRIES раз, откладываем,
     # иначе автопрогон будет вечно долбиться в один и тот же
     tries = tglib.tries_by_phone(res, done)
@@ -70,7 +73,7 @@ async def main():
     client = await tglib.connect(acc)
     say(f"сессия активна: {tglib.who(acc)}")
 
-    found = unknown_row = 0
+    found = unknown_row = idle = none_n = 0
     quota = 0
     ran = 0                  # сколько номеров реально дошли до записи
     stop, cooldown = "", 0   # чем кончилась пачка — это читает автопрогон
@@ -78,22 +81,31 @@ async def main():
         for i, row in enumerate(todo):
             phone = row["phone"]
             label = phone[-10:]                 # та же метка, что ставил браузерный прогон
-            tg, name, username = None, "", ""
+            tg, name, username, kept = None, "", "", False
             try:
                 res = await client(functions.contacts.ImportContactsRequest(
                     [InputPhoneContact(client_id=random.randrange(-2**62, 2**62),
                                        phone=phone, first_name=label, last_name="")]))
                 if res.users:
                     u = res.users[0]
-                    tg, found, unknown_row, quota = True, found + 1, 0, 0
+                    unknown_row, quota = 0, 0
+                    # в Telegram есть, но давно не заходит — писать некому:
+                    # отмечаем отдельно, в очередь рассылки такой не попадёт
+                    if tglib.long_gone(u):
+                        tg, idle = "idle", idle + 1
+                    else:
+                        tg, found = True, found + 1
+                    # живого оставляем в контактах: писать ему будет этот же
+                    # аккаунт, и второе «добавить в контакты» квоту не съест.
+                    # Давно не заходившего писать не будем — его убираем
+                    kept = tg is True
                     # для приватных контактов Telegram отдаёт НАШУ метку,
                     # а не настоящее имя — такое за имя не выдаём
                     real = " ".join(x for x in [u.first_name, u.last_name] if x).strip()
                     name = "" if real in ("", label, phone) else real
                     username = u.username or ""
-                    # из адресной книги убираем сразу: проверка не должна
-                    # оставлять за собой контакты
-                    await client(functions.contacts.DeleteContactsRequest(id=[u.id]))
+                    if not kept:
+                        await client(functions.contacts.DeleteContactsRequest(id=[u.id]))
                 elif res.retry_contacts:
                     # номер не обработан вовсе — это и есть упёршаяся квота
                     quota += 1
@@ -102,6 +114,7 @@ async def main():
                 else:
                     # ясный ответ «аккаунта нет» — значит квота ещё жива
                     tg, unknown_row, quota = False, 0, 0
+                    none_n += 1
             except FloodWaitError as e:
                 if e.seconds > FLOOD_MAX:
                     say(f"\nстоп: Telegram просит подождать {e.seconds} с — на сегодня хватит")
@@ -119,10 +132,12 @@ async def main():
                 unknown_row += 1
                 say(f"  ! {phone}: {type(e).__name__}: {str(e).splitlines()[0][:100]}")
 
-            mark = "ЕСТЬ" if tg is True else "нет" if tg is False else "???"
+            mark = ("ЕСТЬ" if tg is True else "нет" if tg is False
+                    else "есть, но давно не заходил" if tg == "idle" else "???")
             tglib.append_row(tglib.RESULTS,
                              [phone, "" if tg is None else str(tg).lower(), name, username,
-                              row.get("calls", ""), row.get("last_call", ""), now_iso(), acc["id"]],
+                              row.get("calls", ""), row.get("last_call", ""), now_iso(), acc["id"],
+                              "1" if kept else ""],
                              tglib.RESULTS_HEAD)
             # бронь НЕ снимаем по номеру: под параллельной работой освобождённый
             # номер успевал перехватить другой аккаунт, пока его список «уже
@@ -144,17 +159,22 @@ async def main():
     finally:
         await tglib.aclose(client)
 
-    say(f"\nготово: в Telegram {found} из {len(todo)}")
+    decided = found + idle + none_n
+    say(f"\nготово: в Telegram {found} из {decided}"
+        + (f", давно не заходили {idle}" if idle else "")
+        + (f"; ещё {ran - decided} не проверились — квота Telegram" if ran > decided else ""))
     say(f"результат: {tglib.RESULTS}")
 
     # что осталось в базе после этой пачки — считаем заново, по файлу:
     # рядом могли отработать другие аккаунты
     res2 = tglib.read_csv(tglib.RESULTS)
-    done2 = {r["phone"] for r in res2 if r.get("tg") in ("true", "false")}
+    done2 = {r["phone"] for r in res2 if r.get("tg") in ("true", "false", "idle")}
     tries2 = tglib.tries_by_phone(res2, done2)
     left = sum(1 for r in base if r["phone"] not in done2
                and tries2.get(r["phone"], 0) < MAX_TRIES)
-    tglib.state(done=ran, left=left, stop=stop, cooldown=cooldown)
+    # «сделано» — номера с ясным ответом: отказ по квоте работой не считается,
+    # иначе панель приняла бы неудачную пробу квоты за её возвращение
+    tglib.state(done=found + idle + none_n, left=left, stop=stop, cooldown=cooldown)
 
 
 asyncio.run(main())

@@ -16,6 +16,15 @@ auth.json
 numbers.csv
 results.csv
 drafts.csv
+members.csv
+chats.json
+warmup.csv
+warmup.json
+followup.csv
+message-parts.json
+mirror.json
+chat-list.txt
+warm-list.json
 replies.json
 claims.json
 claims.lock
@@ -36,3 +45,32 @@ __pycache__/
 voice.ogg
 voice.json
 .DS_Store
+leads.json
+leads-log.csv
+
+# ключи LLM и прочие секреты
+.env
+
+# ============================================================
+#  ДАННЫЕ ПРОФИЛЕЙ И РАБОТЫ (появились с профилями и ЕГРЮЛ)
+# ============================================================
+profiles.json
+router.json
+profiles/
+events.jsonl
+egrul.csv
+egrul-run.json
+egrul-*.log
+messages.csv
+auto-run.json
+auto-last.json
+followup-runs.json
+followup-texts.json
+base-set.json
+leads.json
+leads-log.csv
+leads-tpl.txt
+lead-chats.txt
+leads-sheet.txt
+mirror-names.txt
+avatars/

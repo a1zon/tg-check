@@ -77,6 +77,7 @@ async def main():
         if changed:
             me = await client.get_me()
             tglib.remember(acc, me)
+            await tglib.save_avatar(client, acc, me, force=True)
             say(f"\nтеперь: {me.first_name or ''} {me.last_name or ''}".rstrip()
                 + (f"  @{me.username}" if me.username else ""))
         else:

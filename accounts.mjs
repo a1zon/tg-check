@@ -15,7 +15,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-export const DIR = path.dirname(fileURLToPath(import.meta.url));
+// Папка данных профиля (реестр аккаунтов и сессии): её задаёт панель через TG_PANEL_DIR,
+// иначе — там же, где код.
+export const DIR = process.env.TG_PANEL_DIR
+  ? path.resolve(process.env.TG_PANEL_DIR)
+  : path.dirname(fileURLToPath(import.meta.url));
 const FILE = path.join(DIR, 'accounts.json');
 const LEGACY = 'tg-profile';
 
@@ -82,6 +86,13 @@ export function setAuthed(id, value) {
   return true;
 }
 
+/**
+ * Участвует ли аккаунт в рассылке. Новые заводятся только на прогрев и в
+ * рассылку переводятся руками, когда созреют. У старых записей роли нет —
+ * они работали в рассылке и до разделения, так и остаётся.
+ */
+export const inOutreach = (acc) => acc.role !== 'warm';
+
 /** id -> аккаунт. Без id берём первый: так старые запуски из терминала работают как раньше. */
 export function resolve(id) {
   const l = list();
@@ -95,7 +106,8 @@ export function add(title) {
   const l = list();
   const n = Math.max(0, ...l.map((a) => +(String(a.id).match(/\d+$/)?.[0] || 0))) + 1;
   const acc = { id: `a${n}`, title: (title || '').trim() || `Аккаунт ${n}`,
-                dir: path.join('accounts', `a${n}`), added: new Date().toISOString() };
+                dir: path.join('accounts', `a${n}`), added: new Date().toISOString(),
+                role: 'warm' };
   fs.mkdirSync(profilePath(acc), { recursive: true });
   l.push(acc);
   save(l);

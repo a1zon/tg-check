@@ -105,6 +105,25 @@ def main():
         say(f"через прокси:    {through}")
         same = through == mine
     except Exception as e:
+        # Продавцы пишут прокси одной строкой и почти никогда не говорят,
+        # какого он вида. Ошибиться протоколом легко, а выглядит это как
+        # «прокси не работает» — поэтому, прежде чем ругаться, молча пробуем
+        # остальные и, если какой-то подойдёт, говорим человеку какой.
+        for kind in ("socks5", "http", "socks4"):
+            if kind == proxy[0]:
+                continue
+            try:
+                other = (kind, *proxy[1:])
+                ip = through_proxy(other, "api.ipify.org", 443, "/?format=json")
+            except Exception:
+                continue
+            host, port = proxy[1], proxy[2]
+            tail = f":{proxy[4]}:{proxy[5]}" if len(proxy) > 4 else ""
+            say(f"через прокси:    не получилось как {proxy[0]}, "
+                f"а как {kind} — получилось ({ip})")
+            say(f"\n✕ это {kind}-прокси, а записан он как {proxy[0]}.")
+            say(f"  Впиши его так:  {kind}://{host}:{port}{tail}")
+            sys.exit(1)
         say(f"через прокси:    не получилось\n\n✕ {explain(str(e), proxy)}")
         sys.exit(1)
 

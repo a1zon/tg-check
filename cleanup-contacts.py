@@ -35,10 +35,16 @@ async def main():
             return
         # метка-из-цифр — наш след; чужие контакты (с настоящими именами)
         # не трогаем ни при каких условиях
+        # ждущих письма (их оставила проверка) не трогаем, если только их
+        # номер не назвали явно
+        keep = tglib.kept_waiting(acc["id"])
         victims = [u for u in res.users
                    if LABEL.match((u.first_name or "").strip())
                    and not (u.last_name or "").strip()
-                   and (not wanted or (u.first_name or "").strip() in wanted)]
+                   and (not wanted or (u.first_name or "").strip() in wanted)
+                   and (wanted or "".join(ch for ch in str(u.phone or "") if ch.isdigit()) not in keep)]
+        if keep and not wanted:
+            say(f"ждут письма и остаются в контактах: {len(keep)}")
         say(f"контактов всего: {len(res.users)} | наших меток: {len(victims)}")
         if not victims:
             return

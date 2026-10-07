@@ -12,7 +12,11 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
-const DIR = path.dirname(fileURLToPath(import.meta.url));
+// Папка данных профиля (вход в панель): её задаёт панель через TG_PANEL_DIR,
+// иначе — там же, где код.
+const DIR = process.env.TG_PANEL_DIR
+  ? path.resolve(process.env.TG_PANEL_DIR)
+  : path.dirname(fileURLToPath(import.meta.url));
 const FILE = path.join(DIR, 'auth.json');
 const DAYS = 14;                       // сколько живёт вход
 export const COOKIE = 'tgpanel';
@@ -24,11 +28,17 @@ export const configured = () => !!read()?.hash;
 const hash = (pass, salt) => crypto.scryptSync(String(pass), salt, 64, { N: 16384, r: 8, p: 1 });
 
 export function setPassword(user, pass) {
+  return setPasswordIn(DIR, user, pass);
+}
+
+/** То же, но для папки другого профиля: у каждого свой вход. */
+export function setPasswordIn(dir, user, pass) {
   const u = String(user || '').trim();
   if (!u) throw new Error('пустой логин');
   if (String(pass || '').length < 8) throw new Error('пароль короче восьми символов');
   const salt = crypto.randomBytes(16).toString('hex');
-  fs.writeFileSync(FILE, JSON.stringify({
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'auth.json'), JSON.stringify({
     user: u,
     salt,
     hash: hash(pass, salt).toString('hex'),
@@ -42,7 +52,20 @@ export function setPassword(user, pass) {
 
 /** Сверка пароля. Сравниваем за постоянное время — иначе подбор по задержке. */
 export function check(user, pass) {
-  const a = read();
+  return checkWith(read(), user, pass);
+}
+
+/**
+ * Сверка входа другого профиля: его auth.json лежит в своей папке с данными.
+ * Нужна привратнику — он один спрашивает логин, а профилей у него несколько.
+ */
+export function checkIn(dir, user, pass) {
+  try {
+    return checkWith(JSON.parse(fs.readFileSync(path.join(dir, 'auth.json'), 'utf8')), user, pass);
+  } catch { return false; }
+}
+
+function checkWith(a, user, pass) {
   if (!a?.hash) return false;
   const userOk = crypto.timingSafeEqual(
     crypto.createHash('sha256').update(String(user || '')).digest(),

@@ -11,15 +11,18 @@ const KEEP_WIPES = 20;   // столько последних чисток по�
 export function makeStats({ DIR, readCsv }) {
   const CACHE = path.join(DIR, 'stats-cache.json');
   const REPLIES = path.join(DIR, 'replies.json');
+  const RUNS = path.join(DIR, 'followup-runs.json');
 
   /** Текущие числа по файлам. */
   function counts() {
     const res = readCsv('results.csv');
     const dr = readCsv('drafts.csv');
     return {
-      checked: res.filter((r) => r.tg === 'true' || r.tg === 'false').length,
+      checked: res.filter((r) => ['true', 'false', 'idle'].includes(r.tg)).length,
       found: res.filter((r) => r.tg === 'true').length,
       none: res.filter((r) => r.tg === 'false').length,
+      // есть в Telegram, но давно не заходят — им не пишем
+      idle: res.filter((r) => r.tg === 'idle').length,
       drafts: dr.filter((r) => r.ok === 'true').length,
       sent: dr.filter((r) => r.sent === 'true').length,
     };
@@ -56,20 +59,37 @@ export function makeStats({ DIR, readCsv }) {
   }
 
   /**
-   * Кто ответил. Считает stats.py и кладёт в replies.json по аккаунтам —
-   * панель показывает это числом, чтобы не заставлять читать журнал.
+   * Кто ответил. Главный источник — followup.csv: его раз в полчаса пополняет
+   * автопрогон («Смотрит ответы»). replies.json пишет только ручная «Сводка»,
+   * поэтому по нему одному счётчик неделями стоял на месте.
+   * checkedAt — когда автопрогон последний раз заходил в диалоги
+   * (followup-runs.json): так «0 ответов» отличается от «ещё не проверяли».
    */
   function replies() {
-    let data = {};
-    try { data = JSON.parse(fs.readFileSync(REPLIES, 'utf8')) || {}; }
-    catch { return { n: 0, list: [], at: '' }; }
     const seen = new Map();
     let at = '';
-    for (const v of Object.values(data)) {
-      if (v?.at && v.at > at) at = v.at;
-      for (const r of v?.replies || []) if (r?.who && !seen.has(r.who)) seen.set(r.who, r);
+    for (const r of readCsv('followup.csv')) {
+      if (!r.key || seen.has(r.key)) continue;
+      seen.set(r.key, { who: r.key, text: r.text || '', verdict: r.verdict, account: r.account, at: r.at });
+      if (r.at > at) at = r.at;
     }
-    return { n: seen.size, at, list: [...seen.values()].slice(0, 30) };
+    try {
+      const data = JSON.parse(fs.readFileSync(REPLIES, 'utf8')) || {};
+      for (const v of Object.values(data)) {
+        if (v?.at && v.at > at) at = v.at;
+        for (const r of v?.replies || []) if (r?.who && !seen.has(r.who)) seen.set(r.who, r);
+      }
+    } catch {}
+    let runs = {};
+    try { runs = JSON.parse(fs.readFileSync(RUNS, 'utf8')) || {}; } catch {}
+    const checks = Object.values(runs).map((v) => v?.at).filter(Boolean).sort();
+    const hourAgo = new Date(Date.now() - 3600_000).toISOString();
+    return {
+      n: seen.size, at, list: [...seen.values()].slice(-30).reverse(),
+      checkedAt: checks.at(-1) || '',
+      checkedLastHour: checks.filter((t) => t >= hourAgo).length,
+      runs,
+    };
   }
 
   return { counts, fold, total, replies };

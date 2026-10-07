@@ -20,6 +20,9 @@
          background:var(--acc);color:#fff;cursor:pointer}
   button:disabled{opacity:.5;cursor:default}
   .err{color:var(--no);font-size:13px;margin:12px 0 0;min-height:18px}
+  .profs{margin:16px 0 0;padding:14px 0 0;border-top:1px solid var(--line);color:var(--mut);font-size:12.5px}
+  .profs b{color:var(--ink);font-weight:600}
+  .profs span{display:inline-block;margin-right:10px}
 </style>
 <form id="f">
   <h1>Telegram — панель</h1>
@@ -30,8 +33,19 @@
   <input id="p" name="password" type="password" autocomplete="current-password" required>
   <button id="b">Войти</button>
   <div class="err" id="e"></div>
+  <div class="profs" id="profs" hidden></div>
 </form>
 <script>
+// Какие профили есть. У каждого свой логин — отсюда видно, куда можно зайти.
+fetch('/api/profiles').then((r) => r.json()).then((list) => {
+  if (!Array.isArray(list) || list.length < 2) return;
+  const box = document.querySelector('#profs');
+  box.innerHTML = 'Профили на этой панели: ' + list.map((p) =>
+    `<span><b>${String(p.title).replace(/[&<>"]/g, '')}</b></span>`).join('') +
+    '<br>В каждый — свой логин.';
+  box.hidden = false;
+}).catch(() => {});
+
 const f = document.querySelector('#f'), e = document.querySelector('#e'), b = document.querySelector('#b');
 f.onsubmit = async (ev) => {
   ev.preventDefault();

@@ -66,8 +66,11 @@ export function unpackTdata(zipFile, workdir, tmpRoot) {
     } catch {}
     const found = findTdata(tmp);
     if (!found) throw new Error('внутри архива нет папки tdata');
-    fs.rmSync(path.join(workdir, 'tdata'), { recursive: true, force: true });
-    fs.cpSync(found, path.join(workdir, 'tdata'), { recursive: true });
+    // Файлы аккаунта ДОКЛАДЫВАЕМ, а не заменяем папку целиком: рядом лежат
+    // настройки десктопа (tdata/settingss) с уже прописанным прокси, а в архиве
+    // их нет. Снесём папку — и шаг «пропиши прокси» придётся делать заново,
+    // а аккаунт выйдет в сеть напрямую.
+    fs.cpSync(found, path.join(workdir, 'tdata'), { recursive: true, force: true });
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }

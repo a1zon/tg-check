@@ -51,9 +51,11 @@ async def main():
     dest.parent.mkdir(parents=True, exist_ok=True)
     say(f"аккаунт: {acc['title']}  |  {tglib.proxy_label(acc.get('proxy'))}  |  Telethon")
 
+    dev = tglib.device_for(acc)
+    say(f"устройство: {dev['device_model']} · {dev['system_version']} · Telegram {dev['app_version']}")
     existed = dest.exists()
     client = TelegramClient(str(dest.with_suffix("")), tglib.API_ID, tglib.API_HASH,
-                            proxy=tglib.parse_proxy(acc.get("proxy")), **tglib.DEVICE)
+                            proxy=tglib.parse_proxy(acc.get("proxy")), **dev)
     try:
         await client.connect()
     except (OSError, asyncio.TimeoutError) as e:

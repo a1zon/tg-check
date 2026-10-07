@@ -20,8 +20,20 @@ SRC = DIR / "numbers.csv"
 RES = DIR / "results.csv"
 OUT = DIR / "База_Telegram.xlsx"
 
-HEAD = ["Номер", "Звонков", "Последний звонок", "Длит. всего, с",
+HEAD = ["Кто", "Звонков", "Последний звонок", "Длит. всего, с",
         "Telegram", "Имя в TG", "Проверен"]
+
+
+def whole(v):
+    """
+    Число из ячейки. У людей, взятых из чатов, звонков и длительности нет
+    вовсе — там пусто, и это не ошибка: в базе рядом с номерами теперь живут
+    получатели без номера (ключ @username или id:<id>).
+    """
+    try:
+        return int(float(v))
+    except (TypeError, ValueError):
+        return 0
 
 GREEN = PatternFill("solid", fgColor="C6EFCE")
 GREY = PatternFill("solid", fgColor="EDEDED")
@@ -63,8 +75,8 @@ def main() -> None:
             status, name, when = "?", "", res.get("checked_at", "")[:19]
 
         stats[status if status in stats else ""] += 1
-        ws.append([r["phone"], int(r["calls"]), r["last_call"],
-                   int(r["total_sec"]), status, name, when])
+        ws.append([r["phone"], whole(r.get("calls")), r.get("last_call", ""),
+                   whole(r.get("total_sec")), status, name, when])
 
         row = ws.max_row
         if status == "ЕСТЬ":
@@ -81,7 +93,9 @@ def main() -> None:
 
     wb.save(OUT)
 
-    print(f"номеров в базе:      {len(base)}")
+    from_chats = sum(1 for r in base if not str(r.get("phone", "")).startswith("+"))
+    print(f"получателей в базе:  {len(base)}"
+          + (f" (из них без номера, из чатов: {from_chats})" if from_chats else ""))
     print(f"  проверено:         {len(checked)}")
     print(f"    есть в Telegram: {stats['ЕСТЬ']}")
     print(f"    нет:             {stats['нет']}")

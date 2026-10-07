@@ -47,6 +47,41 @@ def read_session_file(path: Path):
         db.close()
 
 
+# Как продавцы называют поля устройства в своих .json — у каждого авторегера
+# свой словарь, поэтому смотрим на все ходовые написания
+DEV_KEYS = {
+    "device_model": ("device_model", "device", "model"),
+    "system_version": ("system_version", "sdk", "system", "os"),
+    "app_version": ("app_version", "app", "version"),
+    "lang_code": ("lang_code", "lang", "language"),
+    "system_lang_code": ("system_lang_code", "system_lang"),
+}
+
+
+def device_from_json(path: Path):
+    """
+    Родные параметры устройства из .json, который идёт рядом с .session.
+
+    Заходить купленной сессией под другим устройством нельзя: для Telegram
+    это тот же аккаунт, внезапно сменивший телефон. Поэтому, если продавец
+    приложил родные данные, берём их, а не придумываем свои.
+    """
+    try:
+        raw = json.loads(path.read_text("utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    out = {}
+    for field, names in DEV_KEYS.items():
+        for n in names:
+            v = raw.get(n)
+            if isinstance(v, (str, int)) and str(v).strip():
+                out[field] = str(v).strip()
+                break
+    return out
+
+
 def unpack(path: Path, tmp: Path):
     """.session часто продают в архиве вместе с .json — находим пару сами."""
     if path.is_file() and zipfile.is_zipfile(path):
@@ -115,8 +150,19 @@ async def main():
         dc, key, uid = read_tdata(src_tdata)
         kind = "TDATA"
     elif src_session:
-        dc, key, uid = read_session_file(unpack(Path(src_session).expanduser(), tmp))
+        sess = unpack(Path(src_session).expanduser(), tmp)
+        dc, key, uid = read_session_file(sess)
         kind = "session"
+        # рядом с .session продавцы кладут .json с родными параметрами
+        # устройства — заходить под своими нельзя, Telegram увидит смену
+        for cand in (sess.with_suffix(".json"), *sorted(sess.parent.rglob("*.json"))):
+            dev = device_from_json(cand) if cand.exists() else {}
+            if dev.get("device_model"):
+                tglib.set_field(acc["id"], device=dev)
+                acc["device"] = dev
+                tglib.say(f"устройство из {cand.name}: {dev['device_model']} · "
+                          f"{dev.get('system_version', '?')} · Telegram {dev.get('app_version', '?')}")
+                break
     elif src_key:
         dc, key, uid = int(tglib.arg("dc", 0)), bytes.fromhex(src_key), int(tglib.arg("user-id", 0))
         kind = "ключ"
@@ -134,10 +180,24 @@ async def main():
     write_session(dest, dc, key)
 
     # проверяем живьём: сессия засчитывается, только если Telegram ответил
+    from telethon.errors.common import AuthKeyNotFound
+
+    tglib.quiet_telethon()
     client = tglib.make_client(acc)
     try:
         try:
             await client.connect()
+        except AuthKeyNotFound:
+            # Telegram отвечает «такого ключа не знаю»: сессия мертва, отозвана
+            # в «Устройствах» или аккаунт забанен. Это НЕ повод показывать
+            # трейсбек и уж тем более не повод оставлять мёртвый файл — иначе
+            # панель считает аккаунт подключённым, а войти им нельзя.
+            dest.unlink(missing_ok=True)
+            tglib.set_field(acc["id"], authed=False)
+            raise SystemExit(
+                "Telegram не знает этот ключ — сессия мертва.\n"
+                "Так бывает, если её отозвали в «Устройствах», аккаунт забанен "
+                "или файл уже использовали в другом софте.")
         except (OSError, asyncio.TimeoutError) as e:
             # связи нет — про ключ ничего не известно. Непроверенную сессию
             # не оставляем: панель показала бы аккаунт рабочим. Файл-источник
@@ -145,6 +205,13 @@ async def main():
             if not existed:
                 dest.unlink(missing_ok=True)
             raise SystemExit(f"{type(e).__name__}: " + tglib.NO_NET % acc["id"])
+        except Exception as e:
+            # что угодно ещё: без объяснения оставлять нельзя, и мёртвую
+            # сессию на диске — тоже
+            if not existed:
+                dest.unlink(missing_ok=True)
+            raise SystemExit(f"не вышло подключить сессию — "
+                             f"{type(e).__name__}: {str(e).splitlines()[0][:120]}")
         if not await client.is_user_authorized():
             dest.unlink(missing_ok=True)
             tglib.set_field(acc["id"], authed=False)

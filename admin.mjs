@@ -20,24 +20,110 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn, exec, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import crypto from 'node:crypto';
 import * as accounts from './accounts.mjs';
 import * as claims from './claims.mjs';
 import * as auth from './auth.mjs';
 import { makeReadCsv } from './server/csv.mjs';
 import { makeStats } from './server/stats.mjs';
 import { makeWarmup } from './server/warmup.mjs';
+import { makeEvents } from './server/events.mjs';
+import { makeResults } from './server/results.mjs';
+import { makeProxyGuard } from './server/proxyguard.mjs';
 import * as desktop from './server/desktop.mjs';
+import { buildKit, kitProxy } from './server/kit.mjs';
+import * as vercel from './server/vercel.mjs';
 
-const DIR = path.dirname(fileURLToPath(import.meta.url));
+// Код один на всех, данные у каждого профиля свои.
+//   CODE — где лежит сама панель: задачи на Python, venv, web, kit.
+//   DIR  — папка данных профиля: реестр аккаунтов, сессии, база, результаты.
+// Без TG_PANEL_DIR панель работает по-старому: данные там же, где код.
+const CODE = path.dirname(fileURLToPath(import.meta.url));
+const DIR = process.env.TG_PANEL_DIR ? path.resolve(process.env.TG_PANEL_DIR) : CODE;
+fs.mkdirSync(DIR, { recursive: true });
+
+// Ключ привратника: есть — значит панель работает профилем внутри общей
+// панели, и запросы с этим ключом считаются вошедшими.
+const INNER = process.env.TG_PANEL_TOKEN || '';
+const innerOk = (given) => {
+  if (!INNER || typeof given !== 'string' || given.length !== INNER.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(given), Buffer.from(INNER));
+};
 const arg = (n, d) => { const i = process.argv.indexOf(`--${n}`); return i === -1 ? d : process.argv[i + 1]; };
 
 // Модули собираем здесь: им нужны папка панели и чтение CSV, а решать, где
 // что лежит, — дело точки входа, а не самих модулей.
-const readCsv = makeReadCsv(DIR);
+const readRaw = makeReadCsv(DIR);
+
+/**
+ * Два независимых набора получателей: «по номерам» (база из xlsx, файлы в
+ * корне) и «по чатам» (люди из разбора чатов, папка chats/). Раньше они
+ * лежали вместе, и рассылка по базе клиентов заодно писала тысячам людей из
+ * чатов. Проверка, очередь и счётчики видят только выбранный набор.
+ * История отправок при этом общая там, где речь об аккаунте, а не о базе:
+ * дневной лимит, второе письмо и счётчик зеркал считают оба набора.
+ */
+const SET_FILES = new Set(['numbers.csv', 'results.csv', 'drafts.csv']);
+const BASE_SET_FILE = path.join(DIR, 'base-set.json');
+let baseSet = 'phones';
+try { if (JSON.parse(fs.readFileSync(BASE_SET_FILE, 'utf8')).set === 'chats') baseSet = 'chats'; } catch {}
+const setPath = (name, set = baseSet) => (set === 'chats' && SET_FILES.has(name) ? path.join('chats', name) : name);
+const readCsv = (name) => readRaw(setPath(name));
+const readAll = (name) => (SET_FILES.has(name)
+  ? [...readRaw(name), ...readRaw(path.join('chats', name))] : readRaw(name));
+function setBaseSet(set) {
+  baseSet = set === 'chats' ? 'chats' : 'phones';
+  fs.mkdirSync(path.join(DIR, 'chats'), { recursive: true });
+  fs.writeFileSync(BASE_SET_FILE, JSON.stringify({ set: baseSet }) + '\n');
+}
+
+// часовой пояс базы: по нему рабочее время рассылки и время в ленте событий
+const WORK_TZ = 'Asia/Yekaterinburg';
+// в журнал задачи пишут аккаунт ярлыком (номером) — в ленте показываем имя
+const events = makeEvents({ DIR, tz: WORK_TZ, nameOf: (who) => {
+  const a = accounts.list().find((x) => x.title === who || x.id === who);
+  return a ? (a.name || a.title) : who;
+} });
+// тексты старых ответов, которые followup.py дотянул из диалогов (у ранних строк followup.csv их нет)
+const oldTexts = () => { try { return JSON.parse(fs.readFileSync(path.join(DIR, 'followup-texts.json'), 'utf8')) || {}; } catch { return {}; } };
+const results = makeResults({ readRaw, tz: WORK_TZ, replyOf: (k) => events.replyOf(k), oldTexts });
+
+/**
+ * Разовая разметка ролей для аккаунтов, заведённых до разделения прогрева и
+ * рассылки: кто уже писал людям — остаётся в рассылке, кто не писал ни разу —
+ * только прогрев. Иначе свежие аккаунты молча попали бы в рассылку.
+ */
+let wroteCache = { at: 0, ids: new Set() };
+/** Кто из аккаунтов хоть раз писал людям (оба набора). Кэш на минуту: зовётся каждый тик. */
+function wroteAny() {
+  if (Date.now() - wroteCache.at > 60_000) {
+    wroteCache = { at: Date.now(), ids: new Set([...readRaw('drafts.csv'), ...readRaw(path.join('chats', 'drafts.csv'))]
+      .filter((r) => r.sent === 'true' || r.ok === 'true').map((r) => r.account)) };
+  }
+  return wroteCache.ids;
+}
+for (const a of accounts.list()) {
+  if (!a.role) accounts.setField(a.id, { role: wroteAny().has(a.id) ? 'send' : 'warm' });
+}
+
+const proxyOf = (id) => accounts.list().find((a) => a.id === id)?.proxy || '';
+const proxyGuard = makeProxyGuard({
+  parseProxy: accounts.parseProxy,
+  label: accounts.proxyLabel,
+  proxies: () => accounts.list().filter((a) => accounts.hasSession(a)).map((a) => a.proxy).filter(Boolean),
+  rotateLink: () => warmup.rotate || auto.rotate || '',
+  rotateIp: (url) => rotateIp(url),
+  note: (icon, text) => events.note(icon, text),
+});
+
 const stats = makeStats({ DIR, readCsv });
 const { counts, replies, total: statsTotal } = stats;
 const statsFold = stats.fold;
-const { warm, doneToday } = makeWarmup({ readCsv, accounts });
+// чистка уносит оба набора — и в «за всё время» должны уйти числа обоих
+const countsAll = makeStats({ DIR, readCsv: readAll }).counts;
+const { warm, doneToday, doneTodayAll, setMaxCap, getMaxCap, getPlan,
+        checksOf, setCheckMax, getCheckMax,
+        setWarmDays, getWarmDays } = makeWarmup({ readCsv: readAll, accounts });
 const { TDESK_HINT, tdesktopApp, launchDesktop, unpackTdata } = desktop;
 const DESKTOP = path.join(DIR, 'desktop');
 
@@ -55,6 +141,8 @@ const LOCAL = /^(127\.|::1|localhost$)/.test(HOST);
  */
 const TASKS = {
   login:  { title: 'Вход в Telegram',  cmd: ['login-qr.py'],        py: true },
+  // вход по номеру: код панель спрашивает у человека и передаёт скрипту файлом
+  code:   { title: 'Вход по коду',     cmd: ['login-code.py'],      py: true, phone: true },
   check:  { title: 'Проверка базы',    cmd: ['check-batch.py'],     py: true, opts: true },
   drafts: { title: 'Черновики',        cmd: ['draft-messages.py'],  py: true, opts: true, send: true, voice: true },
   stats:  { title: 'Сводка',           cmd: ['stats.py'],           py: true },
@@ -64,12 +152,54 @@ const TASKS = {
   // заново сканировать QR не нужно
   migrate:{ title: 'Перенос сессии',   cmd: ['import-account.py'],  py: true,
             extra: ['--from-profile'] },
+  // разбор чатов: получатели не из таблицы с номерами, а прямо из групп —
+  // одной ссылкой либо целой папкой Telegram
+  parse:  { title: 'Разбор чатов',     cmd: ['parse-chat.py'],      py: true, chat: true },
+  // прогрев поведением: одно человеческое действие за запуск
+  warmup: { title: 'Прогрев',          cmd: ['warmup-activity.py'], py: true },
+  // второй шаг воронки: ссылка тем, кто ответил на первое письмо
+  // по сути это «заглянуть, кто ответил»: пишет задача, только если ответили «да»
+  follow: { title: 'Смотрит ответы',   cmd: ['followup.py'],        py: true,
+            opts: true, send: true },
+  // поиск горячих лидов: читает сообщения чатов, ведёт карточки (leads.json),
+  // генерит первое письмо с отсылкой на чат. chat:true даёт ту же обвязку
+  // folder/chat/list/limit/join, что и у разбора
+  leads:  { title: 'Поиск лидов',      cmd: ['scan-leads.py'],      py: true, chat: true },
+  // ЕГРЮЛ: сборщик спрашивает @egrul_bot про ИНН из таблицы и достаёт ЛПР
+  egrul:  { title: 'ЕГРЮЛ',            cmd: ['egrul-collect.py'],   py: true, opts: true },
+};
+
+/**
+ * Получатель в наших CSV лежит под колонкой phone, но это не всегда номер:
+ * у людей из разбора чата там @username или id:<id> (см. «Ключ получателя»
+ * в tglib.py). Проверять по номеру их не нужно — писать можно сразу.
+ */
+const isPhone = (key) => String(key || '').startsWith('+');
+
+/**
+ * Аккаунт на карантине: @SpamBot сказал, что на нём ограничение.
+ *
+ * Отметку ставит сама задача, когда спрашивает бота перед заходом. Держим
+ * её сутки: ограничения Telegram обычно снимаются по времени, и вечно
+ * вычёркивать аккаунт из-за одного вчерашнего вердикта неправильно.
+ */
+const QUARANTINE = 24 * 3600 * 1000;
+// SpamBot называет дату снятия — держим ровно до неё; бессрочное — пока бот
+// не скажет «свободен»; ответ без даты и без ясности — по-старому, сутки
+const inQuarantine = (acc) => {
+  if (acc.spamOk !== false || !acc.spamAt) return false;
+  if (acc.spamUntil) return Date.now() < Date.parse(acc.spamUntil);
+  if (acc.spamKind === 'perm') return true;
+  return Date.now() - Date.parse(acc.spamAt) < QUARANTINE;
 };
 
 /** Что сейчас крутится: ключ — аккаунт (или '_base' для разбора файла). */
 const running = new Map();
 const log = [];                       // кольцевой буфер строк
-const push = (line) => { log.push(line); if (log.length > 1000) log.shift(); };
+const push = (line) => {
+  log.push(line); if (log.length > 1000) log.shift();
+  events.fromPanel(line);
+};
 
 /** Метка строки с итогом пачки: её печатает tglib.state() в конце задачи. */
 const STATE_MARK = '\u2301STATE ';
@@ -96,12 +226,14 @@ function wipeAll() {
   const wipe = (name) => { try { fs.rmSync(path.join(DIR, name), { recursive: true, force: true }); } catch {} };
 
   // числа снимаем ДО того, как унести файлы: после переноса считать будет нечего
-  const now = counts();
+  const now = countsAll();
   const had = accounts.list().length;
 
   let saved = 0;
-  for (const f of ['numbers.csv', 'base.json', 'results.csv', 'drafts.csv',
-                   'accounts.json', 'sessions', 'uploads', 'voice.ogg', 'voice.json', 'replies.json']) {
+  for (const f of ['numbers.csv', 'base.json', 'results.csv', 'drafts.csv', 'members.csv',
+                   'chats.json', 'warmup.csv', 'warmup.json', 'followup.csv', 'mirror.json',
+                   'accounts.json', 'sessions', 'uploads', 'voice.ogg', 'voice.json', 'replies.json',
+                   'chats', 'base-set.json']) {
     if (move(f)) saved++;
   }
   for (const f of ['tg-profile', 'accounts', 'qr', 'claims.json', 'desktop']) wipe(f);
@@ -125,9 +257,54 @@ function wipeAll() {
  * Запуск дочернего процесса под ключом. Аккаунты идут параллельно, поэтому
  * вывод помечаем именем — иначе в общем логе не разобрать, кто что пишет.
  */
-function run(key, tag, title, cmd, args, onDone) {
-  const child = spawn(cmd, args, { cwd: DIR });
-  const rec = { child, title, since: Date.now(), state: null };
+/**
+ * Ручные действия с аккаунтами (имя, аватар, вход, сессия…) ставят прогон и
+ * прогрев на паузу: новые задачи они не берут, пока ты работаешь руками, и
+ * ещё немного после — чтобы ручное действие и рассылка не шли одновременно
+ * с одного адреса. Кто запустил задачу, помечаем при запуске.
+ */
+let launchedBy = 'manual';                 // auto | warm | manual
+const MANUAL_GRACE = 2 * 60_000;           // после ручного действия ждём ещё столько
+let manualUntil = 0;
+let manualNoted = false;
+const manualBusy = () => [...running.values()].some((r) => r.by === 'manual')
+  || Date.now() < manualUntil;
+/**
+ * Автоскан лидов (lead-watch.sh, systemd-таймер) ходит в Telegram через тот же
+ * общий прокси. Пока он работает, держит .lead-watch.lock — панель в это время
+ * не запускает задачи и не меняет IP: иначе два аккаунта сидели бы на одном
+ * адресе, а смена IP рвала бы скану соединение.
+ */
+function leadScanBusy() {
+  try {
+    const pid = Number(fs.readFileSync(path.join(DIR, '.lead-watch.lock'), 'utf8'));
+    if (!pid) return false;
+    process.kill(pid, 0);          // жив ли процесс скана; мёртвый замок не держит
+    return true;
+  } catch (e) {
+    return e?.code === 'EPERM';    // процесс есть, но чужой (скан идёт от root) — значит жив
+  }
+}
+
+function manualHold() {
+  if (manualBusy()) {
+    if (!manualNoted) {
+      manualNoted = true;
+      events.note('⏸', 'прогон на паузе — идёт ручное действие с аккаунтами');
+    }
+    return true;
+  }
+  if (manualNoted) {
+    manualNoted = false;
+    events.note('▶', 'ручное действие закончено — продолжаю');
+  }
+  return false;
+}
+
+function run(key, tag, title, cmd, args, onDone, set = baseSet) {
+  // Python-задаче говорим, с каким набором получателей работать (tglib.py)
+  const child = spawn(cmd, args, { cwd: DIR, env: { ...process.env, TG_SET: set } });
+  const rec = { child, title, since: Date.now(), state: null, by: launchedBy };
   running.set(key, rec);
   push(`\n▶ ${title}: ${args.map((a) => path.basename(a)).join(' ')}`);
   // Последняя строка задачи — итог для панели, а не для человека: сколько
@@ -139,18 +316,21 @@ function run(key, tag, title, cmd, args, onDone) {
       return;
     }
     push(`[${tag}] ${l}`);
+    events.fromTask(tag, title, l);
   });
   child.stdout.on('data', feed);
   child.stderr.on('data', feed);
   child.on('close', (code) => {
     push(`■ ${title} завершено (код ${code})`);
     running.delete(key);
+    if (rec.by === 'manual') manualUntil = Date.now() + MANUAL_GRACE;
     onDone?.(code, rec.state);
   });
 }
 
 function start(name, opts, onDone) {
-  const { account, limit, delay, send, voice } = opts;
+  const { account, limit, delay, send, voice, chat, folder, again, onlyUser,
+          join, phone, list, days } = opts;   // остальные паузы берутся из opts по месту
   const t = TASKS[name];
   if (!t) return { ok: false, reason: 'неизвестная задача' };
   let acc;
@@ -160,22 +340,59 @@ function start(name, opts, onDone) {
 
   // задачи, которым нужна живая сессия: без входа запускать бессмысленно —
   // раньше это молча падало «нет сессии» и путало (проверка/рассылка вхолостую)
-  const NEEDS_SESSION = ['check', 'drafts', 'stats', 'clean'];
+  const NEEDS_SESSION = ['check', 'drafts', 'stats', 'clean', 'parse', 'follow'];
   if (NEEDS_SESSION.includes(name) && !accounts.hasSession(acc)) {
     return { ok: false, reason: `«${acc.title}» не вошёл — сначала войди по QR или залей сессию (шаг 1)` };
   }
 
+  // карантин: Telegram уже сделал этому аккаунту замечание. Писать с него —
+  // значит дожать до вечной блокировки. Проверка/разбор/прогрев остаются:
+  // они не рассылка, и через них аккаунт как раз отлежится
+  // отвечать тем, кто написал сам, Telegram под ограничением разрешает —
+  // второе письмо не блокируем, только первые письма незнакомым
+  if (name === 'drafts' && inQuarantine(acc)) {
+    return { ok: false, reason: `«${acc.title}» на карантине: ${acc.spam || 'ограничение от Telegram'}. ` +
+      'Рассылка с него не идёт, база остаётся на месте.' };
+  }
+
   // отлёжка: пока аккаунт «молодой», его нельзя дёргать даже вручную —
   // ради этого прогрев и заводился. Отключается флагом warm:false.
-  if (['check', 'drafts'].includes(name) && opts.warm !== false) {
+  let sendLimit = limit;
+  if (['check', 'drafts', 'follow'].includes(name)) {
     const w = warm(acc);
-    if (w.resting) {
+    // отлёжку можно отключить галкой (для зрелых аккаунтов), а дневной потолок — нет
+    if (opts.warm !== false && w.resting) {
       return { ok: false, reason: `«${acc.title}» на отлёжке — ещё ${fmtLeft(w.restLeft)}. ` +
         'Свежий аккаунт первые сутки не трогаем, иначе Telegram его забанит.' };
     }
-    if (name === 'drafts' && w.left <= 0) {
-      return { ok: false, reason: `«${acc.title}» выбрал дневной предел прогрева ` +
-        `(${w.cap} в сутки, день ${w.day}). Вернётся завтра.` };
+    // у проверки номеров свой дневной предел: это «добавить в контакты», и
+    // упираться в квоту Telegram на это регулярно нельзя
+    if (name === 'check') {
+      const c = checksOf(acc.id);
+      if (c.left <= 0) {
+        return { ok: false, reason: `«${acc.title}» проверил на сегодня ${c.today} из ${c.cap} номеров. Продолжит завтра.` };
+      }
+      sendLimit = Math.min(Number(limit) || c.left, c.left);
+    }
+    // дневной предел — про первые письма незнакомым. Второе письмо — ответ
+    // тому, кто сам написал «да»: ему не ждать до завтра, и отказ тут считался
+    // бы в автопрогоне сбоем — с повтором каждые 5 минут и выбыванием аккаунта
+    if (name === 'drafts') {
+      if (w.left <= 0) {
+        return { ok: false, reason: `«${acc.title}» выбрал дневной предел ` +
+          `(${w.cap} в сутки, день ${w.day}). Вернётся завтра.` };
+      }
+      // ручной заход не шлёт больше дневного остатка — держим ВСЕГДА
+      sendLimit = Math.min(Number(limit) || w.left, w.left);
+    }
+  }
+
+  // пустой текст = холостой прогон, который жжёт номера: не запускаем
+  if (['drafts', 'follow'].includes(name)) {
+    const mf = path.join(DIR, name === 'follow' ? 'message2.txt' : 'message.txt');
+    const txt = fs.existsSync(mf) ? fs.readFileSync(mf, 'utf8').trim() : '';
+    if (!txt) {
+      return { ok: false, reason: 'сначала напиши текст сообщения — иначе рассылка пройдёт вхолостую и сожжёт номера' };
     }
   }
 
@@ -184,17 +401,351 @@ function start(name, opts, onDone) {
     return { ok: false, reason: 'сначала загрузи голосовое (шаг 4)' };
   }
 
-  const args = [path.join(DIR, ...t.cmd), '--account', acc.id, ...(t.extra || [])];
-  if (t.opts) {
-    if (limit) args.push('--limit', String(limit));
-    if (delay) args.push('--delay', String(delay));
+  // разбор без цели запускать некуда: либо ссылка на чат, либо папка Telegram
+  if (t.chat && !String(chat || '').trim() && !String(folder || '').trim() && !String(list || '').trim()) {
+    return { ok: false, reason: 'вставь ссылку на чат или назови папку Telegram' };
   }
+  if (t.phone && !/^\+?\d{7,15}$/.test(String(phone || '').replace(/[\s()-]/g, ''))) {
+    return { ok: false, reason: 'нужен номер телефона аккаунта, например +79001112233' };
+  }
+
+  const args = [path.join(CODE, ...t.cmd), '--account', acc.id, ...(t.extra || [])];
+  if (t.opts) {
+    if (sendLimit) args.push('--limit', String(sendLimit));
+    if (delay) args.push('--delay', String(delay));
+    if (opts.delayMax) args.push('--delay-max', String(opts.delayMax));
+    if (opts.hold) args.push('--hold', String(opts.hold));
+    if (opts.holdMax) args.push('--hold-max', String(opts.holdMax));
+  }
+  if (t.chat) {
+    if (String(list || '').trim()) {
+      // список ссылок пишем в файл — их бывают десятки, в командную строку
+      // столько не влезет, да и незачем
+      const f = path.join(DIR, 'chat-list.txt');
+      fs.writeFileSync(f, String(list).trim() + '\n');
+      args.push('--list', f);
+    } else if (String(folder || '').trim()) {
+      args.push('--folder', String(folder).trim());
+    } else {
+      args.push('--chat', String(chat).trim());
+    }
+    if (limit) args.push('--limit', String(limit));
+    if (days) args.push('--days', String(days));
+    if (join) args.push('--join');
+    if (again) args.push('--again');
+    if (onlyUser) args.push('--only-username');
+  }
+  if (t.phone) args.push('--phone', String(phone).replace(/[\s()-]/g, ''));
   if (t.voice && voice) args.push('--voice');
   else if (t.send && send) args.push('--send');
-  const tag = t.voice && voice ? ' (голосовое)' : t.send && send ? ' (с отправкой)' : '';
+  // «(с отправкой)» — только у рассылки: у проверки ответов это читалось так,
+  // будто аккаунт пишет людям, хотя он лишь смотрит диалоги
+  const tag = t.voice && voice ? ' (голосовое)' : t.send && send && name !== 'follow' ? ' (с отправкой)' : '';
+  // набор можно задать явно: проба квоты идёт по базе номеров, даже когда
+  // рассылка сейчас работает по чатам
   run(acc.id, acc.title, `${t.title} — ${acc.title}${tag}`,
-      t.py ? pythonCmd() : 'node', args, onDone);
+      t.py ? pythonCmd() : 'node', args, onDone, opts.set || baseSet);
   return { ok: true };
+}
+
+/* ------------------------------------------------------- прогрев поведением
+ *
+ * Свежий аккаунт, который сразу пошёл писать незнакомым, живёт недолго. Живой
+ * человек сначала на что-то подписан, что-то читает, где-то ставит реакции и
+ * с кем-то переписывается — и только потом пишет по делу. Этим узлом панель
+ * и занимается: водит аккаунты по обычным делам, пока они молодые.
+ *
+ * Ритм намеренно медленный и рваный, как у человека:
+ *   • одно действие за запуск — пачками нельзя, это первый признак робота;
+ *   • между действиями внутри сессии 2–4 минуты;
+ *   • после 2–3 действий аккаунт уходит спать на 2–4 часа;
+ *   • первые сутки не делает вообще ничего.
+ *
+ * Сколько чего в сутки — решает сам скрипт по возрасту аккаунта; панель только
+ * выдерживает паузы и следит, чтобы аккаунты не шли одновременно, когда прокси
+ * один на всех.
+ */
+const WARM_FILE = path.join(DIR, 'warmup.json');
+const WARM_TICK = 30_000;                 // как часто смотрим, кому пора
+const WARM_GAP = [120, 240];              // пауза между действиями, сек
+const WARM_NAP = [2 * 3600, 4 * 3600];    // сон между сессиями, сек
+const WARM_SESSION = [2, 3];              // столько действий в одной сессии
+
+const rnd = (a, b) => Math.round(a + Math.random() * (b - a));
+
+const warmup = { on: false, per: new Map(), timer: null,
+                 rotate: '', rotateWait: 10, fresh: false, holdUntil: 0,
+                 lastId: '', pending: '' };
+
+function warmSave() {
+  const per = {};
+  for (const [id, v] of warmup.per) per[id] = v;
+  try {
+    fs.writeFileSync(WARM_FILE, JSON.stringify(
+      { on: warmup.on, rotate: warmup.rotate, rotateWait: warmup.rotateWait,
+        maxCap: getMaxCap(), checkMax: getCheckMax(), warmDays: getWarmDays(),
+        per }, null, 2) + '\n');
+  } catch {}
+}
+
+function warmLoad() {
+  let existed = false;
+  try {
+    const d = JSON.parse(fs.readFileSync(WARM_FILE, 'utf8'));
+    existed = true;
+    warmup.on = !!d.on;
+    warmup.rotate = String(d.rotate || '');
+    warmup.rotateWait = Number(d.rotateWait) || 10;
+    warmup.per = new Map(Object.entries(d.per || {}));
+    setMaxCap(Number(d.maxCap ?? d.dailyCap) || 0);
+    if (d.checkMax) setCheckMax(d.checkMax);
+    if (d.warmDays) setWarmDays(d.warmDays);
+  } catch {}
+  // на свежей установке прогрев включаем сам: у новых аккаунтов сутки отлёжки,
+  // потом ramp с 1-го дня — тыкать «Включить прогрев» руками не нужно
+  if (!existed) warmup.on = true;
+  if (warmup.on) warmStart(); else warmSave();
+}
+
+/**
+ * Можно ли водить аккаунты одновременно.
+ *
+ * Нельзя, если они выходят с ОДНОГО адреса: два аккаунта, активничающие с
+ * одного IP в одну минуту, — это первое, за что Telegram выдаёт ограничения.
+ * Одинаковый прокси у двоих — один адрес. Пустой прокси у двоих — тоже один
+ * адрес, адрес самого сервера. Свой прокси у каждого — тогда можно.
+ */
+function ownProxyEach() {
+  const live = accounts.list().filter((a) => accounts.hasSession(a) && accounts.isAuthed(a));
+  if (live.length < 2) return true;
+  const list = live.map((a) => String(a.proxy || ''));
+  if (list.some((p) => !p)) return false;
+  return new Set(list).size === list.length;
+}
+
+/** Смена IP перед следующим аккаунтом прогрева. */
+/**
+ * Свежий IP перед входом в аккаунт.
+ *
+ * Когда прокси один на всех, все аккаунты логинятся с одного адреса, а потом
+ * прогрев начинает его менять — для Telegram это «сессия переехала», и риск
+ * бана выше. Поэтому перед каждым входом (заливка сессии, QR, код) меняем IP,
+ * если задана ссылка ротации. Свой прокси у каждого — ссылки нет, шаг пропущен.
+ */
+async function freshIpForLogin() {
+  if (!mirrorRotateLink()) return;
+  push('🔄 меняю IP перед входом в аккаунт…');
+  let r = await rotateIp(mirrorRotateLink());
+  // провайдер требует паузу между сменами — подождём и попробуем ещё раз
+  if (!r.ok && /wait|подожд|10s/i.test(r.reason || '')) {
+    await new Promise((z) => setTimeout(z, 11000));
+    r = await rotateIp(mirrorRotateLink());
+  }
+  if (r.ok) {
+    push(`   ${r.text || 'ок'} — жду ${warmup.rotateWait} с`);
+    await new Promise((z) => setTimeout(z, warmup.rotateWait * 1000));
+  } else {
+    push(`   ✗ сменить IP не вышло: ${r.reason} — вхожу с текущего адреса`);
+  }
+}
+
+/** Ссылка ротации живёт в настройках прогрева; берём оттуда. */
+const mirrorRotateLink = () => warmup.rotate || '';
+
+async function rotateForWarm() {
+  warmup.holdUntil = Date.now() + ROTATE_TIMEOUT;
+  const r = await rotateIp(warmup.rotate);
+  if (!warmup.on) return;
+  if (r.ok) {
+    warmup.fresh = true;
+    warmup.holdUntil = Date.now() + warmup.rotateWait * 1000;
+    push(`🌱 сменил IP перед следующим аккаунтом (${r.text || 'ок'})`);
+  } else {
+    // без смены адреса следующий аккаунт пошёл бы с того же IP, что и прошлый,
+    // — ровно то, ради чего ротацию и заводили. Ждём и пробуем ещё раз
+    warmup.holdUntil = Date.now() + 10 * 60_000;
+    push(`🌱 сменить IP не вышло: ${r.reason} — прогрев подождёт 10 минут`);
+  }
+}
+
+/** Состояние аккаунта в прогреве: когда следующий шаг и сколько осталось в сессии. */
+const warmOf = (id) => {
+  if (!warmup.per.has(id)) warmup.per.set(id, { nextAt: 0, left: 0, note: '' });
+  return warmup.per.get(id);
+};
+
+function warmTick() {
+  if (!warmup.on) return;
+  if (manualBusy()) return;
+  if (leadScanBusy()) return;      // идёт автоскан лидов на том же прокси — ждём
+  const now = Date.now();
+  // общий адрес — значит строго по одному за раз
+  const alone = !ownProxyEach() || auto.serial || !!auto.rotate || !!warmup.rotate;
+  if (alone && running.size) return;
+  if (auto.on && auto.serial && now < auto.holdUntil) return;
+  if (now < warmup.holdUntil) return;
+
+  /**
+   * Кого спрашиваем первым.
+   *
+   * Сначала тот, ради кого только что сменили адрес, — иначе свежий IP
+   * достанется случайному соседу, а этот пойдёт со старого. Потом те, у кого
+   * сессия уже начата: сессия — это два-три действия подряд, и разрывать её
+   * чужим аккаунтом (а значит, и чужим адресом) незачем, живой человек так
+   * себя не ведёт.
+   */
+  const live = accounts.list().filter((a) => accounts.hasSession(a) && accounts.isAuthed(a));
+  const rank = (a) => (warmup.pending === a.id ? 0 : (warmOf(a.id).left ? 1 : 2));
+  const order = [...live].sort((x, y) => rank(x) - rank(y));
+
+  for (const acc of order) {
+    if (running.has(acc.id)) continue;
+    if (proxyGuard.down(acc.proxy)) continue;
+    // аккаунт занят настоящим делом — прогрев подождёт. Иначе он лез бы
+    // между пачками рассылки и отнимал у неё и время, и лимиты. Но выбравший
+    // на сегодня всё (или ночью, когда писать нельзя, а проверять нечего)
+    // рассылке уже не нужен — пусть догревается: переписка, чтение, реакции
+    if (auto.on && auto.ids.includes(acc.id) && accounts.inOutreach(acc) && !outreachDoneForNow(acc)) continue;
+    const st = warmOf(acc.id);
+    if (now < st.nextAt) continue;
+
+    // аккаунт ещё на отлёжке — панель это и так знает по возрасту. Незачем
+    // ради него менять IP и поднимать Telethon: он всё равно ничего не делает.
+    // Ставим будильник ровно на конец отлёжки и идём искать рабочий аккаунт —
+    // так ротация и тики не тратятся на лежащих, а достаются тем, кто греется.
+    const wa = warm(acc);
+    if (wa.resting) {
+      st.left = 0;
+      st.nextAt = now + Math.max(wa.restLeft, 60) * 1000;
+      st.note = 'отлёжка';
+      continue;
+    }
+
+    // следующий аккаунт — сначала новый адрес: иначе оба наследят с одного.
+    // Запоминаем, КОМУ меняем: без этого свежий адрес достался бы тому, кто
+    // первым подвернулся на следующем круге
+    if (warmup.rotate && warmup.lastId && warmup.lastId !== acc.id && !warmup.fresh) {
+      warmup.pending = acc.id;
+      rotateForWarm();
+      return;
+    }
+
+    // новая сессия — заводим счётчик действий
+    if (!st.left) st.left = rnd(WARM_SESSION[0], WARM_SESSION[1]);
+
+    launchedBy = 'warm';
+    const r = start('warmup', { account: acc.id, warm: false }, (code, state) => {
+      const s = warmOf(acc.id);
+      s.left = Math.max(0, s.left - 1);
+      if (state?.act) s.act = state.act;   // что аккаунт сделал последним
+      s.actAt = Date.now();
+      if (state?.stop === 'flood' && state.cooldown) {
+        s.left = 0;
+        s.nextAt = Date.now() + state.cooldown * 1000;
+        s.note = 'Telegram просит паузу';
+      } else if (state?.note) {
+        // «отлёжка» или «дневной предел» — до завтра тут делать нечего
+        s.left = 0;
+        s.nextAt = Date.now() + rnd(3 * 3600, 5 * 3600) * 1000;
+        s.note = state.note;
+      } else if (s.left) {
+        s.nextAt = Date.now() + rnd(WARM_GAP[0], WARM_GAP[1]) * 1000;
+        s.note = 'сессия идёт';
+      } else {
+        s.nextAt = Date.now() + rnd(WARM_NAP[0], WARM_NAP[1]) * 1000;
+        s.note = 'спит после сессии';
+      }
+      warmSave();
+    });
+    launchedBy = 'manual';
+
+    if (r.ok) {
+      warmup.lastId = acc.id;
+      warmup.fresh = false;
+      warmup.pending = '';
+    } else {
+      st.nextAt = now + 10 * 60_000;      // занят или не вошёл — зайдём позже
+      st.note = r.reason || '';
+    }
+    warmSave();
+    if (alone) return;                    // по одному за раз
+  }
+}
+
+function warmStart() {
+  if (warmup.timer) return;
+  warmup.on = true;
+  warmup.timer = setInterval(warmTick, WARM_TICK);
+  push('\n🌱 прогрев поведением включён: аккаунты будут читать, подписываться и переписываться');
+  warmSave();
+}
+
+function warmStop(why) {
+  if (warmup.timer) clearInterval(warmup.timer);
+  warmup.timer = null;
+  warmup.on = false;
+  push(`🌱 прогрев поведением выключен${why ? ': ' + why : ''}`);
+  warmSave();
+}
+
+/** Человеческая фраза последнего действия прогрева из истории warmup.csv. */
+function warmActPhrase(r) {
+  const t = (r.target || '').split('#')[0];
+  const bad = r.note && r.note !== 'ok' ? ` (${r.note})` : '';
+  switch (r.action) {
+    case 'sub':   return `подписался на @${t}${bad}`;
+    case 'chat':  return `вступил в @${t}${bad}`;
+    case 'react': return `почитал ленту, поставил реакцию в @${t}`;
+    case 'dm':    return 'написал своему аккаунту';
+    case 'bot':   return `запустил бота @${t}`;
+    case 'spam':  return 'спросил у SpamBot про лимиты';
+    default:      return r.action || '';
+  }
+}
+
+/** Что показывать в панели про прогрев. */
+function warmView() {
+  const now = Date.now();
+  return {
+    on: warmup.on,
+    rotate: warmup.rotate, rotateWait: warmup.rotateWait,
+    maxCap: getMaxCap(), plan: getPlan(), checkMax: getCheckMax(),
+    warmDays: getWarmDays(),
+    alone: !ownProxyEach() || !!warmup.rotate,
+    accounts: (() => {
+      // последнее действие каждого аккаунта из истории — чтобы в паузе было
+      // видно, что прогрев реально что-то делал, а не «отдыхает» в пустоту
+      const lastAct = new Map();
+      for (const r of readCsv('warmup.csv')) lastAct.set(r.account, r);
+      return accounts.list().filter((a) => accounts.hasSession(a)).map((a) => {
+      const st = warmup.per.get(a.id) || {};
+      const rc = running.get(a.id);
+      const busy = /Прогрев/.test(rc?.title || '');
+      const lr = lastAct.get(a.id);
+      const w = warm(a);
+      return {
+        id: a.id, title: a.title,
+        busy,
+        // что делает прямо сейчас (живьём из процесса) или сделал в прошлый заход
+        act: busy ? (rc?.state?.act || 'работает') : (lr ? warmActPhrase(lr) : (st.act || '')),
+        actAt: busy ? 0 : (lr ? (Date.parse(lr.at) || 0) : 0),
+        doing: busy && rc?.state?.phase === 'doing',
+        wait: Math.max(0, Math.round(((st.nextAt || 0) - now) / 1000)),
+        left: st.left || 0, note: st.note || '',
+        // сколько по расписанию положено, сколько сегодня осталось,
+        // и сколько ещё лежать до старта (для отлёжки)
+        day: w.day, dayLeft: w.left, resting: w.resting, restLeft: w.restLeft || 0,
+        cap: w.cap, fullDay: w.fullDay,
+        // ЕДИНАЯ шкала для всех: общий прогон от покупки до «прогрет» (fullDay суток).
+        // Отлёжка — это первые сутки, т.е. первые ~10% полосы, поэтому у лежащих
+        // аккаунтов полоса короткая — так и должно быть, они в самом начале.
+        pct: w.pct,
+        restPct: w.resting ? Math.round((1 - (w.restLeft || 0) / 86400) * 100) : 100,
+        spam: a.spam || '', spamOk: a.spamOk !== false, spamAt: a.spamAt || '',
+      };
+    });
+    })(),
+  };
 }
 
 /* ------------------------------------------------------------- автопрогон
@@ -216,25 +767,38 @@ function start(name, opts, onDone) {
 const AUTO_TICK = 3000;          // как часто смотрим, кому пора работать
 const AUTO_FAILS_MAX = 3;        // столько неудачных запусков — аккаунт выбывает
 const AUTO_FAIL_WAIT = 5 * 60;   // после неудачного запуска ждём столько, сек
+const QUOTA_RETRY = 12 * 3600 * 1000;   // закрытая квота контактов — пробуем снова через столько
+// как часто аккаунт смотрит ответы: раз в час. Чаще — при работе по очереди
+// через один прокси проверки съедали почти всё время, писать было некогда
+const FUNNEL_EVERY = 30 * 60_000;   // как часто аккаунт смотрит, ответили ли ему
 const MAX_TRIES = 3;             // столько же, сколько в check-batch.py и draft-messages.py
 
 const auto = {
   on: false,
   mode: 'full',                  // full | check | write
+  funnel: false,                 // слать второе письмо тем, кто ответил
+  serial: false,                 // работать по очереди, а не всеми сразу
+  rotate: '',                    // ссылка на смену IP у мобильного прокси
+  rotateWait: 10,                // сколько ждать, пока модем поднимет новый IP
+  fresh: false,                  // IP уже сменили — можно работать
+  holdUntil: 0,                  // до этого времени никого не запускаем
+  rotateFails: 0,
   send: false, voice: false,
   warm: true,                    // беречь новые аккаунты по расписанию прогрева
   check: { limit: 20, delay: 15 },
   write: { limit: 2,  delay: 5  },
   pause: 60,                     // между своими пачками, сек
-  cap: 0,                        // предел отправок в сутки на аккаунт, 0 — без предела
   ids: [],                       // кто участвует
   per: new Map(),                // id -> { nextAt, note, batches, fails, stopped }
   timer: null, since: 0,
 };
 
-const fmtLeft = (sec) => sec >= 3600
-  ? `${Math.floor(sec / 3600)} ч ${Math.round((sec % 3600) / 60)} мин`
-  : `${Math.max(1, Math.round(sec / 60))} мин`;
+// минуты считаем от общего числа, а не от остатка часов: иначе выходит
+// «23 ч 60 мин» — и неправда, и строка скачет на каждом опросе
+const fmtLeft = (sec) => {
+  const m = Math.max(1, Math.round(sec / 60));
+  return m >= 60 ? `${Math.floor(m / 60)} ч ${m % 60} мин` : `${m} мин`;
+};
 const hhmm = (t) => new Date(t).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
 const num = (v, d, min, max) => {
   const n = Math.round(Number(v));
@@ -251,31 +815,191 @@ function work() {
   const res = readCsv('results.csv');
   const log = readCsv('drafts.csv');
 
-  const checked = new Set(res.filter((r) => r.tg === 'true' || r.tg === 'false').map((r) => r.phone));
+  const checked = new Set(res.filter((r) => ['true', 'false', 'idle'].includes(r.tg)).map((r) => r.phone));
   const tries = {};
   for (const r of res) if (!checked.has(r.phone)) tries[r.phone] = (tries[r.phone] || 0) + 1;
-  const check = base.filter((r) => !checked.has(r.phone)
+  const check = base.filter((r) => isPhone(r.phone) && !checked.has(r.phone)
     && (tries[r.phone] || 0) < MAX_TRIES && !held.has(r.phone)).length;
 
-  const written = new Set(log.filter((r) => r.ok === 'true' || r.sent === 'true').map((r) => r.phone));
+  // skip — давно не заходил в Telegram: с ним тоже всё решено
+  const written = new Set(log.filter((r) => r.ok === 'true' || r.ok === 'skip' || r.sent === 'true').map((r) => r.phone));
   const dtries = {};
   for (const r of log) if (!written.has(r.phone)) dtries[r.phone] = (dtries[r.phone] || 0) + 1;
-  const write = res.filter((r) => r.tg === 'true' && !written.has(r.phone)
-    && (dtries[r.phone] || 0) < MAX_TRIES && !held.has(r.phone)).length;
+  const free = res.filter((r) => r.tg === 'true' && !written.has(r.phone)
+    && (dtries[r.phone] || 0) < MAX_TRIES && !held.has(r.phone));
 
-  return { check, write };
+  /**
+   * Кому может написать любой аккаунт, а кому — только один.
+   *
+   * Номер и @username доступны всем: их делят брони, и рассылка идёт всеми
+   * аккаунтами сразу. А человека без @username (ключ id:<id>) видит только тот
+   * аккаунт, который его нашёл, — access_hash к нему живёт в его сессии.
+   * Поэтому таких считаем отдельно, за их владельцем: если записать их в общую
+   * кучу, прогон будет вечно видеть работу, которой другим не сделать.
+   */
+  // kept=1 — человек лежит в контактах проверившего аккаунта: пишет только он
+  const own = {};
+  let shared = 0;
+  for (const r of free) {
+    if (String(r.phone).startsWith('id:') || r.kept === '1') own[r.by] = (own[r.by] || 0) + 1;
+    else shared++;
+  }
+
+  return { check, write: free.length, shared, own };
+}
+
+/** До начала следующих суток — столько ждёт аккаунт, выбравший дневной предел. */
+const untilTomorrow = () => {
+  const d = new Date();
+  d.setHours(24, 5, 0, 0);
+  return d.getTime();
+};
+
+/**
+ * Писать людям — только в рабочее время по их часам. База екатеринбургская,
+ * а сервер живёт по UTC: без явного пояса «с 6 утра» наступало бы в 11 по
+ * Екатеринбургу, а ночные сообщения — лучший способ собрать жалобы на спам.
+ * Проверка номеров никому не пишет, её ночь не останавливает.
+ */
+const WORK_FROM = 6;     // с 06:00
+const WORK_TO = 24;      // до полуночи
+const workHour = () => Number(new Intl.DateTimeFormat('en-GB',
+  { timeZone: WORK_TZ, hour: '2-digit', hourCycle: 'h23' }).format(new Date()));
+const isWorkTime = () => { const h = workHour(); return h >= WORK_FROM && h < WORK_TO; };
+let nightNoted = '';     // о ночи пишем в ленту раз за ночь, а не на каждом тике
+
+/** Одна и та же новость про аккаунт — в журнал раз в сутки, а не на каждом заходе. */
+function notedOnce(s, kind) {
+  const day = new Date().toISOString().slice(0, 10);
+  s.noted = s.noted || {};
+  if (s.noted[kind] === day) return false;
+  s.noted[kind] = day;
+  return true;
 }
 
 /** Чем занять этот аккаунт прямо сейчас. null — пока нечем. */
+function funnelJob(id) {
+  if (!auto.funnel || auto.mode === 'check' || !isWorkTime()) return null;
+  const s = auto.per.get(id);
+  // первый раз после запуска панели — от последней настоящей проверки этого
+  // аккаунта (её пишет followup.py в followup-runs.json). Раньше бралось
+  // случайное время до часа, и частые перезапуски откладывали проверку ответов
+  // бесконечно. Просрочено — разносим аккаунты на несколько минут, чтобы не
+  // встали в очередь все разом перед первой же пачкой писем
+  if (!s.funnelAt) {
+    let last = 0;
+    try { last = Date.parse(JSON.parse(fs.readFileSync(path.join(DIR, 'followup-runs.json'), 'utf8'))?.[id]?.at) || 0; } catch {}
+    s.funnelAt = Math.max(last + FUNNEL_EVERY, Date.now() + Math.random() * 5 * 60_000);
+  }
+  if (Date.now() < s.funnelAt) return null;
+  s.funnelAt = Date.now() + FUNNEL_EVERY;
+  return { name: 'follow', limit: 2, delay: auto.write.delay, delayMax: auto.write.delayMax };
+}
+
+
+/* ═══════════ ЕГРЮЛ: СВОЯ ТАБЛИЦА И СВОЙ СБОРЩИК ═══════════ */
+
+const EGRUL = path.join(DIR, 'egrul.csv');
+// Своё состояние сбора: какой аккаунт собирает, включён ли автоматический
+// режим и когда звать сборщика снова. Переживает перезапуск панели.
+const EGRUL_RUN = path.join(DIR, 'egrul-run.json');
+const egrul = { on: false, account: '', nextAt: 0, note: '' };
+
+function egrulLoad() {
+  try { Object.assign(egrul, JSON.parse(fs.readFileSync(EGRUL_RUN, 'utf8'))); } catch {}
+}
+function egrulSave() {
+  const { on, account, nextAt, note } = egrul;
+  try { fs.writeFileSync(EGRUL_RUN, JSON.stringify({ on, account, nextAt, note }, null, 1)); } catch {}
+}
+egrulLoad();
+
+const egrulRows = () => readCsv('egrul.csv');
+
+/** Сводка для вкладки: сколько всего, сколько разобрано, что с лимитом. */
+function egrulStat() {
+  const rows = egrulRows();
+  const done = rows.filter((r) => r.status === 'готово').length;
+  const empty = rows.filter((r) => r.status === 'пусто').length;
+  const failed = rows.filter((r) => r.status === 'сбой').length;
+  const left = rows.filter((r) => !r.status || r.status === 'сбой').length;
+  const phones = rows.filter((r) => r.phone).length;
+  const since = new Date(Date.now() - 864e5).toISOString();
+  // запросов к боту за сутки: на строку их два, если узнали ИНН человека
+  let today = 0;
+  for (const r of rows) {
+    if (!r.at || r.at < since || !['готово', 'пусто'].includes(r.status)) continue;
+    if (r.by !== egrul.account && egrul.account) continue;
+    today += r.lpr_inn ? 2 : 1;
+  }
+  return { total: rows.length, done, empty, failed, left, phones, today,
+           daily: 110, on: egrul.on, account: egrul.account,
+           nextAt: egrul.nextAt, note: egrul.note,
+           running: running.has('egrul') };
+}
+
+/** Один заход сборщика. Дальше решаем по его отчёту, когда звать снова. */
+function egrulStart(account, manual) {
+  const acc = accounts.list().find((a) => a.id === account);
+  if (!acc) return { ok: false, reason: 'аккаунт-сборщик не выбран' };
+  if (!accounts.hasSession(acc) || !acc.authed) return { ok: false, reason: 'этот аккаунт не вошёл' };
+  if (running.has('egrul')) return { ok: false, reason: 'сбор уже идёт' };
+  if (running.has(acc.id)) return { ok: false, reason: 'аккаунт сейчас занят другой задачей' };
+
+  run('egrul', 'егрюл', `ЕГРЮЛ — ${acc.title}`, pythonCmd(),
+      [path.join(CODE, 'egrul-collect.py'), '--account', acc.id], (code, st) => {
+        // сборщик сам говорит, сколько ему отдыхать: после пачки — полчаса,
+        // после суточного предела — до завтра, после FloodWait — сколько просит
+        const wait = st?.cooldown ? st.cooldown * 1000 : 60_000;
+        egrul.nextAt = Date.now() + wait;
+        egrul.note = st?.note || (code === 0 ? '' : 'сбой — смотри журнал');
+        if (st && !st.left && !st.stop) { egrul.on = false; egrul.note = 'таблица разобрана'; }
+        egrulSave();
+      });
+  if (manual) manualUntil = Date.now() + MANUAL_GRACE;
+  return { ok: true };
+}
+
+/**
+ * Сбор сам по себе: панель будит сборщика, когда он отдохнул. Ночью не
+ * будим — ровная круглосуточная работа у бота заметна так же, как у человека.
+ */
+setInterval(() => {
+  if (!egrul.on || !egrul.account) return;
+  if (running.has('egrul') || running.has(egrul.account)) return;
+  if (Date.now() < egrul.nextAt || !isWorkTime()) return;
+  if (Date.now() < manualUntil) return;
+  const r = egrulStart(egrul.account, false);
+  if (!r.ok) { egrul.nextAt = Date.now() + 120_000; egrul.note = r.reason; egrulSave(); }
+}, 30_000);
+
 function pickJob(left, id) {
-  const canWrite = auto.mode !== 'check';
-  const canCheck = auto.mode !== 'write';
   const acc = accounts.list().find((a) => a.id === id);
-  const w = auto.warm && acc ? warm(acc) : null;
+  // «только прогрев»: новых писем и проверок нет, но на ответы тем, кому
+  // аккаунт писал раньше, он отвечает — человек не должен ждать
+  if (acc && !accounts.inOutreach(acc)) return wroteAny().has(id) ? funnelJob(id) : null;
+  // квота Telegram на добавление контактов кончилась — до её возврата ни
+  // проверки, ни письма по номеру (оба начинаются с «добавить в контакты»).
+  // Отметка лежит в аккаунте и переживает перезапуск панели: иначе после
+  // каждого перезапуска аккаунт снова ломился бы в закрытую квоту
+  const quotaOut = !!acc?.quotaUntil && Date.now() < Date.parse(acc.quotaUntil);
+  // срок ожидания квоты прошёл — сначала пробуем ОДИН номер: вернулась ли
+  const quotaProbe = !!acc?.quotaUntil && !quotaOut;
+  // рассылка идёт по чатам (контакты там не нужны), а квоту проверяем по базе
+  // номеров: вернулась — можно будет вернуться к базе клиентов
+  if (quotaProbe && baseSet === 'chats') {
+    return { name: 'check', limit: 1, delay: auto.check.delay, probe: true, set: 'phones' };
+  }
+  // людям из чатов пишем по @нику — контакты не добавляются, квота не мешает
+  const canWrite = auto.mode !== 'check' && isWorkTime() && (!quotaOut || baseSet === 'chats');
+  const canCheck = auto.mode !== 'write' && !quotaOut;
+  // дневной потолок считаем ВСЕГДА (даже если «беречь аккаунты» выключено) —
+  // иначе один тумблер снимает всю защиту от бана. Галка лишь отключает отлёжку.
+  const w = acc ? warm(acc) : null;
 
   // отлёжка: свежий аккаунт сутки не делает вообще ничего — ни проверок,
   // ни сообщений. Это единственный способ не потерять его в первый же день.
-  if (w && w.resting) {
+  if (auto.warm && w && w.resting) {
     const s = auto.per.get(id);
     if (s && s.note !== 'отлёжка') {
       s.note = 'отлёжка';
@@ -285,69 +1009,261 @@ function pickJob(left, id) {
     return null;
   }
 
-  if (canWrite && left.write > 0) {
-    // из двух пределов берём меньший: твой ручной и тот, что даёт прогрев
-    const byUser = auto.cap ? auto.cap - doneToday(id) : Infinity;
-    const capLeft = Math.min(byUser, w ? w.left : Infinity);
+  /**
+   * Второй шаг воронки идёт вперёд первого: человек уже ответил и ждёт, а
+   * тянуть с ответом — значит терять того единственного, кто откликнулся.
+   * Сколько таких, панель заранее не знает: это видно только из диалогов,
+   * поэтому просто зовём задачу, а она сама скажет, было кому писать или нет.
+   */
+  // ответы смотрим и тогда, когда квота на контакты кончилась или письма на
+  // сегодня выбраны: проверка ответов контакты не добавляет, а человек,
+  // сказавший «да», не должен ждать ссылку до завтра
+  const fj = funnelJob(id);
+  if (fj) return fj;
+
+  // сколько работы есть именно у этого аккаунта: общая очередь плюс его
+  // собственные люди из чатов, которых больше никто написать не может
+  const canDo = left.shared + (left.own[id] || 0);
+  if (canWrite && canDo > 0) {
+    // дневной предел один — из графика разгона с общим «максимумом в день»
+    const capLeft = w ? w.left : Infinity;
     if (capLeft > 0) {
       return { name: 'drafts',
-               limit: Math.max(1, Math.min(auto.write.limit, left.write, capLeft)),
-               delay: auto.write.delay };
+               limit: Math.max(1, Math.min(auto.write.limit, canDo, capLeft)),
+               delay: auto.write.delay, delayMax: auto.write.delayMax,
+               hold: auto.write.hold, holdMax: auto.write.holdMax };
     }
     const s = auto.per.get(id);
-    if (s && s.note !== 'дневной предел') {
-      const lim = w ? Math.min(auto.cap || Infinity, w.cap) : auto.cap;
+    if (s) {
       s.note = 'дневной предел';
-      s.nextAt = untilTomorrow();
-      push(`⏸ «${title(id)}» выбрал дневной предел (${lim}) — вернётся завтра`);
+      // со вторым шагом — вернёмся к очередной проверке ответов, без него — завтра
+      s.nextAt = auto.funnel ? Math.max(Date.now() + 60_000, s.funnelAt || 0) : untilTomorrow();
+      if (notedOnce(s, 'cap')) push(`⏸ «${title(id)}» выбрал дневной предел (${w ? w.cap : '—'}) — вернётся завтра`);
     }
   }
-  if (canCheck && left.check > 0) {
-    return { name: 'check', limit: Math.min(auto.check.limit, left.check), delay: auto.check.delay };
+  // проверка оставляет найденных в контактах аккаунта до письма — поэтому
+  // не проверяем впрок: хватит очереди на два дня писем. Иначе адресная
+  // книга распухла бы чужими номерами, а это примета для антиспама
+  // проверяем не впрок, а под сегодняшние письма: сколько ещё можно написать
+  // сегодня — столько людей и нужно найти. Найденный остаётся в контактах, и
+  // следующим же заходом аккаунт ему пишет
+  const backlogMax = Math.max(1, w ? w.left : 1);
+  const backlogFull = (left.own[id] || 0) >= backlogMax;
+  if (canCheck && left.check > 0 && backlogFull) {
+    const s = auto.per.get(id);
+    if (s && !(canWrite && canDo > 0) && s.note !== 'очередь писем полна') {
+      s.note = 'очередь писем полна';
+      s.nextAt = Date.now() + 30 * 60_000;
+    }
+  }
+  if (canCheck && left.check > 0 && !backlogFull) {
+    const c = checksOf(id);
+    if (c.left > 0) {
+      // в Telegram находится ~70% номеров — пачку берём по свободному месту в очереди
+      const room = Math.max(1, Math.ceil((backlogMax - (left.own[id] || 0)) / 0.7));
+      if (quotaProbe) return { name: 'check', limit: 1, delay: auto.check.delay, probe: true };
+      return { name: 'check', limit: Math.min(auto.check.limit, left.check, c.left, room), delay: auto.check.delay };
+    }
+    const s = auto.per.get(id);
+    // и писать нечего/нельзя, и проверки на сегодня кончились — до завтра
+    // (со вторым шагом — до очередной проверки ответов)
+    if (s && !(canWrite && canDo > 0)) {
+      s.note = 'проверки на сегодня';
+      s.nextAt = auto.funnel ? Math.max(Date.now() + 60_000, s.funnelAt || 0) : untilTomorrow();
+      if (notedOnce(s, 'checks')) push(`⏸ «${title(id)}» проверил на сегодня ${c.today} из ${c.cap} номеров — продолжит завтра`);
+    }
+  }
+  if (auto.mode !== 'check' && !isWorkTime()) {
+    const s = auto.per.get(id);
+    if (s) s.note = `ночь — пишем с ${WORK_FROM}:00 по Екатеринбургу`;
+    const night = new Date().toISOString().slice(0, 10);
+    if (nightNoted !== night) {
+      nightNoted = night;
+      events.note('🌙', `ночь — письма ждут ${WORK_FROM}:00 по Екатеринбургу, идёт только проверка номеров`);
+    }
   }
   return null;
 }
 
 const title = (id) => accounts.list().find((a) => a.id === id)?.title || id;
 
+/**
+ * Смена IP на мобильном прокси.
+ *
+ * У мобильных прокси один адрес на всех, зато его можно менять по ссылке из
+ * личного кабинета. Отсюда и режим «по очереди»: аккаунты работают не разом,
+ * а один за другим, и между ними панель просит модем сменить IP. Толку от
+ * смены не было бы, работай они параллельно — они всё равно сидели бы на одном
+ * адресе одновременно.
+ *
+ * После запроса ждём: оператору нужно несколько секунд, чтобы физически поднять
+ * соединение заново. Начать работать сразу — значит пойти со старого адреса.
+ */
+const ROTATE_TIMEOUT = 15000;
+const ROTATE_FAILS_MAX = 3;
+
+function rotateUrlProblem(raw) {
+  let u;
+  try { u = new URL(String(raw)); } catch { return 'ссылка на смену IP не похожа на ссылку'; }
+  if (!/^https?:$/.test(u.protocol)) return 'ссылка должна быть http или https';
+  // 169.254.169.254 — служебный адрес облака, через него у провайдера
+  // выпрашивают ключи от самого сервера. Ходить туда панели незачем
+  if (/^169\.254\./.test(u.hostname)) return 'это служебный адрес облака, а не прокси';
+  return '';
+}
+
+async function rotateIp(url) {
+  const bad = rotateUrlProblem(url);
+  if (bad) return { ok: false, reason: bad };
+  try {
+    const r = await fetch(url, { signal: AbortSignal.timeout(ROTATE_TIMEOUT) });
+    const text = (await r.text()).trim().slice(0, 200);
+    return { ok: r.ok, code: r.status, text,
+             reason: r.ok ? '' : `прокси ответил ${r.status}` };
+  } catch (e) {
+    if (e.name === 'TimeoutError') return { ok: false, reason: 'прокси не ответил за 15 секунд' };
+    // fetch прячет настоящую причину внутрь cause, а наружу отдаёт
+    // бесполезное «fetch failed» — человеку от него никакого толку
+    const why = e.cause?.code || e.cause?.message || e.message || '';
+    return { ok: false, reason: 'не достучались до прокси' + (why ? `: ${why}` : '') };
+  }
+}
+
+/** Смена IP внутри прогона: результат идёт в журнал, дальше пауза. */
+async function rotateForRun() {
+  auto.holdUntil = Date.now() + ROTATE_TIMEOUT;   // пока идёт запрос — никого не пускаем
+  push('\n🔄 меняю IP на прокси…');
+  const r = await rotateIp(auto.rotate);
+  if (!auto.on) return;
+  if (r.ok) {
+    auto.rotateFails = 0;
+    auto.fresh = true;
+    auto.holdUntil = Date.now() + auto.rotateWait * 1000;
+    push(`   прокси ответил: ${r.text || 'ок'} — жду ${auto.rotateWait} с, пока поднимется новый адрес`);
+    return;
+  }
+  if (!(await proxyGuard.check(proxyOf(auto.ids[0])))) {
+    auto.holdUntil = Date.now() + 60_000;
+    push(`   ✗ сменить IP не вышло: ${r.reason} — прокси сейчас лежит, жду, пока поднимется`);
+    return;
+  }
+  auto.rotateFails++;
+  push(`   ✗ сменить IP не вышло: ${r.reason} (попытка ${auto.rotateFails} из ${ROTATE_FAILS_MAX})`);
+  if (auto.rotateFails >= ROTATE_FAILS_MAX) {
+    // работать дальше — значит слать всё с одного адреса, ради смены которого
+    // режим и включали. Лучше честно остановиться
+    autoStop('прокси не меняет IP — дальше слать с одного адреса опаснее, чем встать');
+    return;
+  }
+  auto.holdUntil = Date.now() + 60_000;
+}
+
 /** Раз в несколько секунд: кому пора работать — того и запускаем. */
 function autoTick() {
   if (!auto.on) return;
+  if (manualHold()) return;
+  if (leadScanBusy()) return;      // идёт автоскан лидов на том же прокси — ждём
   const now = Date.now();
-  const live = auto.ids.filter((id) => !auto.per.get(id).stopped);
-  if (!live.length) return autoStop('все аккаунты выбыли — смотри журнал');
+  // срок ограничения прошёл — аккаунт возвращается в рассылку сам
+  for (const id of auto.ids) {
+    const s = auto.per.get(id);
+    const acc = accounts.list().find((a) => a.id === id);
+    if (s?.stopped && s.quarantine && acc && !inQuarantine(acc)) {
+      Object.assign(s, { stopped: false, quarantine: false, note: '', nextAt: 0, fails: 0 });
+      events.note('✅', 'срок ограничения Telegram прошёл — вернулся в рассылку', acc.title);
+    }
+  }
+  const byId = new Map(accounts.list().map((a) => [a.id, a]));
+  const live = auto.ids.filter((id) => !auto.per.get(id).stopped && byId.has(id));
+  // аккаунты на прогреве в прогоне только разбирают ответы — прогон держат те, кто пишет
+  const senders = live.filter((id) => accounts.inOutreach(byId.get(id)));
+  if (!senders.length) return autoStop('в рассылке не осталось аккаунтов — смотри журнал');
+  // прокси лежит — ни смены IP, ни запусков: они только копили бы сбои
+  if (live.every((id) => proxyGuard.down(proxyOf(id)))) return;
 
   const left = work();
   const busy = live.some((id) => running.has(id));
   // работы нет и никто её не доделывает — прогон закончен. Считаем только ту
   // работу, которую этот прогон вообще делает: в режиме «только писать»
   // непройденная база — не повод держать прогон включённым
+  // работа, которую МОГУТ сделать оставшиеся в прогоне: людей, доступных
+  // только выбывшему аккаунту, ждать бессмысленно
+  const canWrite = left.shared + senders.reduce((n, id) => n + (left.own[id] || 0), 0);
   const need = auto.mode === 'check' ? left.check
-             : auto.mode === 'write' ? left.write : left.check + left.write;
+             : auto.mode === 'write' ? canWrite : left.check + canWrite;
   if (!need && !busy) {
     return autoStop(auto.mode === 'check' ? 'база пройдена'
                   : auto.mode === 'write' ? 'всем найденным написано'
                   : 'база пройдена, всем найденным написано');
   }
 
-  for (const id of live) {
+  /**
+   * Режим «по очереди»: работает ровно один аккаунт за раз, и перед каждым
+   * панель меняет IP на прокси. Нужен, когда прокси один на всех (мобильный
+   * с ротацией): параллельно они сидели бы на одном адресе, и смена его
+   * ничего бы не дала.
+   */
+  if (auto.serial) {
+    if (busy) return;                       // кто-то ещё работает — ждём его
+    if (now < auto.holdUntil) return;       // модем поднимает новый адрес
+    if (auto.rotate && !auto.fresh) { rotateForRun(); return; }
+  }
+
+  // По очереди работает кто-то один, поэтому порядок решает: без него первые
+  // в списке забирали бы заход за заходом, а последние ждали бы, пока у первых
+  // кончится дневной предел. Пускаем того, кто дольше всех не работал.
+  const queue = auto.serial
+    ? [...live].sort((x, y) => (auto.per.get(x).lastAt || 0) - (auto.per.get(y).lastAt || 0))
+    : live;
+
+  for (const id of queue) {
     if (running.has(id)) continue;
+    if (proxyGuard.down(proxyOf(id))) continue;
     const s = auto.per.get(id);
-    if (now < s.nextAt) continue;
-    const job = pickJob(left, id);
-    if (!job) continue;
+    let job;
+    if (now < s.nextAt) {
+      // отдыхает между пачками писем — но посмотреть, ответили ли ему, можно:
+      // это чтение диалогов, а не рассылка. Отдых при этом не сбивается (autoAfter)
+      if (!wroteAny().has(id)) continue;
+      job = funnelJob(id);
+      if (!job) continue;
+      s.restUntil = s.nextAt;
+    } else {
+      job = pickJob(left, id);
+      if (!job) continue;
+    }
     // то, что забрал этот аккаунт, не должно достаться ещё и следующему
     // в этом же обходе: иначе на два оставшихся номера уйдёт пять пачек
-    if (job.name === 'drafts') left.write -= job.limit; else left.check -= job.limit;
+    if (job.name === 'drafts') {
+      // сначала списываем со своих: их всё равно никто другой не возьмёт
+      const fromOwn = Math.min(job.limit, left.own[id] || 0);
+      left.own[id] = (left.own[id] || 0) - fromOwn;
+      left.shared = Math.max(0, left.shared - (job.limit - fromOwn));
+      left.write -= job.limit;
+    } else left.check -= job.limit;
 
+    s.probe = !!job.probe;          // пробный заход «вернулась ли квота»
+    s.jobSet = job.set || baseSet;  // по какому набору шла задача: по чатам контакты не добавляются
+    launchedBy = 'auto';
     const r = start(job.name, {
-      account: id, limit: job.limit, delay: job.delay,
+      account: id, limit: job.limit, delay: job.delay, set: job.set,
+      delayMax: job.delayMax, hold: job.hold, holdMax: job.holdMax,
       warm: auto.warm,
-      send: job.name === 'drafts' && auto.send && !auto.voice,
+      // второе письмо — это всегда отправка: черновиком ссылку не оставишь,
+      // человек уже ответил и ждёт
+      send: ['drafts', 'follow'].includes(job.name) && auto.send && !auto.voice,
       voice: job.name === 'drafts' && auto.voice,
     }, (code, st) => autoAfter(id, code, st));
+    launchedBy = 'manual';
 
-    if (r.ok) { s.note = ''; continue; }
+    if (r.ok) {
+      s.note = '';
+      s.lastAt = now;
+      // по очереди — значит один за раз: следующего позовём, когда этот
+      // закончит и панель снова сменит IP
+      if (auto.serial) { auto.fresh = false; return; }
+      continue;
+    }
     // не запустилось (нет сессии, аккаунт занят чужой задачей) — не долбимся
     s.fails++;
     s.note = r.reason || 'не запускается';
@@ -360,15 +1276,55 @@ function autoTick() {
   }
 }
 
+/** Задача упала, а прокси жив — значит, дело в аккаунте: считаем сбой. */
+function autoFail(id, s) {
+  s.fails++;
+  if (s.fails >= AUTO_FAILS_MAX) {
+    s.stopped = true;
+    s.note = 'задача падает — смотри журнал';
+    push(`⏹ «${title(id)}» выбывает из автопрогона: ${AUTO_FAILS_MAX} неудачных запуска подряд`);
+  } else {
+    s.nextAt = Date.now() + AUTO_FAIL_WAIT * 1000;
+    s.note = 'сбой, пробую снова';
+  }
+}
+
 /** Пачка кончилась: решаем, когда звать этот аккаунт снова. */
 function autoAfter(id, code, st) {
   const s = auto.per.get(id);
   if (!s || !auto.on) return;
   const now = Date.now();
+  // задача была проверкой ответов посреди отдыха: что бы ни случилось, отметку снимаем
+  const restUntil = s.restUntil || 0;
+  s.restUntil = 0;
 
+  // задача сама сообщила о карантине — снимаем аккаунт до завтра
+  if (st?.stop === 'quarantine') {
+    s.stopped = true;
+    s.quarantine = true;      // снимется само, когда пройдёт срок ограничения
+    s.note = 'ограничение Telegram';
+    push(`⏹ «${title(id)}» снят с рассылки: на нём ограничение Telegram`);
+    return;
+  }
+
+  // пробный номер не прошёл — квота всё ещё закрыта, даже если задача не
+  // успела объявить «квота кончилась» (ей для этого нужно несколько отказов)
+  if (s.probe && !st?.stop && !(st?.done > 0) && code === 0) st = { ...st, stop: 'quota', cooldown: 1 };
   if (st?.stop && st.cooldown) {
     // Telegram придержал аккаунт — отдых ровно на столько, сколько он просит
     s.nextAt = now + st.cooldown * 1000;
+    if (st.stop === 'quota') {
+      // Telegram не говорит, когда квота вернётся. Сутки ждать нет смысла:
+      // через 12 часов пробуем один номер, не вышло — ещё 12 часов
+      const until = now + QUOTA_RETRY;
+      accounts.setField(id, { quotaUntil: new Date(until).toISOString() });
+      // по чатам пишем по @нику, квота тут не нужна — аккаунт не усыпляем,
+      // откладываем только следующую пробу квоты
+      s.nextAt = baseSet === 'chats' ? now + 60_000 : until;
+      events.note('⏳', `квота Telegram на добавление контактов закрыта — пробую одним номером в ${ekbTime(until)} по Екб, ` +
+        `через ${fmtLeft(QUOTA_RETRY / 1000)}` + (baseSet === 'chats'
+          ? ' (по чатам продолжает писать — там контакты не нужны)' : ' (пока ответы смотрим и догреваемся)'), title(id));
+    }
     s.note = st.stop === 'quota' ? 'квота на сегодня'
            : st.stop === 'flood' ? 'придержан Telegram' : 'сбои подряд';
     s.fails = 0;
@@ -376,78 +1332,209 @@ function autoAfter(id, code, st) {
     return;
   }
   if (code !== 0) {
-    // задача упала, итога не прислала: сеть, мёртвая сессия, прокси
-    s.fails++;
-    if (s.fails >= AUTO_FAILS_MAX) {
-      s.stopped = true;
-      s.note = 'задача падает — смотри журнал';
-      push(`⏹ «${title(id)}» выбывает из автопрогона: ${AUTO_FAILS_MAX} неудачных запуска подряд`);
-    } else {
-      s.nextAt = now + AUTO_FAIL_WAIT * 1000;
-      s.note = 'сбой, пробую снова';
-    }
+    // задача упала, итога не прислала: сеть, мёртвая сессия, прокси.
+    // Сначала спрашиваем сторожа: если лёг прокси, аккаунт ни при чём
+    proxyGuard.check(proxyOf(id)).then((alive) => {
+      if (!auto.on) return;
+      if (!alive) {
+        s.nextAt = Date.now() + AUTO_FAIL_WAIT * 1000;
+        s.note = 'прокси лежит — жду';
+        return;
+      }
+      autoFail(id, s);
+    });
     return;
   }
   s.fails = 0;
   s.batches++;
   s.note = '';
-  // пачка не взяла ни одного номера (всё разобрали другие) — не бежим по кругу
-  const wait = st && st.done === 0 ? Math.max(auto.pause, 30) : auto.pause;
+  // заход по НОМЕРАМ прошёл без упора в квоту — значит, квота вернулась.
+  // Письма по чатам идут по @нику и контакты не добавляют: о квоте они
+  // ничего не говорят, и снимать по ним ожидание нельзя
+  const acc = accounts.list().find((a) => a.id === id);
+  if (acc?.quotaUntil && (st?.done || 0) > 0 && s.jobSet === 'phones') {
+    accounts.setField(id, { quotaUntil: '' });
+    events.note('✅', 'квота на добавление контактов вернулась — продолжаю проверку и письма', acc.title);
+  }
+  // Глубокий сон: отработав свою пачку, аккаунт уходит из пула не на ровное
+  // число секунд, а на вилку от заданной паузы до полутора от неё (40 минут
+  // превращаются в 40-60). Ровный интервал виден по секундомеру не хуже,
+  // чем полное его отсутствие.
+  // Пачка, не взявшая ни одного номера (всё разобрали другие), столько ждать
+  // не должна — там просто нечего было делать.
+  const wait = st && st.done === 0
+    ? Math.max(30, Math.min(auto.pause, 60))
+    : Math.round(auto.pause * (1 + Math.random() * 0.5));
   s.nextAt = now + wait * 1000;
+  // это была проверка ответов посреди отдыха — возвращаем аккаунт в тот же отдых
+  if (restUntil) {
+    s.nextAt = Math.max(s.nextAt, restUntil);
+    if (!(st && st.done)) return;
+  }
+  if (st && st.done) push(`   «${title(id)}» уходит отдыхать на ${Math.round(wait / 60)} мин`);
 }
+
+/**
+ * Автопрогон переживает перезапуск панели. Раньше любое падение или выкладка
+ * молча его выключали: systemd поднимал панель, а рассылка стояла, пока
+ * кто-нибудь не заметит. Теперь параметры запуска лежат в auto-run.json, пока
+ * прогон идёт; ручная остановка и «работа кончилась» файл убирают, а падение —
+ * нет, и после старта панель продолжает с того же места (очередь и лимиты
+ * берутся из файлов, так что ничего не повторится).
+ */
+const AUTO_RUN = path.join(DIR, 'auto-run.json');
+// последние настройки запуска — форма показывает их после обновления страницы,
+// а не значения по умолчанию (галочки «второй шаг», «по очереди» слетали)
+const AUTO_LAST = path.join(DIR, 'auto-last.json');
+const autoLastForm = () => {
+  try { return JSON.parse(fs.readFileSync(AUTO_LAST, 'utf8')); } catch {}
+  try { return JSON.parse(fs.readFileSync(AUTO_RUN, 'utf8')).o; } catch { return null; }
+};
+function autoForget() { try { fs.rmSync(AUTO_RUN, { force: true }); } catch {} }
+function autoResume() {
+  let saved;
+  try { saved = JSON.parse(fs.readFileSync(AUTO_RUN, 'utf8')); } catch { return; }
+  if (saved.set && saved.set !== baseSet) {
+    push(`\n⚠ прогон был запущен по набору «${saved.set === 'chats' ? 'по чатам' : 'по номерам'}», ` +
+         'а сейчас выбран другой — сам не продолжаю, запусти заново');
+    autoForget();
+    return;
+  }
+  push('\n↺ панель перезапустилась — продолжаю автопрогон с прежними настройками');
+  const r = autoStart(saved.o || {});
+  if (!r.ok) { push(`   продолжить не вышло: ${r.reason}`); autoForget(); }
+}
+
+const autoPer = (q = false) => ({ nextAt: 0, lastAt: 0, note: q ? 'ограничение Telegram' : '',
+                                  batches: 0, fails: 0, stopped: q, quarantine: q });
 
 function autoStart(o) {
   if (auto.on) return { ok: false, reason: 'автопрогон уже идёт' };
-  const ready = accounts.list().filter((a) => accounts.hasSession(a) && accounts.isAuthed(a));
+  const entered = accounts.list().filter((a) => accounts.hasSession(a) && accounts.isAuthed(a));
+  // аккаунты «только прогрев» в рассылку не идут, даже если их отметили
+  const ready = entered.filter(accounts.inOutreach);
+  const held = ready.filter(inQuarantine);
   const want = Array.isArray(o.accounts) ? o.accounts : [];
+  const repliers = entered.filter((a) => !accounts.inOutreach(a) && wroteAny().has(a.id));
   const ids = (want.length ? ready.filter((a) => want.includes(a.id)) : ready).map((a) => a.id);
+  if (ids.length) {
+    // отвеченные письма аккаунтов на прогреве тоже разбираем — в прогоне они только за этим
+    for (const a of repliers) if (!want.length || want.includes(a.id)) ids.push(a.id);
+  }
   if (!ids.length) {
-    return { ok: false, reason: ready.length
-      ? 'ни один из выбранных аккаунтов не вошёл'
-      : 'нет ни одного вошедшего аккаунта — подключи хотя бы один (шаг 1)' };
+    return { ok: false, reason: !entered.length
+      ? 'нет ни одного вошедшего аккаунта — подключи хотя бы один (шаг 1)'
+      : !ready.length ? 'все вошедшие аккаунты стоят «только прогрев» — переведи хотя бы один в рассылку'
+      : 'ни один из выбранных аккаунтов не вошёл или все они «только прогрев»' };
   }
   const mode = ['full', 'check', 'write'].includes(o.mode) ? o.mode : 'full';
+  // аккаунт с ограничением в рассылку не берём вовсе: он всё равно упрётся
+  // в карантин на первой же пачке, только потратит заход
+  if (mode !== 'check' && held.length) {
+    for (const a of held) push(`⏸ «${a.title}» ограничен Telegram (${a.spam || 'смотри SpamBot'}) — вернётся в рассылку сам, когда срок пройдёт`);
+    if (held.length === ids.length) {
+      return { ok: false, reason: 'все выбранные аккаунты на карантине — Telegram ограничил им отправку' };
+    }
+  }
   const voice = !!o.voice && mode !== 'check';
   if (voice && !fs.existsSync(VOICE)) return { ok: false, reason: 'сначала загрузи голосовое (шаг 4)' };
-  if (mode !== 'check' && !fs.existsSync(path.join(DIR, 'message.txt')) && !voice) {
-    return { ok: false, reason: 'сначала сохрани текст сообщения (шаг 4)' };
+  if (mode !== 'check' && !voice) {
+    const mf = path.join(DIR, 'message.txt');
+    const txt = fs.existsSync(mf) ? fs.readFileSync(mf, 'utf8').trim() : '';
+    if (!txt) return { ok: false, reason: 'сначала сохрани текст сообщения (шаг «Что напишем») — пустой текст прогонит базу вхолостую' };
+  }
+  // воронка без второго письма — это заходы вхолостую: задача каждый раз
+  // упиралась бы в «нет текста» и возвращалась ни с чем
+  if (o.funnel) {
+    const f = path.join(DIR, 'message2.txt');
+    const has = fs.existsSync(f) && !!fs.readFileSync(f, 'utf8').trim();
+    if (!has) return { ok: false, reason: 'второй шаг включён, а текста второго письма нет — напиши и сохрани его (шаг «Что напишем»)' };
+    if (mode === 'check') return { ok: false, reason: 'второй шаг не сочетается с режимом «только проверить базу»' };
   }
 
+  // ротация IP имеет смысл только по очереди: включаем режим вместе с ней
+  const rotate = String(o.rotate ?? warmup.rotate ?? '').trim();
+  if (rotate) {
+    const bad = rotateUrlProblem(rotate);
+    if (bad) return { ok: false, reason: bad };
+  }
+
+  // Общий адрес — работаем строго в один поток, даже если галочку не ставили.
+  // Два аккаунта, пишущие с одного IP одновременно, — это то, за что Telegram
+  // раздаёт ограничения быстрее всего, и полагаться тут на внимательность
+  // человека нельзя.
+  const shared = !ownProxyEach();
   Object.assign(auto, {
     on: true, mode, voice,
+    funnel: !!o.funnel,
+    serial: !!o.serial || !!rotate || shared,
+    rotate,
+    rotateWait: num(o.rotateWait, warmup.rotateWait || 10, 3, 600),
+    fresh: false, holdUntil: 0, rotateFails: 0,
     warm: o.warm !== false,
     send: !!o.send && !voice && mode !== 'check',
     check: { limit: num(o.checkLimit, 20, 1, 500), delay: num(o.checkDelay, 15, 5, 3600) },
-    write: { limit: num(o.writeLimit, 2, 1, 200),  delay: num(o.writeDelay, 5, 3, 3600) },
-    pause: num(o.pause, 60, 10, 24 * 3600),
-    cap: num(o.cap, 0, 0, 10000),
-    ids, since: Date.now(),
-    per: new Map(ids.map((id) => [id, { nextAt: 0, note: '', batches: 0, fails: 0, stopped: false }])),
+    // пауза между людьми и пауза между «завёл контакт» и «написал» — обе
+    // вилками: ровная задержка узнаётся по секундомеру не хуже, чем её отсутствие
+    write: { limit: num(o.writeLimit, 2, 1, 200),
+             delay: num(o.writeDelay, 180, 3, 3600),
+             delayMax: num(o.writeDelayMax, 350, 3, 7200),
+             hold: num(o.hold, 60, 5, 3600),
+             holdMax: num(o.holdMax, 120, 5, 7200) },
+    // после пачки аккаунт уходит из работы «вглубь»: 40-60 минут по умолчанию
+    pause: num(o.pause, 40 * 60, 10, 24 * 3600),
+    // ограниченных Telegram держим в прогоне, но стоящими: когда срок
+    // ограничения пройдёт, autoTick вернёт их в работу сам
+    ids,
+    since: Date.now(),
+    per: new Map(ids.map((id) => [id, autoPer(mode !== 'check' && held.some((a) => a.id === id))])),
   });
 
   const what = mode === 'check' ? 'только проверка базы'
              : mode === 'write' ? 'только рассылка' : 'проверка и рассылка';
+  if (auto.serial) {
+    push(auto.rotate
+      ? `\n↻ по очереди, по одному аккаунту за раз; между ними — смена IP на прокси`
+      : `\n↻ по очереди, по одному аккаунту за раз`);
+    if (shared && !o.serial) {
+      push('   (иначе нельзя: у аккаунтов общий адрес — либо один прокси на всех, либо прокси нет вовсе)');
+    }
+  }
   const how = auto.voice ? 'ГОЛОСОВЫМ, уходит людям'
             : auto.send ? 'С ОТПРАВКОЙ — сообщения уходят людям' : 'только черновики';
-  push(`\n▶▶ АВТОПРОГОН: ${ids.map(title).join(', ')}`);
-  push(`   ${what} · ${how} · пауза между пачками ${auto.pause} с` +
-       (auto.cap ? ` · не больше ${auto.cap} в сутки на аккаунт` : '') +
+  // в заголовке — те, кто РЕАЛЬНО работает: снятые карантином сюда не попадают,
+  // иначе строка обещает больше, чем прогон делает
+  push(`\n▶▶ АВТОПРОГОН: ${auto.ids.map(title).join(', ')}`);
+  push(`   ${what} · ${how} · отдых между пачками ${Math.round(auto.pause / 60)}-` +
+       `${Math.round(auto.pause * 1.5 / 60)} мин` +
+       ` · максимум ${getMaxCap() || 15} в сутки на аккаунт` +
        (auto.warm ? ' · прогрев новых аккаунтов включён' : ' · ПРОГРЕВ ВЫКЛЮЧЕН'));
   if (auto.warm) {
-    for (const id of ids) {
+    for (const id of auto.ids) {
       const acc = accounts.list().find((a) => a.id === id);
       const w = warm(acc);
       push(`   «${acc.title}»: день ${w.day} — ${w.note}` +
            (w.resting ? ` (ещё ${fmtLeft(w.restLeft)})` : ` · сегодня осталось ${w.left}`));
     }
   }
+  // ссылку ротации помним на будущее: её же берёт прогрев поведением
+  if (rotate && rotate !== warmup.rotate) {
+    warmup.rotate = rotate;
+    warmup.rotateWait = auto.rotateWait;
+    warmSave();
+  }
   auto.timer = setInterval(autoTick, AUTO_TICK);
+  try {
+    fs.writeFileSync(AUTO_RUN, JSON.stringify({ o, set: baseSet, at: new Date().toISOString() }, null, 2) + '\n');
+    fs.writeFileSync(AUTO_LAST, JSON.stringify(o, null, 2) + '\n');
+  } catch {}
   autoTick();
   return { ok: true };
 }
 
 function autoStop(why) {
   if (!auto.on) return;
+  autoForget();
   auto.on = false;
   clearInterval(auto.timer);
   auto.timer = null;
@@ -455,17 +1542,100 @@ function autoStop(why) {
 }
 
 /** Что показывать в панели, пока прогон идёт. */
+/** Статус аккаунта в прогоне — одна функция и для прогона, и для экрана аккаунтов. */
+function autoStatusFor(id) {
+  if (!auto.on || !auto.ids.includes(id)) return '';
+  const s = auto.per.get(id) || {};
+  const acc = accounts.list().find((x) => x.id === id);
+  const wait = Math.max(0, Math.round(((s.nextAt || 0) - Date.now()) / 1000));
+  return autoStatus(s, running.get(id)?.title || '',
+    { today: doneToday(id), cap: acc ? warm(acc).cap : 0, checks: checksOf(id), wait }, acc);
+}
+
+/** Во что превращаются названия задач в строке аккаунта. */
+const TASK_WORD = [
+  [/^Проверка базы/, 'проверяет номера'], [/^Черновики/, 'пишет людям'],
+  [/^Смотрит ответы/, 'смотрит, кто ответил'], [/^Прогрев/, 'догревается: переписка, чтение, реакции'],
+  [/^(Профиль|Аватарка)/, 'меняют профиль (ты)'], [/^Сводка/, 'сводка'],
+];
+const ekbTime = (t) => new Intl.DateTimeFormat('ru-RU',
+  { timeZone: WORK_TZ, hour: '2-digit', minute: '2-digit' }).format(t);
+
+/** Рассылке этот аккаунт сегодня больше не нужен (или не нужен до утра). */
+function outreachDoneForNow(acc) {
+  const cap = warm(acc).cap;
+  const writeDone = cap > 0 && doneToday(acc.id) >= cap;
+  const checkDone = auto.mode === 'write' || baseSet === 'chats' || checksOf(acc.id).left <= 0;
+  const cantWrite = auto.mode === 'check' || writeDone || !isWorkTime();
+  return cantWrite && checkDone;
+}
+
+/** Почему аккаунт отдыхает — словами, а не внутренней пометкой. */
+const REST_WHY = {
+  'квота на сегодня': 'Telegram: кончилась квота на добавление контактов',
+  'придержан Telegram': 'Telegram попросил паузу (флуд)',
+  'сбои подряд': 'несколько сбоев подряд, передышка',
+  'сбой, пробую снова': 'сбой, повторю позже',
+  'дневной предел': 'письма на сегодня выбраны',
+  'проверки на сегодня': 'проверки на сегодня выбраны',
+  'отлёжка': 'отлёжка нового аккаунта',
+  'очередь писем полна': 'уже нашёл людей на 2 дня писем — новых не проверяет, пока не напишет',
+};
+
+function autoStatus(s, busy, { today, cap, checks, wait }, acc) {
+  if (s.stopped && s.quarantine && acc) return `⛔ ограничен Telegram: ${acc.spam || 'смотри SpamBot'}`;
+  if (!busy && baseSet === 'phones' && acc?.quotaUntil && Date.now() < Date.parse(acc.quotaUntil)) {
+    const left = Math.round((Date.parse(acc.quotaUntil) - Date.now()) / 1000);
+    return `ждёт до ${ekbTime(Date.parse(acc.quotaUntil))}, ещё ${fmtLeft(left)} — Telegram: кончилась квота на добавление контактов (письма и проверка стоят, ответы смотрит)`;
+  }
+  if (s.stopped) return `выбыл из прогона: ${s.note || 'смотри журнал'}`;
+  if (busy) return (TASK_WORD.find(([re]) => re.test(busy)) || [null, busy])[1];
+  if (acc && !accounts.inOutreach(acc)) {
+    return s.funnelAt ? `на прогреве — ответы смотрит раз в час, следующий раз в ${ekbTime(s.funnelAt)} по Екб`
+                      : 'на прогреве — в прогоне только смотрит ответы';
+  }
+  const writeDone = cap > 0 && today >= cap;
+  // по чатам номера не проверяются — «проверки на сегодня» тут ни при чём
+  const checkDone = baseSet === 'chats' || checks.left <= 0;
+  if (writeDone && (checkDone || auto.mode === 'write')) {
+    return (warmup.on ? 'рассылка на сегодня всё — пока догревается' : 'на сегодня всё — продолжит завтра')
+      + (auto.funnel ? ', ответы смотрит раз в час' : '');
+  }
+  if (manualBusy()) return 'пауза — ты работаешь с аккаунтами';
+  if (!isWorkTime() && auto.mode !== 'check' && (checkDone || auto.mode === 'write')) {
+    return `ночь — пишет с ${WORK_FROM}:00`;
+  }
+  if (wait > 0) {
+    const why = REST_WHY[s.note] || (s.note ? s.note : 'пауза между заходами');
+    return `отдыхает до ${ekbTime(Date.now() + wait * 1000)}, ещё ${fmtLeft(wait)} — ${why}`;
+  }
+  return auto.serial ? 'ждёт своей очереди' : 'сейчас возьмёт работу';
+}
+
 function autoView() {
   const now = Date.now();
   return {
     on: auto.on, mode: auto.mode, send: auto.send, voice: auto.voice,
-    cap: auto.cap, pause: auto.pause, since: auto.since,
+    pause: auto.pause, since: auto.since,
+    set: baseSet,
+    form: autoLastForm(),
+    serial: auto.serial, rotate: !!auto.rotate,
+    hold: Math.max(0, Math.round((auto.holdUntil - now) / 1000)),
     accounts: auto.ids.map((id) => {
       const s = auto.per.get(id) || {};
+      const acc = accounts.list().find((x) => x.id === id);
+      const cap = acc ? warm(acc).cap : 0;
+      const today = doneToday(id);
+      const checks = checksOf(id);
+      const wait = Math.max(0, Math.round(((s.nextAt || 0) - now) / 1000));
       return {
-        id, title: title(id), batches: s.batches || 0, stopped: !!s.stopped,
-        note: s.note || '', busy: running.get(id)?.title || '',
-        wait: Math.max(0, Math.round(((s.nextAt || 0) - now) / 1000)),
+        id, title: acc ? (acc.name || acc.title) : id, phone: acc?.title || '',
+        stopped: !!s.stopped,
+        today, cap, checks,
+        // что аккаунт делает — человеческим языком; решает сервер, а не
+        // экран по сырым полям (иначе «свободен» у того, кто ждёт завтра)
+        status: autoStatus(s, running.get(id)?.title || '', { today, cap, checks, wait }, acc),
+        working: running.has(id),
       };
     }),
   };
@@ -495,8 +1665,8 @@ function startMany(name, ids, opts) {
 function pythonCmd() {
   const win = process.platform === 'win32';
   const cands = [
-    path.join(DIR, 'venv-tg', win ? 'Scripts\\python.exe' : 'bin/python'),
-    path.join(DIR, 'venv', win ? 'Scripts\\python.exe' : 'bin/python'),
+    path.join(CODE, 'venv-tg', win ? 'Scripts\\python.exe' : 'bin/python'),
+    path.join(CODE, 'venv', win ? 'Scripts\\python.exe' : 'bin/python'),
   ];
   for (const p of cands) if (fs.existsSync(p)) return p;
   return win ? 'python' : 'python3';
@@ -512,7 +1682,7 @@ const VOICE_EXT = /\.(ogg|oga|opus|mp3|m4a|aac|wav|mp4|webm)$/i;
 /** ffmpeg/ffprobe: сначала рядом с панелью (можно положить бинарь), потом из PATH. */
 function toolCmd(name) {
   const win = process.platform === 'win32';
-  const local = path.join(DIR, win ? `${name}.exe` : name);
+  const local = path.join(CODE, win ? `${name}.exe` : name);
   return fs.existsSync(local) ? local : name;
 }
 
@@ -559,16 +1729,26 @@ function importAccount(accId, file) {
   if (!acc) return { ok: false, reason: 'аккаунт не найден' };
   if (running.get(accId)) return { ok: false, reason: 'аккаунт сейчас занят' };
 
+  /**
+   * Чем читать архив.
+   *
+   * Продавцы часто кладут в один .zip и .session, и папку tdata. Брать надо
+   * .session: он читается парой строк и не тянет за собой opentele с PyQt5
+   * (на сервере их обычно и нет). tdata остаётся запасным путём — для архивов,
+   * где .session не положили вовсе.
+   */
   let tdata = false;
   if (/\.zip$/i.test(file)) {
     try {
       const names = execFileSync('unzip', ['-Z1', file], { encoding: 'utf8' });
-      tdata = /(^|\/)tdata\//m.test(names) || /(^|\/)key_datas$/m.test(names);
+      const hasSession = /\.session$/m.test(names);
+      const hasTdata = /(^|\/)tdata\//m.test(names) || /(^|\/)key_datas$/m.test(names);
+      tdata = hasTdata && !hasSession;
     } catch {}
   }
   const flag = tdata ? '--tdata' : '--session';
   run(accId, acc.title, `Подключение сессии — ${acc.title}`,
-      pythonCmd(), [path.join(DIR, 'import-account.py'), '--account', accId, flag, file]);
+      pythonCmd(), [path.join(CODE, 'import-account.py'), '--account', accId, flag, file]);
   return { ok: true, kind: tdata ? 'TDATA' : 'session' };
 }
 
@@ -593,15 +1773,31 @@ function loadBase(file) {
   let st;
   try { st = fs.statSync(clean); } catch { st = null; }
   if (!st || !st.isFile()) return { ok: false, reason: `файл не найден: ${clean}` };
+  // файл с номерами — это всегда набор «по номерам»; туда же и переключаемся
+  setBaseSet('phones');
   run('_base', 'база', 'Загрузка базы', pythonCmd(),
       [path.join(DIR, 'extract_numbers.py'), clean, path.join(DIR, 'numbers.csv')],
       (code) => {
         if (code !== 0) return;
         fs.writeFileSync(BASEMETA, JSON.stringify(
           { file: path.basename(clean), at: new Date().toISOString() }, null, 2) + '\n');
-      });
+      }, 'phones');
   return { ok: true };
 }
+
+/**
+ * Вход по номеру: скрипт login-code.py и панель общаются через файлы рядом
+ * с картинками QR. Скрипт пишет «жду код», панель кладёт то, что ввёл человек.
+ * Через сеть код передавать некуда: дочерний процесс не слушает порт, а через
+ * командную строку он бы засветился в списке процессов.
+ */
+const QR = path.join(DIR, 'qr');
+const okId = (id) => /^[a-z0-9_-]+$/i.test(String(id || ''));
+const codeWait = (id) => {
+  if (!okId(id)) return '';
+  try { return fs.readFileSync(path.join(QR, `${id}.code-wait`), 'utf8').trim(); }
+  catch { return ''; }
+};
 
 const json = (res, code, obj) => {
   res.writeHead(code, { 'content-type': 'application/json; charset=utf-8' });
@@ -623,7 +1819,21 @@ const rawBody = (req, limit = 50 * 1024 * 1024) => new Promise((ok, no) => {
   req.on('error', no);
 });
 
-const WEB = path.join(DIR, 'web');
+const WEB = path.join(CODE, 'web');
+const LEAD_TPL = path.join(DIR, 'leads-tpl.txt');
+const LEAD_TPL_DEFAULT =
+  'Здравствуйте! Увидел вас в чате «{чат}» — вы подбираете {запрос}.\n' +
+  'Я Егор, брокер в «Этажах», помогаю семьям с покупкой квартиры в Екатеринбурге.\n' +
+  'Если удобно, подберу пару подходящих вариантов и пришлю: {LINK}';
+/** Текущая ссылка-квиз для {LINK} в письмах лидам (из mirror.json). */
+function leadLink() {
+  try {
+    const m = JSON.parse(fs.readFileSync(path.join(DIR, 'mirror.json'), 'utf8'));
+    const base = (m.on && m.url) ? m.url : (m.base ? 'https://' + m.base : '');
+    if (!base) return '';
+    return base + (base.includes('?') ? '&' : '?') + 'src=lead';
+  } catch { return ''; }
+}
 
 const page = (res, file) => {
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8',
@@ -672,7 +1882,10 @@ async function handler(req, res) {
     if (req.method === 'GET' && serveStatic(res, u.pathname)) return;
 
     const token = auth.cookieFrom(req.headers.cookie)[auth.COOKIE];
-    const authed = auth.valid(token);
+    // Панель может стоять за привратником: логин и пароль профиля он спросил
+    // сам, а к своей панели ходит с ключом, выданным ей при запуске. Ключ
+    // живёт только в памяти обоих, порт панели смотрит в 127.0.0.1.
+    const authed = auth.valid(token) || innerOk(req.headers['x-panel-token']);
 
     if (u.pathname === '/api/login' && req.method === 'POST') {
       const wait = auth.blocked(ip);
@@ -710,16 +1923,41 @@ async function handler(req, res) {
     if (u.pathname === '/') return page(res, 'index.html');
     if (u.pathname === '/login') { res.writeHead(302, { location: '/' }); return res.end(); }
 
+    /** Аватарка аккаунта — её кладёт tglib.save_avatar при подключении. */
+    if (u.pathname === '/api/avatar') {
+      const id = u.searchParams.get('id') || '';
+      const file = path.join(DIR, 'avatars', `${id}.jpg`);
+      if (!okId(id) || !fs.existsSync(file)) { res.writeHead(404); return res.end(); }
+      res.writeHead(200, { 'content-type': 'image/jpeg', 'cache-control': 'private, max-age=86400' });
+      return fs.createReadStream(file).pipe(res);
+    }
+
     if (u.pathname === '/api/accounts') {
-      const drafted = readCsv('drafts.csv');
+      const drafted = readAll('drafts.csv');
       const held = claims.active();
+      // числа по каждому аккаунту — одним проходом по истории. Раньше тут
+      // было три перебора всей истории НА КАЖДЫЙ аккаунт, а запрос этот
+      // панель шлёт каждые две секунды
+      const tally = new Map();
+      for (const r of drafted) {
+        const t = tally.get(r.account) || { drafts: 0, sent: 0, firstAt: '' };
+        if (r.ok === 'true') t.drafts++;
+        if (r.sent === 'true') t.sent++;
+        // первый реальный контакт аккаунта — от него считаем «день рассылки» (разгон)
+        if ((r.ok === 'true' || r.sent === 'true') && r.at && (!t.firstAt || r.at < t.firstAt)) t.firstAt = r.at;
+        tally.set(r.account, t);
+      }
+      const today = doneTodayAll(drafted);
       return json(res, 200, accounts.list().map((a) => ({
         id: a.id, title: a.title,
+        // время аватарки — для адреса картинки: сменили фото — браузер возьмёт новое
+        avatar: (() => { try { return fs.statSync(path.join(DIR, 'avatars', `${a.id}.jpg`)).mtimeMs | 0; }
+                         catch { return 0; } })(),
         authed: accounts.isAuthed(a),
         proxy: a.proxy || '',
         proxyLabel: accounts.proxyLabel(a.proxy),
-        drafts: drafted.filter((r) => r.account === a.id && r.ok === 'true').length,
-        sent: drafted.filter((r) => r.account === a.id && r.sent === 'true').length,
+        drafts: tally.get(a.id)?.drafts || 0,
+        sent: tally.get(a.id)?.sent || 0,
         busy: running.get(a.id)?.title || '',
         session: accounts.hasSession(a),
         profile: fs.existsSync(path.join(DIR, a.dir, 'Default')),
@@ -727,12 +1965,29 @@ async function handler(req, res) {
         // иначе после добавления видно только придуманное имя
         name: a.name || '', username: a.username || '', phone: a.phone || '',
         held: held.filter((h) => h.account === a.id).reduce((s, h) => s + h.n, 0),
-        warm: accounts.hasSession(a) ? warm(a) : null,
+        warm: accounts.hasSession(a) ? warm(a, today.get(a.id) || 0) : null,
+        dailyCap: Number(a.dailyCap) || 0,   // ручной предел на аккаунт (0 — авто)
+        role: accounts.inOutreach(a) ? 'send' : 'warm',
+        sentToday: today.get(a.id) || 0,
+        checks: checksOf(a.id),          // проверки номеров сегодня и дневной предел
+        now: autoStatusFor(a.id),        // что делает в прогоне и почему отдыхает
+        spamUntil: a.spamUntil || '', spamKind: a.spamKind || '',
+        // день рассылки: 0 в первый день реальных сообщений, -1 если ещё не начинали.
+        // по нему калькулятор считает разгон рассылки (2→5→8→12→15), а не возраст прогрева
+        outreachDay: tally.get(a.id)?.firstAt
+          ? Math.floor((Date.now() - Date.parse(tally.get(a.id).firstAt)) / 864e5) : -1,
+        // вход по коду ждёт, что человек введёт код (или пароль 2FA):
+        // спросить может только панель — у скрипта собеседника нет
+        codeWait: codeWait(a.id),
+        // что сказал @SpamBot и не снят ли аккаунт с рассылки
+        spam: a.spam || '', spamAt: a.spamAt || '', quarantine: inQuarantine(a),
+        // под каким устройством аккаунт заходит: у каждого своё, и это видно
+        device: a.device?.device_model || '',
       })));
     }
 
     if (u.pathname === '/api/accounts/add' && req.method === 'POST') {
-      const { title, proxy, method } = await body(req);
+      const { title, proxy, method, phone } = await body(req);
       const acc = accounts.add(title);
       // прокси ставим ДО входа: сессия должна привязаться сразу к нужному адресу,
       // иначе Telegram увидит один IP при логине и другой при работе
@@ -748,10 +2003,38 @@ async function handler(req, res) {
         if (warn) push(`⚠ ${warn}`);
         return json(res, 200, { ok: true, id: acc.id, warn, method: 'file' });
       }
+      // method === 'code' — вход по номеру: Telegram пришлёт код, панель
+      // спросит его отдельным запросом, когда скрипт об этом попросит
+      if (method === 'code') {
+        await freshIpForLogin();
+        const r = start('code', { account: acc.id, phone });
+        if (!r.ok) { accounts.remove(acc.id); return json(res, 200, r); }
+        push(`\n+ заведён «${acc.title}» (${accounts.proxyLabel(proxy)}) — жду код из Telegram`);
+        if (warn) push(`⚠ ${warn}`);
+        return json(res, 200, { ok: true, id: acc.id, warn, method: 'code' });
+      }
       push(`\n+ заведён «${acc.title}» (${accounts.proxyLabel(proxy)}) — сейчас откроется окно с QR-кодом`);
       if (warn) push(`⚠ ${warn}`);
+      await freshIpForLogin();
       start('login', { account: acc.id });
       return json(res, 200, { ok: true, id: acc.id, warn });
+    }
+
+    /** Код (или облачный пароль), который человек ввёл в панели. */
+    if (u.pathname === '/api/accounts/code' && req.method === 'POST') {
+      const { account, code, password } = await body(req);
+      if (!okId(account)) return json(res, 200, { ok: false, reason: 'аккаунт не найден' });
+      if (!codeWait(account)) {
+        return json(res, 200, { ok: false, reason: 'вход по коду сейчас не идёт — начни заново' });
+      }
+      const clean = String(code || '').replace(/\D/g, '').slice(0, 12);
+      const pass = String(password || '').slice(0, 256);
+      if (!clean && !pass) return json(res, 200, { ok: false, reason: 'пусто' });
+      fs.mkdirSync(QR, { recursive: true });
+      fs.writeFileSync(path.join(QR, `${account}.code`),
+                       JSON.stringify({ code: clean, password: pass }));
+      push(`  код принят, продолжаю вход «${account}»`);
+      return json(res, 200, { ok: true });
     }
 
     if (u.pathname === '/api/accounts/import' && req.method === 'POST') {
@@ -770,6 +2053,7 @@ async function handler(req, res) {
       const dest = path.join(UPLOADS, `${accId}-${name.replace(/[^\p{L}\p{N}._ -]/gu, '_')}`);
       fs.writeFileSync(dest, buf);
       push(`\n↑ сессия для «${accId}»: ${name} (${Math.round(buf.length / 1024)} КБ)`);
+      await freshIpForLogin();
       return json(res, 200, importAccount(accId, dest));
     }
 
@@ -784,7 +2068,7 @@ async function handler(req, res) {
       if (!acc) return json(res, 200, { ok: false, reason: 'аккаунт не найден' });
       if (running.has(id)) return json(res, 200, { ok: false, reason: 'аккаунт сейчас занят' });
       if (!accounts.hasSession(acc)) return json(res, 200, { ok: false, reason: 'аккаунт не вошёл' });
-      const args = [path.join(DIR, 'profile.py'), '--account', id];
+      const args = [path.join(CODE, 'profile.py'), '--account', id];
       for (const [k, v] of [['name', name], ['last', last], ['about', about], ['username', username]]) {
         if (v !== undefined && v !== null) args.push(`--${k}`, String(v));
       }
@@ -808,8 +2092,45 @@ async function handler(req, res) {
       fs.writeFileSync(dest, buf);
       push(`\n🖼 аватарка для «${acc.title}»: ${name}`);
       run(id, acc.title, `Аватарка — ${acc.title}`, pythonCmd(),
-          [path.join(DIR, 'profile.py'), '--account', id, '--photo', dest]);
+          [path.join(CODE, 'profile.py'), '--account', id, '--photo', dest]);
       return json(res, 200, { ok: true });
+    }
+
+    // одно описание/имя ВСЕМ вошедшим аккаунтам сразу
+    if (u.pathname === '/api/accounts/profile-all' && req.method === 'POST') {
+      const { about, name, last } = await body(req);
+      const list = accounts.list().filter((a) => accounts.hasSession(a) && !running.has(a.id));
+      if (!list.length) return json(res, 200, { ok: false, reason: 'нет свободных вошедших аккаунтов' });
+      for (const acc of list) {
+        const args = [path.join(CODE, 'profile.py'), '--account', acc.id];
+        for (const [k, v] of [['name', name], ['last', last], ['about', about]]) {
+          if (v !== undefined && v !== null && String(v).length) args.push(`--${k}`, String(v));
+        }
+        run(acc.id, acc.title, `Профиль (всем) — ${acc.title}`, pythonCmd(), args);
+      }
+      push(`\n👥 задаю профиль всем: ${list.length} аккаунт(ов)`);
+      return json(res, 200, { ok: true, n: list.length });
+    }
+
+    // одну аватарку ВСЕМ вошедшим аккаунтам сразу
+    if (u.pathname === '/api/accounts/photo-all' && req.method === 'POST') {
+      const name = decodeURIComponent(req.headers['x-filename'] || '').split(/[\\/]/).pop();
+      if (!name || !/\.(jpg|jpeg|png|webp)$/i.test(name)) {
+        return json(res, 200, { ok: false, reason: 'нужна картинка .jpg или .png' });
+      }
+      let buf;
+      try { buf = await rawBody(req, 12 * 1024 * 1024); } catch (e) { return json(res, 200, { ok: false, reason: e.message }); }
+      const list = accounts.list().filter((a) => accounts.hasSession(a) && !running.has(a.id));
+      if (!list.length) return json(res, 200, { ok: false, reason: 'нет свободных вошедших аккаунтов' });
+      fs.mkdirSync(UPLOADS, { recursive: true });
+      const dest = path.join(UPLOADS, `avatar-all-${Date.now()}-${name.replace(/[^\p{L}\p{N}._ -]/gu, '_')}`);
+      fs.writeFileSync(dest, buf);
+      for (const acc of list) {
+        run(acc.id, acc.title, `Аватарка (всем) — ${acc.title}`, pythonCmd(),
+            [path.join(CODE, 'profile.py'), '--account', acc.id, '--photo', dest]);
+      }
+      push(`\n🖼 ставлю одну аватарку всем: ${list.length} аккаунт(ов) — ${name}`);
+      return json(res, 200, { ok: true, n: list.length });
     }
 
     /**
@@ -897,12 +2218,63 @@ async function handler(req, res) {
 
       push(`\n🖥 собираю общую папку Telegram Desktop: ${chosen.map(title).join(', ')}`);
       run('_pack', 'десктоп', 'Сборка папки Telegram Desktop', pythonCmd(),
-          [path.join(DIR, 'desktop-pack.py'), '--accounts', chosen.join(','), '--out', wd],
+          [path.join(CODE, 'desktop-pack.py'), '--accounts', chosen.join(','), '--out', wd],
           (code) => {
             if (code === 0) { launchDesktop(app, wd); push('🖥 общий десктоп запущен'); }
             else push('🖥 собрать папку не вышло — смотри строки выше');
           });
       return json(res, 200, { ok: true, step: 'open', n: chosen.length });
+    }
+
+    /**
+     * Комплект запуска аккаунта на СВОЁМ компьютере.
+     *
+     * Панель крутится на сервере и запустить Telegram Desktop у человека не
+     * может. Поэтому отдаём архив: tdata аккаунта, мост до его прокси и один
+     * запускаемый файл под нужную систему. Прокси можно передать свой —
+     * пригодится, когда аккаунт смотрят с другого IP, чем работает панель.
+     */
+    if (u.pathname === '/api/accounts/kit') {
+      const id = u.searchParams.get('id') || '';
+      const os = ['mac', 'win', 'linux'].includes(u.searchParams.get('os'))
+        ? u.searchParams.get('os') : 'mac';
+      const acc = accounts.list().find((a) => a.id === id);
+      if (!acc) return json(res, 404, { ok: false, reason: 'аккаунт не найден' });
+
+      let proxy;
+      try {
+        const parsed = accounts.parseProxy(u.searchParams.get('proxy') || acc.proxy);
+        if (!parsed) throw new Error('у аккаунта не задан прокси — без него аккаунт выйдет с твоего IP');
+        proxy = kitProxy(parsed);
+      } catch (e) {
+        return json(res, 200, { ok: false, reason: e.message });
+      }
+
+      const src = fs.existsSync(UPLOADS)
+        ? fs.readdirSync(UPLOADS).find((f) => f.startsWith(`${id}-`) && /\.zip$/i.test(f))
+        : null;
+      if (!src) {
+        return json(res, 200, { ok: false, reason:
+          'Не нашёл исходный файл сессии в uploads/. Открыть на компьютере можно только ' +
+          'аккаунт, залитый как TDATA (.zip). Перезалей его кнопкой «Сессия».' });
+      }
+
+      let kit;
+      try {
+        fs.mkdirSync(DESKTOP, { recursive: true });
+        kit = buildKit({ id, title: acc.name || acc.title, proxy, os, kitDir: path.join(CODE, 'kit'),
+                         uploadsZip: path.join(UPLOADS, src), tmpRoot: DESKTOP });
+      } catch (e) {
+        return json(res, 200, { ok: false, reason: 'не смог собрать комплект: ' + e.message });
+      }
+      push(`\n🖥 «${acc.title}»: собран комплект запуска на компьютере (${os})`);
+      res.writeHead(200, {
+        'content-type': 'application/zip',
+        'content-disposition': `attachment; filename="${kit.name}"`,
+        'content-length': kit.body.length,
+        'cache-control': 'no-store',
+      });
+      return res.end(kit.body);
     }
 
     if (u.pathname === '/api/accounts/desktop/ready' && req.method === 'POST') {
@@ -924,7 +2296,22 @@ async function handler(req, res) {
     }
 
     if (u.pathname === '/api/accounts/proxy' && req.method === 'POST') {
-      const { id, proxy } = await body(req);
+      const { id, proxy, all } = await body(req);
+      // один мобильный прокси на всех — обычное дело, и прокликивать его
+      // по каждому аккаунту руками незачем
+      if (all) {
+        const ids = accounts.list().map((a) => a.id);
+        for (const one of ids) {
+          // строка у всех одна, поэтому первая же ошибка — общая: незачем
+          // повторять её столько раз, сколько заведено аккаунтов
+          try { accounts.setProxy(one, proxy); }
+          catch (e) { return json(res, 200, { ok: false, reason: e.message }); }
+        }
+        push(`⚙ прокси ${accounts.proxyLabel(proxy)} поставлен всем аккаунтам (${ids.length})`);
+        const warn = accounts.proxyWarning(proxy);
+        if (warn) push(`⚠ ${warn}`);
+        return json(res, 200, { ok: true, warn });
+      }
       try {
         const ok = accounts.setProxy(id, proxy);
         const acc = accounts.list().find((a) => a.id === id);
@@ -942,6 +2329,23 @@ async function handler(req, res) {
       return json(res, 200, { ok: accounts.rename(id, title) });
     }
 
+    /** Какой набор получателей в работе: «по номерам» или «по чатам». */
+    if (u.pathname === '/api/base-set') {
+      if (req.method !== 'POST') return json(res, 200, { set: baseSet });
+      const { set } = await body(req);
+      if (set !== 'phones' && set !== 'chats') return json(res, 200, { ok: false, reason: 'нет такого режима' });
+      // посреди проверки или рассылки набор не меняем: задача дописала бы
+      // половину в один набор, половину в другой
+      const busy = auto.on || [...running.values()].some((v) =>
+        /^(Проверка базы|Черновики|Смотрит ответы|Загрузка базы)/.test(v.title));
+      if (busy && set !== baseSet) {
+        return json(res, 200, { ok: false, reason: 'сначала останови запуск — он работает по текущему набору' });
+      }
+      setBaseSet(set);
+      push(`\n⇄ рассылка переключена: ${baseSet === 'chats' ? 'по чатам' : 'по номерам'}`);
+      return json(res, 200, { ok: true, set: baseSet });
+    }
+
     if (u.pathname === '/api/base') {
       const rows = readCsv('numbers.csv');
       let meta = {};
@@ -951,6 +2355,98 @@ async function handler(req, res) {
         loading: running.has('_base'),
         rows: rows.slice(0, 8).map((r) => ({ phone: r.phone, calls: r.calls, last_call: r.last_call })),
       });
+    }
+
+    /**
+     * Разбор чата: сколько людей собрано, из каких чатов и что с ними стало.
+     * Это второй способ набрать получателей — вместо таблицы с номерами;
+     * очередь на рассылку у них дальше общая с проверенными номерами.
+     */
+    if (u.pathname === '/api/members') {
+      const rows = readCsv('members.csv');
+      // какие чаты уже пройдены до конца — это помнит parse-chat.py,
+      // чтобы следующий заход начинался с неразобранных
+      let walked = {};
+      try { walked = JSON.parse(fs.readFileSync(path.join(DIR, 'chats.json'), 'utf8')) || {}; }
+      catch {}
+      const found = readCsv('results.csv');
+      const log = readCsv('drafts.csv');
+      const queued = found.filter((r) => !isPhone(r.phone) && r.tg === 'true');
+      const done = new Set(log.filter((r) => r.ok === 'true' || r.sent === 'true').map((r) => r.phone));
+      const byChat = new Map();
+      for (const r of rows) byChat.set(r.chat || '—', (byChat.get(r.chat || '—') || 0) + 1);
+      return json(res, 200, {
+        count: rows.length,
+        named: rows.filter((r) => r.username).length,
+        queued: queued.length,
+        written: queued.filter((r) => done.has(r.phone)).length,
+        // кому напишет любой аккаунт, а кому — только тот, кто его нашёл
+        solo: queued.filter((r) => String(r.phone).startsWith('id:')).length,
+        parsing: [...running.values()].some((v) => v.title.startsWith('Разбор чат')),
+        walked: Object.keys(walked).length,
+        chats: [...byChat].map(([title, n]) => ({ title, n })).sort((a, b) => b.n - a.n).slice(0, 8),
+        rows: rows.slice(-8).reverse().map((r) => ({
+          key: r.key, name: r.name || '', chat: r.chat || '',
+        })),
+      });
+    }
+
+    /** Собранных людей можно забрать файлом — открывается в Excel. */
+    if (u.pathname === '/api/members/csv') {
+      const file = path.join(DIR, 'members.csv');
+      if (!fs.existsSync(file)) return json(res, 404, { error: 'участников ещё не собирали' });
+      res.writeHead(200, {
+        'content-type': 'text/csv; charset=utf-8',
+        'content-disposition': 'attachment; filename="members.csv"',
+        'cache-control': 'no-store',
+      });
+      // BOM: без него Excel открывает наши имена крокозябрами
+      return res.end('\ufeff' + fs.readFileSync(file, 'utf8'));
+    }
+
+    /** Найденные в Telegram — файлом по запросу (в панели список не выводим). */
+    if (u.pathname === '/api/found/csv') {
+      const cell = (v) => { const s = String(v ?? ''); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+      const dr = readCsv('drafts.csv');
+      const drafted = new Set(dr.filter((r) => r.ok === 'true').map((r) => r.phone));
+      const sent = new Set(dr.filter((r) => r.sent === 'true').map((r) => r.phone));
+      const rows = readCsv('results.csv').filter((r) => r.tg === 'true');
+      const head = 'phone,name,last_call,источник,статус';
+      const body = rows.map((r) => {
+        const src = isPhone(r.phone) ? 'база (xlsx)' : 'чат (парсинг)';
+        const st = sent.has(r.phone) ? 'отправлено' : drafted.has(r.phone) ? 'черновик' : '';
+        return [r.phone, r.name || '', (r.last_call || '').slice(0, 10), src, st].map(cell).join(',');
+      }).join('\n');
+      res.writeHead(200, {
+        'content-type': 'text/csv; charset=utf-8',
+        'content-disposition': 'attachment; filename="found.csv"',
+        'cache-control': 'no-store',
+      });
+      return res.end('﻿' + head + '\n' + body);
+    }
+
+    /** Все карточки лидов — файлом по запросу (leads.json). */
+    if (u.pathname === '/api/leads/csv') {
+      const cell = (v) => { const s = String(v ?? ''); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+      let d = {};
+      try { d = JSON.parse(fs.readFileSync(path.join(DIR, 'leads.json'), 'utf8')); } catch {}
+      const head = 'имя,контакт,статус,балл,запрос,бюджет,срок,чат,в_таблице,цитата';
+      const body = Object.values(d)
+        .filter((p) => ['hot', 'warm', 'closed'].includes(p.status))
+        .sort((a, b) => (b.score || 0) - (a.score || 0))
+        .map((p) => {
+          const contact = p.username ? '@' + p.username : 'id:' + (p.user_id || '');
+          const quote = (p.evidence && p.evidence[0]) ? p.evidence[0].quote : '';
+          return [p.display_name || '', contact, p.status, p.score || 0,
+                  p.what_looking_for || '', p.budget || '', p.timeline || '',
+                  p.found_chat || '', p.pushed_to_sheet ? 'да' : '', quote].map(cell).join(',');
+        }).join('\n');
+      res.writeHead(200, {
+        'content-type': 'text/csv; charset=utf-8',
+        'content-disposition': 'attachment; filename="leads.csv"',
+        'cache-control': 'no-store',
+      });
+      return res.end('﻿' + head + '\n' + body);
     }
 
     if (u.pathname === '/api/upload' && req.method === 'POST') {
@@ -975,19 +2471,30 @@ async function handler(req, res) {
      * неудобно, а ошибиться в нём дороже всего — он уходит людям.
      */
     if (u.pathname === '/api/message') {
-      const file = path.join(DIR, 'message.txt');
+      // second=1 — текст ВТОРОГО письма: то, где ссылка. Оно уходит только
+      // тем, кто ответил на первое, поэтому и живёт отдельным файлом.
+      // aud=chat — отдельный текст для собранных ИЗ ЧАТОВ (у них нет номера);
+      // база из xlsx получает message.txt, парсинг — message-chat.txt (если задан).
+      const aud = u.searchParams.get('aud');
+      const file = path.join(DIR,
+        u.searchParams.get('second') ? 'message2.txt'
+        : aud === 'chat' ? 'message-chat.txt'
+        : 'message.txt');
       if (req.method !== 'POST') {
         return json(res, 200, { text: fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '' });
       }
       const { text } = await body(req);
       const clean = String(text ?? '').replace(/\r\n/g, '\n').trim();
-      if (!clean) return json(res, 200, { ok: false, reason: 'текст не может быть пустым' });
+      // текст для чатов можно очистить — это значит «слать им общий текст»
+      if (!clean && aud !== 'chat') return json(res, 200, { ok: false, reason: 'текст не может быть пустым' });
       // предел одного сообщения в Telegram — 4096 символов; с запасом на подстановки
       if (clean.length > 3900) {
         return json(res, 200, { ok: false, reason: `слишком длинно: ${clean.length} символов, можно до 3900` });
       }
-      fs.writeFileSync(file, clean + '\n');
-      push(`\n✎ текст сообщения изменён (${clean.length} символов)`);
+      fs.writeFileSync(file, clean ? clean + '\n' : '');
+      const label = u.searchParams.get('second') ? 'второго письма'
+        : aud === 'chat' ? 'сообщения для собранных из чатов' : 'сообщения';
+      push(`\n✎ текст ${label} изменён (${clean.length} символов)`);
       return json(res, 200, { ok: true, text: clean });
     }
 
@@ -1043,17 +2550,47 @@ async function handler(req, res) {
      * Панель ждать не заставляем — ход виден в журнале, готовность в /api/state.
      */
     if (u.pathname === '/api/reset' && req.method === 'POST') {
-      if (auto.on) {
-        return json(res, 200, { ok: false, reason: 'сначала останови автопрогон' });
+      if (running.has('_wipe')) {
+        return json(res, 200, { ok: false, reason: 'чистка уже идёт' });
       }
+      /**
+       * Раньше чистка требовала, чтобы человек сам сначала всё остановил, и
+       * отказывала, если хоть что-то ещё дышало. На деле «Остановить» убивает
+       * процессы не мгновенно: нажав обе кнопки подряд, человек получал отказ
+       * на ровном месте, жал ещё раз — и попадал в то же самое.
+       *
+       * Теперь чистка останавливает всё сама и ждёт, пока процессы действительно
+       * умрут. Это её работа, а не человека.
+       */
+      if (auto.on) autoStop('идёт полная чистка');
+      if (warmup.on) warmStop('идёт полная чистка');
+      if (mirror.on) mirrorStop();
+      // отвязать все субдомены проекта (режим api) — чтобы кабинет Vercel
+      // не копил мусор; в wildcard отвязывать нечего
+      if (mirror.mode === 'api' && mirror.token) {
+        for (const m of mirror.pool.filter((x) => !x.retired)) {
+          await vercel.deleteDomain(secret(), `${m.name}.${mirror.base}`);
+        }
+      }
+      // забываем всё про зеркала: и токен, и пул. Иначе фоновая чистка
+      // тут же перезапишет mirror.json, который чистка только что унесла
+      Object.assign(mirror, { current: '', url: '', pool: [], sinceCount: 0, next: 0,
+                              token: '', projectId: '', teamId: '' });
       if (running.size) {
-        return json(res, 200, { ok: false, reason: 'сначала останови задачи (кнопка «Остановить»)' });
+        push('\n⏹ останавливаю задачи перед чисткой…');
+        for (const [k, r] of running) { if (k !== '_wipe') r.child.kill('SIGTERM'); }
+        // ждём до 20 секунд; кто не ушёл сам — добиваем
+        for (let i = 0; i < 40 && running.size; i++) {
+          await new Promise((r) => setTimeout(r, 500));
+        }
+        for (const [k, r] of running) { if (k !== '_wipe') r.child.kill('SIGKILL'); }
+        await new Promise((r) => setTimeout(r, 500));
       }
       // выходить не из кого — сразу убираем
       if (!accounts.list().length) return json(res, 200, { ok: true, ...wipeAll() });
       push('\n🧹 чистка: выхожу из аккаунтов, это займёт несколько секунд…');
       run('_wipe', 'чистка', 'Выход из всех аккаунтов', pythonCmd(),
-          [path.join(DIR, 'logout-accounts.py')], () => wipeAll());
+          [path.join(CODE, 'logout-accounts.py')], () => wipeAll());
       return json(res, 200, { ok: true, started: true });
     }
 
@@ -1061,16 +2598,29 @@ async function handler(req, res) {
       const now = counts();
       return json(res, 200, {
         running: [...running.values()].map((v) => v.title),
+        // то же самое по-человечески: «Егор Кочнев — проверяет номера»
+        doing: [...running.entries()].map(([key, v]) => {
+          const acc = accounts.list().find((a) => a.id === key);
+          const word = (TASK_WORD.find(([re]) => re.test(v.title)) || [null, v.title.split(' — ')[0]])[1];
+          return acc ? `${acc.name || acc.title} — ${word}` : word;
+        }),
         base: readCsv('numbers.csv').length,
         ...now,
         // числа за всё время: переживают чистку, поэтому считаются отдельно
         total: statsTotal(now),
-        replies: replies().n,
+        ...(() => { const r = replies(); return { replies: r.n, repliesCheckedAt: r.checkedAt, repliesChecksHour: r.checkedLastHour }; })(),
         baseLoading: running.has('_base'),
+        baseSet,
         wiping: running.has('_wipe'),
         claims: claims.active(),
+        proxy: proxyGuard.summary(),
         auto: autoView(),
+        warmup: warmup.on,
+        mirror: mirror.on,
         logLen: log.length,
+        // чей это профиль — панель за привратником показывает его в углу
+        profile: process.env.TG_PROFILE || '',
+        profileAdmin: !!process.env.TG_PROFILE_ADMIN,
       });
     }
 
@@ -1086,6 +2636,18 @@ async function handler(req, res) {
       return res.end(fs.readFileSync(f));
     }
 
+    /** Итоги рассылки для вкладки «Результаты» — по набору получателей. */
+    if (u.pathname === '/api/results') {
+      const set = u.searchParams.get('set') === 'chats' ? 'chats' : 'phones';
+      const name = (id) => { const a = accounts.list().find((x) => x.id === id); return a ? (a.name || a.title) : id; };
+      return json(res, 200, results.compute(set, name));
+    }
+
+    /** Лента событий — человеческим языком, свежие сверху. */
+    if (u.pathname === '/api/events') {
+      return json(res, 200, events.recent(Math.min(300, +(u.searchParams.get('n') || 100))));
+    }
+
     if (u.pathname === '/api/log') {
       const from = Math.max(0, +(u.searchParams.get('from') || 0));
       return json(res, 200, { from, lines: log.slice(from), total: log.length });
@@ -1093,6 +2655,21 @@ async function handler(req, res) {
 
     if (u.pathname === '/api/replies') {
       return json(res, 200, replies());
+    }
+
+    /** Кто ответил на первое письмо и ещё не получил второе. */
+    if (u.pathname === '/api/funnel') {
+      const wrote = new Set(readAll('drafts.csv')
+        .filter((r) => r.ok === 'true' || r.sent === 'true').map((r) => r.phone));
+      const got = new Set(readCsv('followup.csv')
+        .filter((r) => r.sent === 'true').map((r) => r.key));
+      const file = path.join(DIR, 'message2.txt');
+      return json(res, 200, {
+        wrote: wrote.size,
+        answered: got.size,                       // сколько уже дошло до второго шага
+        hasText: fs.existsSync(file) && !!fs.readFileSync(file, 'utf8').trim(),
+        on: auto.funnel,
+      });
     }
 
     if (u.pathname === '/api/found') {
@@ -1105,9 +2682,312 @@ async function handler(req, res) {
     }
 
     /**
+     * Горячие лиды: карточки из leads.json (их ведёт scan-leads.py).
+     * Отдаём hot/warm/closed, самые горячие сверху — для отдельного блока панели.
+     */
+    /* ═══════════ ЕГРЮЛ ═══════════ */
+
+    // Таблица с ИНН: принимаем файл и складываем ИНН в очередь. Повторная
+    // заливка того же файла дублей не плодит — разбирается по ИНН.
+    if (u.pathname === '/api/egrul/upload' && req.method === 'POST') {
+      const name = decodeURIComponent(req.headers['x-filename'] || '').split(/[\\/]/).pop();
+      if (!name || !BASE_EXT.test(name)) {
+        return json(res, 200, { ok: false, reason: 'нужен файл .xlsx, .xlsm, .csv или .tsv' });
+      }
+      let buf;
+      try { buf = await rawBody(req, 20 * 1024 * 1024); }
+      catch (e) { return json(res, 200, { ok: false, reason: e.message }); }
+      if (!buf.length) return json(res, 200, { ok: false, reason: 'файл пустой' });
+      fs.mkdirSync(UPLOADS, { recursive: true });
+      const dest = path.join(UPLOADS, 'egrul-' + name.replace(/[^\p{L}\p{N}._ -]/gu, '_'));
+      fs.writeFileSync(dest, buf);
+      push(`\n↑ таблица ЕГРЮЛ принята: ${path.basename(dest)} (${Math.round(buf.length / 1024)} КБ)`);
+      run('egrul-import', 'егрюл', 'Разбор таблицы с ИНН', pythonCmd(),
+          [path.join(CODE, 'egrul-import.py'), '--file', dest]);
+      return json(res, 200, { ok: true });
+    }
+
+    // Строки и сводка для вкладки
+    if (u.pathname === '/api/egrul') {
+      return json(res, 200, { ...egrulStat(), rows: egrulRows().slice(-400).reverse() });
+    }
+
+    // Один заход руками
+    if (u.pathname === '/api/egrul/start' && req.method === 'POST') {
+      const { account } = await body(req);
+      if (account) { egrul.account = account; egrulSave(); }
+      return json(res, 200, egrulStart(egrul.account, true));
+    }
+
+    // Автоматический сбор: панель сама будит сборщика между паузами
+    if (u.pathname === '/api/egrul/auto' && req.method === 'POST') {
+      const { on, account } = await body(req);
+      if (account) egrul.account = account;
+      egrul.on = !!on;
+      if (egrul.on) {
+        const acc = accounts.list().find((a) => a.id === egrul.account);
+        if (!acc) { egrul.on = false; return json(res, 200, { ok: false, reason: 'сначала выбери аккаунт-сборщик' }); }
+        egrul.nextAt = 0;
+        egrul.note = 'жду свободного аккаунта';
+        push(`\n🏛 сбор ЕГРЮЛ включён, собирает «${acc.title}»`);
+      } else {
+        push('\n🏛 сбор ЕГРЮЛ выключен');
+      }
+      egrulSave();
+      return json(res, 200, { ok: true, on: egrul.on });
+    }
+
+    // Выгрузка разобранного файлом
+    if (u.pathname === '/api/egrul/csv') {
+      const rows = egrulRows();
+      const head = ['инн', 'статус', 'компания', 'лпр', 'должность', 'инн_лпр',
+                    'телефон', 'адрес', 'вид_деятельности', 'заметка', 'когда'];
+      const keys = ['inn', 'status', 'company', 'lpr', 'lpr_role', 'lpr_inn',
+                    'phone', 'address', 'activity', 'note', 'at'];
+      const cell = (v) => { const t = String(v ?? ''); return /[",\n]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t; };
+      res.writeHead(200, {
+        'content-type': 'text/csv; charset=utf-8',
+        'content-disposition': 'attachment; filename="egrul.csv"',
+        'cache-control': 'no-store',
+      });
+      return res.end('\ufeff' + head.join(',') + '\n'
+        + rows.map((r) => keys.map((k) => cell(r[k])).join(',')).join('\n'));
+    }
+
+    if (u.pathname === '/api/leads') {
+      let d = {};
+      try { d = JSON.parse(fs.readFileSync(path.join(DIR, 'leads.json'), 'utf8')); } catch {}
+      const arr = Object.values(d)
+        .filter((p) => ['hot', 'warm', 'closed'].includes(p.status))
+        .sort((a, b) => (b.score || 0) - (a.score || 0));
+      return json(res, 200, arr);
+    }
+
+    // автопоиск лидов: интервал таймера + по каким чатам ищет + когда следующий заход
+    // выключатель автопоиска: панель не root и таймер не трогает — кладёт отметку
+    // lead-watch.off, увидев которую lead-watch.sh сразу выходит
+    if (u.pathname === '/api/leads/autoscan' && req.method === 'POST') {
+      const { on } = await body(req);
+      const off = path.join(DIR, 'lead-watch.off');
+      if (on) fs.rmSync(off, { force: true });
+      else fs.writeFileSync(off, new Date().toISOString() + '\n');
+      push(on ? '🔎 автопоиск лидов включён' : '⏹ автопоиск лидов выключен');
+      return json(res, 200, { ok: true, on: !!on });
+    }
+    if (u.pathname === '/api/leads/autoscan') {
+      let chats = [];
+      try {
+        chats = fs.readFileSync(path.join(DIR, 'lead-chats.txt'), 'utf8')
+          .split('\n').map((s) => s.trim()).filter((s) => s && !s.startsWith('#'));
+      } catch {}
+      let on = false, nextMs = 0;
+      try {
+        const out = execFileSync('systemctl', ['show', 'lead-watch.timer',
+          '-p', 'ActiveState', '-p', 'NextElapseUSecRealtime'], { encoding: 'utf8' });
+        on = /ActiveState=active/.test(out) && !fs.existsSync(path.join(DIR, 'lead-watch.off'));
+        const m = out.match(/NextElapseUSecRealtime=(\d+)/);
+        if (m && +m[1] > 0) nextMs = Math.round(+m[1] / 1000);
+      } catch {}
+      return json(res, 200, { on, every: '15 минут', chats, count: chats.length, nextMs });
+    }
+
+    // написать лиду выбранный вариант (или свой текст). Аккаунт-отправитель
+    // выбирает сам скрипт: пишет тот, кто нашёл человека в чате
+    if (u.pathname === '/api/leads/send' && req.method === 'POST') {
+      const { user, variant, text } = await body(req);
+      if (!user) return json(res, 200, { ok: false, reason: 'не указан лид' });
+      const args = [path.join(CODE, 'send-lead.py'), '--user', String(user),
+                    '--variant', String(variant || 'a')];
+      if (text && String(text).trim()) args.push('--text', String(text));
+      run('lead:' + user, 'лид', `Письмо лиду ${user}`, pythonCmd(), args, () => {}, 'chats');
+      return json(res, 200, { ok: true });
+    }
+
+    // скрыть лида (пометить, что писать не будем)
+    if (u.pathname === '/api/leads/skip' && req.method === 'POST') {
+      const { user } = await body(req);
+      const f = path.join(DIR, 'leads.json');
+      let d = {};
+      try { d = JSON.parse(fs.readFileSync(f, 'utf8')); } catch {}
+      const want = String(user || '').replace(/^id:/, '').replace(/^@/, '').toLowerCase();
+      for (const p of Object.values(d)) {
+        if (String(p.user_id) === want || (p.username || '').toLowerCase() === want) {
+          p.message_sent = true; p.skipped = true;
+        }
+      }
+      fs.writeFileSync(f, JSON.stringify(d, null, 1));
+      return json(res, 200, { ok: true });
+    }
+
+    // шаблон письма лидам: {чат}/{запрос}/{бюджет}/{срок}/{имя}/{LINK}
+    if (u.pathname === '/api/leads/template' && req.method !== 'POST') {
+      let tpl = LEAD_TPL_DEFAULT;
+      try { tpl = fs.readFileSync(LEAD_TPL, 'utf8'); } catch {}
+      return json(res, 200, { template: tpl, link: leadLink() });
+    }
+    if (u.pathname === '/api/leads/template' && req.method === 'POST') {
+      const { template } = await body(req);
+      fs.writeFileSync(LEAD_TPL, String(template == null ? LEAD_TPL_DEFAULT : template));
+      return json(res, 200, { ok: true });
+    }
+
+    /**
      * Автопрогон: панель сама гоняет пачки всеми выбранными аккаунтами,
      * пока база не кончится. {on:false} — остановить.
      */
+    /**
+     * Проверка ссылки на смену IP: нажал — увидел, что ответил прокси.
+     * Без этого настройку можно проверить только запуском прогона, а узнать,
+     * что ссылка неверная, лучше до того, как аккаунты пойдут работать.
+     */
+    if (u.pathname === '/api/proxy/rotate' && req.method === 'POST') {
+      const { url } = await body(req);
+      const r = await rotateIp(String(url || '').trim());
+      push(r.ok ? `\n🔄 проверка смены IP: прокси ответил ${r.text || 'ок'}`
+                : `\n🔄 проверка смены IP: ${r.reason}`);
+      return json(res, 200, r);
+    }
+
+    /**
+     * Сборный текст: три блока, из каждого при отправке берётся одна строка.
+     * Храним ровно то, что человек набрал, — разбор на строки дело отправки,
+     * а править он должен то же, что видел.
+     */
+    if (u.pathname === '/api/parts') {
+      const file = path.join(DIR, 'message-parts.json');
+      const read = () => { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return {}; } };
+      const lines = (t) => String(t || '').split('\n').map((x) => x.trim()).filter(Boolean);
+      if (req.method !== 'POST') {
+        const d = read();
+        const n = ['hello', 'body', 'call'].map((k) => lines(d[k]).length);
+        return json(res, 200, {
+          on: !!d.on, hello: d.hello || '', body: d.body || '', call: d.call || '',
+          counts: n, total: n.every((x) => x) ? n[0] * n[1] * n[2] : 0,
+        });
+      }
+      const { on, hello, body: b, call } = await body(req);
+      const clean = (t) => lines(t).join('\n');
+      const next = { on: !!on, hello: clean(hello), body: clean(b), call: clean(call) };
+      const n = ['hello', 'body', 'call'].map((k) => lines(next[k]).length);
+      if (next.on && !n.every((x) => x)) {
+        return json(res, 200, { ok: false, reason: 'для сборки нужны все три блока — хотя бы по строке в каждом' });
+      }
+      fs.writeFileSync(file, JSON.stringify(next, null, 2) + '\n');
+      push(`\n✎ сборный текст: ${n.join(' × ')} = ${n[0] * n[1] * n[2]} непохожих сообщений` +
+           (next.on ? '' : ' (сборка выключена)'));
+      return json(res, 200, { ok: true, ...next, counts: n, total: n[0] * n[1] * n[2] });
+    }
+
+    /** Зеркала-субдомены: статус, вкл/выкл, настройки, ручная смена. */
+    if (u.pathname === '/api/mirror') {
+      if (req.method !== 'POST') return json(res, 200, mirrorView());
+      const b = await body(req);
+      if (typeof b.base === 'string' && b.base.trim()) mirror.base = b.base.trim().toLowerCase();
+      if (b.mode === 'wildcard' || b.mode === 'api') mirror.mode = b.mode;
+      if (Array.isArray(b.every) && b.every.length === 2) {
+        const lo = num(b.every[0], 30, 1, 100000), hi = num(b.every[1], 50, lo, 200000);
+        mirror.every = [lo, hi];
+      }
+      // токен и проект приходят только сюда и наружу не возвращаются
+      if (typeof b.token === 'string' && b.token.trim()) {
+        const t = b.token.trim();
+        // токен Vercel — латиница; кириллица роняет заголовок HTTP невнятной ошибкой
+        if (!/^[\x21-\x7e]+$/.test(t)) return json(res, 200, { ok: false, reason: 'токен Vercel — это латиница и цифры, проверь, что скопировал верно' });
+        mirror.token = t;
+      }
+      if (typeof b.projectId === 'string') mirror.projectId = b.projectId.trim();
+      if (typeof b.teamId === 'string') mirror.teamId = b.teamId.trim();
+      if (b.on === true) mirrorStart();
+      else if (b.on === false) mirrorStop();
+      else mirrorSave();
+      if (b.forceNew) { await mirrorRotate(); }
+      return json(res, 200, { ok: true, ...mirrorView() });
+    }
+
+    /** Проверить токен Vercel и заодно, что домен привязан. */
+    if (u.pathname === '/api/mirror/test' && req.method === 'POST') {
+      if (!mirror.token || !mirror.projectId) {
+        return json(res, 200, { ok: false, reason: 'сначала задай токен и ID проекта Vercel' });
+      }
+      const r = await vercel.ping(secret());
+      push(r.ok ? `🪞 Vercel на связи: доменов в проекте ${r.count}`
+                : `🪞 Vercel не принял: ${r.reason}`);
+      return json(res, 200, r);
+    }
+
+    // сколько номеров в день может проверить один аккаунт (после разгона)
+    if (u.pathname === '/api/checkcap' && req.method === 'POST') {
+      const { cap } = await body(req);
+      setCheckMax(Number(cap) || 0);
+      warmSave();
+      push(`\n🔎 максимум проверок номеров в день: ${getCheckMax()}`);
+      return json(res, 200, { ok: true, cap: getCheckMax() });
+    }
+
+    /** Прогрев поведением: включить, выключить, посмотреть, кто чем занят. */
+    // дневной предел сообщений «на всех»: 0 — авто по возрасту (прогрев)
+    if (u.pathname === '/api/dailycap' && req.method === 'POST') {
+      const { cap } = await body(req);
+      setMaxCap(Number(cap) || 0);
+      warmSave();
+      push(`\n📊 максимум сообщений в день (плато): ${Number(cap) > 0 ? Number(cap) : 15}`);
+      return json(res, 200, { ok: true, cap: getMaxCap() });
+    }
+
+    // роль: только прогрев или прогрев + рассылка
+    if (u.pathname === '/api/accounts/role' && req.method === 'POST') {
+      const { id, role } = await body(req);
+      const acc = accounts.list().find((a) => a.id === id);
+      if (!acc) return json(res, 200, { ok: false, reason: 'аккаунт не найден' });
+      const send = role === 'send';
+      accounts.setField(id, { role: send ? 'send' : 'warm' });
+      // прогон уже идёт — новичок в рассылке подхватывается сразу, без перезапуска
+      if (send && auto.on && !auto.ids.includes(id) && accounts.hasSession(acc) && accounts.isAuthed(acc)) {
+        auto.ids.push(id);
+        auto.per.set(id, autoPer(auto.mode !== 'check' && inQuarantine(acc)));
+      }
+      events.note(send ? '✉️' : '🌱', send ? 'переведён в рассылку' : 'только прогрев — в рассылке не участвует', acc.title);
+      return json(res, 200, { ok: true });
+    }
+
+    // дневной предел на ОДИН аккаунт (для тестов): сильнее общего; 0 — снять
+    if (u.pathname === '/api/accounts/dailycap' && req.method === 'POST') {
+      const { id, cap } = await body(req);
+      const acc = accounts.list().find((a) => a.id === id);
+      if (!acc) return json(res, 200, { ok: false, reason: 'аккаунт не найден' });
+      accounts.setField(id, { dailyCap: Math.max(0, Number(cap) || 0) });
+      push(`\n📊 лимит «${acc.title}»: ${Number(cap) > 0 ? Number(cap) + ' в сутки' : 'как у всех'}`);
+      return json(res, 200, { ok: true });
+    }
+
+    if (u.pathname === '/api/warmup') {
+      if (req.method !== 'POST') return json(res, 200, warmView());
+      const { on, rotate, rotateWait, days } = await body(req);
+      if (days !== undefined) {
+        const was = getWarmDays();
+        setWarmDays(days);
+        if (getWarmDays() !== was) {
+          push(`\n🌱 срок прогрева: ${getWarmDays()} дн. (было ${was})`);
+          // срок у аккаунтов считается от их warmFrom, поэтому новая лестница
+          // применяется ко всем сразу — и к тем, кто уже греется
+          warmSave();
+        }
+      }
+      if (rotate !== undefined) {
+        const clean = String(rotate || '').trim();
+        if (clean) {
+          const bad = rotateUrlProblem(clean);
+          if (bad) return json(res, 200, { ok: false, reason: bad });
+        }
+        warmup.rotate = clean;
+        warmup.rotateWait = num(rotateWait, warmup.rotateWait, 3, 600);
+      }
+      if (on === false) warmStop('вручную');
+      else if (on === true) warmStart();
+      else warmSave();
+      return json(res, 200, { ok: true, ...warmView() });
+    }
+
     if (u.pathname === '/api/auto' && req.method === 'POST') {
       const o = await body(req);
       if (o.on === false) { autoStop('остановлено вручную'); return json(res, 200, { ok: true }); }
@@ -1115,8 +2995,10 @@ async function handler(req, res) {
     }
 
     if (u.pathname === '/api/start' && req.method === 'POST') {
-      const { name, account, accounts: many, limit, delay, send, voice, warm: w } = await body(req);
-      const opts = { limit, delay, send, voice, warm: w };
+      const { name, account, accounts: many, limit, delay, delayMax, hold, holdMax,
+              send, voice, warm: w, chat, folder, again, onlyUser, join, phone, list, days } = await body(req);
+      const opts = { limit, delay, delayMax, hold, holdMax, send, voice, warm: w,
+                     chat, folder, again, onlyUser, join, phone, list, days };
       // список аккаунтов -> запускаем задачу на каждом СРАЗУ: они делят базу
       // бронями и идут параллельно. Одиночный account — как раньше.
       if (Array.isArray(many) && many.length) return json(res, 200, startMany(name, many, opts));
@@ -1185,7 +3067,156 @@ server.on('error', (e) => {
   process.exit(1);
 });
 
+// прогрев переживает перезапуск панели: был включён — включится снова
+/* ------------------------------------------------------ зеркала-субдомены
+ *
+ * Одна и та же ссылка в тысяче писем — примета рассылки. Поэтому {LINK}
+ * в тексте панель заменяет на живой субдомен boldo-agency.ru и меняет его
+ * каждые 30–50 писем. Всё это ведёт сюда; текст собирает Python, читая
+ * текущий адрес из mirror.json.
+ */
+const MIRROR_FILE = path.join(DIR, 'mirror.json');
+
+const mirror = {
+  on: false,
+  mode: 'wildcard',          // wildcard | api
+  base: 'boldo-agency.ru',
+  every: [30, 50],           // сменить адрес через столько писем
+  current: '', url: '',
+  sinceCount: 0,             // сколько было написано на момент последней смены
+  next: 0,                   // порог следующей смены (случайный из every)
+  pool: [],                  // [{name, created, retired}]
+  token: '', projectId: '', teamId: '',
+  timer: null,
+};
+
+function mirrorSave() {
+  try { fs.writeFileSync(MIRROR_FILE, JSON.stringify(mirror, (k, v) =>
+    (k === 'timer' ? undefined : v), 2)); } catch {}
+}
+function mirrorLoad() {
+  try { Object.assign(mirror, JSON.parse(fs.readFileSync(MIRROR_FILE, 'utf8')), { timer: null }); }
+  catch {}
+  if (mirror.on) mirrorStart();
+}
+
+/** Сколько писем написано всего — по нему считаем, пора ли менять адрес. */
+const writtenCount = () => readAll('drafts.csv')
+  .filter((r) => r.ok === 'true' || r.sent === 'true').length;
+
+const secret = () => ({ token: mirror.token, projectId: mirror.projectId, teamId: mirror.teamId });
+
+/**
+ * Имена, на которые уже выпущен сертификат (mirror-names.txt, по одному на
+ * строку). Wildcard-сертификат требует доступа к DNS, а сертификат на сотню
+ * конкретных имён выпускается обычной HTTP-проверкой — поэтому в wildcard-
+ * режиме берём имена только отсюда: придуманное на лету имя открылось бы у
+ * человека с ошибкой «подключение не защищено».
+ */
+const MIRROR_NAMES = path.join(DIR, 'mirror-names.txt');
+function certifiedName(used) {
+  let names = [];
+  try { names = fs.readFileSync(MIRROR_NAMES, 'utf8').split(/\s+/).filter(Boolean); } catch {}
+  if (!names.length) return '';
+  const fresh = names.filter((n) => !used.has(n));
+  if (fresh.length) return fresh[Math.floor(Math.random() * fresh.length)];
+  // все имена уже были — берём то, что светилось давнее всех
+  const last = new Map(mirror.pool.map((m) => [m.name, m.created]));
+  return names.sort((a, b) => String(last.get(a)).localeCompare(String(last.get(b))))[0];
+}
+
+/** Завести новый субдомен и сделать его текущим. */
+async function mirrorRotate() {
+  // имя, которого ещё не было в пуле
+  let name;
+  const used = new Set(mirror.pool.map((m) => m.name));
+  if (mirror.mode === 'wildcard') name = certifiedName(used);
+  if (!name) {
+    for (let i = 0; i < 20; i++) { name = vercel.randomName(); if (!used.has(name)) break; }
+  }
+  const fqdn = `${name}.${mirror.base}`;
+
+  if (mirror.mode === 'api') {
+    if (!mirror.token || !mirror.projectId) {
+      push('🪞 зеркала в режиме API, но не задан токен/проект Vercel — смена отменена');
+      return false;
+    }
+    const r = await vercel.registerDomain(secret(), fqdn);
+    if (!r.ok) { push(`🪞 не завёлся субдомен ${fqdn}: ${r.reason}`); return false; }
+    // дать Vercel довыпустить сертификат: 200 не значит «готов сейчас же»
+    if (!r.verified) {
+      for (let i = 0; i < 6; i++) {
+        await new Promise((z) => setTimeout(z, 5000));
+        if (await vercel.domainReady(secret(), fqdn)) break;
+      }
+    }
+  }
+
+  mirror.pool.push({ name, created: new Date().toISOString(), retired: false });
+  mirror.current = fqdn;
+  mirror.url = `https://${fqdn}`;
+  mirror.sinceCount = writtenCount();
+  mirror.next = rnd(mirror.every[0], mirror.every[1]);
+  mirrorSave();
+  push(`🪞 новый адрес для ссылок: ${mirror.url}`);
+  return true;
+}
+
+/** Раз в полминуты: не пора ли сменить адрес. */
+function mirrorTick() {
+  if (!mirror.on) return;
+  if (!mirror.current) { mirrorRotate(); return; }
+  if (writtenCount() - mirror.sinceCount >= mirror.next) mirrorRotate();
+}
+
+function mirrorStart() {
+  if (mirror.timer) return;
+  mirror.on = true;
+  mirror.timer = setInterval(mirrorTick, 30000);
+  mirrorTick();
+  mirrorSave();
+}
+function mirrorStop() {
+  if (mirror.timer) clearInterval(mirror.timer);
+  mirror.timer = null;
+  mirror.on = false;
+  mirrorSave();
+}
+
+/** Убрать субдомены старше 7 суток (только режим api — в wildcard чистить нечего). */
+async function mirrorCleanup() {
+  if (!mirror.on || mirror.mode !== 'api' || !mirror.token) return 0;
+  const week = Date.now() - 7 * 864e5;
+  const old = mirror.pool.filter((m) => !m.retired && Date.parse(m.created) < week
+    && `${m.name}.${mirror.base}` !== mirror.current);
+  let gone = 0;
+  for (const m of old) {
+    const r = await vercel.deleteDomain(secret(), `${m.name}.${mirror.base}`);
+    if (r.ok) { m.retired = true; gone++; }
+  }
+  if (gone) { push(`🪞 убрано старых субдоменов: ${gone}`); mirrorSave(); }
+  return gone;
+}
+setInterval(mirrorCleanup, 24 * 3600 * 1000);   // раз в сутки заглядываем
+
+/** Что показать в панели (без токена — он наружу не уходит). */
+function mirrorView() {
+  return {
+    on: mirror.on, mode: mirror.mode, base: mirror.base, every: mirror.every,
+    url: mirror.url, current: mirror.current,
+    sent: writtenCount(), sinceCount: mirror.sinceCount, next: mirror.next,
+    pool: mirror.pool.filter((m) => !m.retired).length,
+    hasToken: !!mirror.token, projectId: mirror.projectId ? 'задан' : '',
+  };
+}
+
+warmLoad();
+mirrorLoad();
+// даём панели подняться и дочитать свои файлы, потом продолжаем прогон
+setTimeout(autoResume, 5000);
+
 server.listen(PORT, HOST, () => {
+  proxyGuard.start();
   const url = `${TLS ? 'https' : 'http'}://${LOCAL ? 'localhost' : HOST}:${PORT}`;
   console.log(`\n  ПУЛЬТ: ${url}   (вход по логину и паролю)\n`);
   const moved = accounts.migrateDraftsLog();

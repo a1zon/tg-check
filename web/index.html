@@ -2,7 +2,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Telegram — панель</title>
-<link rel="stylesheet" href="/app.css?v=r35">
+<link rel="stylesheet" href="/app.css?v=r36">
 <div class="app">
 
   <!-- ЛЕВАЯ ПАНЕЛЬ РЕЖИМОВ -->
@@ -125,6 +125,7 @@
           наверху для него не нужны. Нажми «Включить» и оставь: первое действие
           будет через пару минут, дальше по расписанию. Отдельно ничего запускать
           не надо, окно можно закрыть.</p>
+        <div class="runbar" id="runbar-w"></div>
         <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
           <button class="primary" id="b-warm">Включить прогрев</button>
           <span id="warm-state" style="color:var(--mut);font-size:13px"></span>
@@ -210,6 +211,8 @@
             <p style="margin-top:-6px">Пишет людям только с 6:00 до 24:00 по Екатеринбургу —
                ночью идёт одна проверка номеров, письма ждут утра.</p>
 
+            <div class="runbar" id="runbar-p"></div>
+            <div class="accrun" id="accrun-p"></div>
             <p class="setnow" id="setnow-p"></p>
 
             <div class="fieldset">
@@ -458,6 +461,8 @@
           Это отдельный список от базы с номерами. Люди сюда попадают из групп и каналов —
           они <b>уже в Telegram</b>, поэтому проверять их не нужно и квота на добавление
           контактов не тратится. Пишем им по @нику.</p>
+        <div class="runbar" id="runbar-c"></div>
+        <div class="accrun" id="accrun-c"></div>
         <p class="setnow" id="setnow-c"></p>
       </div>
 
@@ -706,7 +711,8 @@
           запросами, после каждых 20 компаний — отдых 30–40 минут, не больше 110
           запросов в сутки. Пока он собирает, рассылка и прогрев его не трогают.</p>
 
-        <div id="eg-sum" class="lead-sum" style="margin-top:14px"></div>
+        <div class="runbar" id="runbar-eg" style="margin-top:14px"></div>
+        <div id="eg-sum" class="lead-sum" style="margin-top:10px"></div>
       </div>
 
       <div class="card" style="margin-top:14px">
@@ -800,4 +806,4 @@
 
   </main>
 </div>
-<script src="/app.js?v=r35"></script>
+<script src="/app.js?v=r36"></script>

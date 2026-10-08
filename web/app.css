@@ -434,3 +434,28 @@ textarea{font-family:-apple-system,system-ui,"Segoe UI",Roboto,Arial,sans-serif;
 .setnow{margin:0 0 14px;padding:9px 12px;border-radius:10px;font-size:13px;color:var(--mut);
   background:rgba(120,164,255,.06);border:1px solid var(--line)}
 .setnow b{color:var(--ink)}
+
+/* ——— «включено / выключено»: одна полоса, видно от двери ——— */
+.runbar{display:flex;align-items:center;gap:10px;padding:11px 14px;border-radius:11px;
+  margin:0 0 12px;font-size:13.5px;border:1px solid var(--line);background:rgba(120,164,255,.05)}
+.runbar.on{border-color:rgba(70,209,138,.45);background:rgba(70,209,138,.09)}
+.runbar .lamp{width:9px;height:9px;border-radius:50%;background:var(--mut);flex:none}
+.runbar.on .lamp{background:var(--ok);box-shadow:0 0 10px 1px rgba(70,209,138,.7)}
+.runbar b{color:var(--ink)}
+.runbar .why{color:var(--mut);margin-left:auto;text-align:right;font-size:12.5px}
+
+/* ——— кто чем занят прямо сейчас ——— */
+.accrun{display:flex;flex-direction:column;gap:1px;margin:0 0 14px}
+.accrun .r{display:flex;align-items:center;gap:10px;padding:7px 12px;font-size:13px;
+  border-bottom:1px solid var(--line)}
+.accrun .r:last-child{border-bottom:0}
+.accrun .nm{min-width:170px;color:var(--ink)}
+.accrun .cnt{color:var(--mut);min-width:120px}
+.accrun .st{color:var(--mut);margin-left:auto;text-align:right}
+.accrun .r.work .st{color:var(--ok)}
+.accrun .r.off .nm{color:var(--mut)}
+.accrun .tag{font-size:11px;color:var(--mut);border:1px solid var(--line);border-radius:999px;padding:1px 8px}
+
+/* ——— точка у вкладки, когда её функция работает ——— */
+.nav-i .lamp{width:7px;height:7px;border-radius:50%;background:var(--ok);display:inline-block;
+  margin-left:7px;vertical-align:1px;box-shadow:0 0 8px 1px rgba(70,209,138,.6)}

@@ -453,6 +453,85 @@ function paintWhoami(s) {
 /* ═══════════ СОСТОЯНИЕ — счётчики, прогресс, кто чем занят ═══════════ */
 
 
+/* ═══════════ ВИДНО ЛИ, ЧТО ВКЛЮЧЕНО ═══════════ */
+/**
+ * Самый частый вопрос к панели: «почему ничего не происходит?». Ответ почти
+ * всегда один — нужная штука просто выключена, или аккаунты на сегодня своё
+ * отработали. Поэтому в каждой вкладке сверху одна полоса: горит — работает,
+ * не горит — стоит, и рядом сказано почему.
+ */
+function runbar(id, on, title, why) {
+  const el = $(id);
+  if (!el) return;
+  el.className = 'runbar' + (on ? ' on' : '');
+  el.innerHTML = `<span class="lamp"></span><span>${title}</span>` +
+    (why ? `<span class="why">${why}</span>` : '');
+}
+
+/** Чем заняты аккаунты прямо сейчас — без ухода на вкладку «Аккаунты». */
+function paintAccRun(id, set) {
+  const el = $(id);
+  if (!el) return;
+  const list = accs.filter(accReady);
+  if (!list.length) { el.innerHTML = ''; return; }
+  el.innerHTML = list.map((a) => {
+    const w = a.warm || {};
+    const onlyWarm = a.role === 'warm';
+    const busy = !!a.busy;
+    // «сейчас» панель считает на сервере: отдыхает до…, на сегодня всё,
+    // ночь, ограничен, квота. Пусто — значит прогон не идёт
+    const st = busy ? esc(a.busy)
+      : a.quarantine ? 'ограничен Telegram'
+      : onlyWarm ? 'только прогрев'
+      : esc(a.now || '') || (lastState && lastState.auto && lastState.auto.on ? 'ждёт очереди' : 'прогон не запущен');
+    const cnt = onlyWarm ? '—'
+      : `сегодня ${a.sentToday || 0} из ${w.cap ?? '?'}`;
+    return `<div class="r ${busy ? 'work' : ''} ${onlyWarm ? 'off' : ''}">
+      <span class="nm">${esc(a.name || a.title)}</span>
+      <span class="cnt">${cnt}</span>
+      ${onlyWarm ? '<span class="tag">не в рассылке</span>' : ''}
+      <span class="st">${st}</span></div>`;
+  }).join('');
+}
+
+/** Точка у вкладки в боковом меню, пока её функция работает. */
+function navLamp(view, on) {
+  const a = document.querySelector(`.nav-i[data-view="${view}"]`);
+  if (!a) return;
+  const has = a.querySelector('.lamp');
+  if (on && !has) a.insertAdjacentHTML('beforeend', '<span class="lamp"></span>');
+  if (!on && has) has.remove();
+}
+
+function paintRunState(s) {
+  const auto = s.auto || {};
+  const chats = s.baseSet === 'chats';
+  const inRun = (auto.ids || []).length;
+  const why = auto.on
+    ? `${inRun} аккаунт(ов) в прогоне · режим: ${
+        auto.mode === 'check' ? 'только проверка' : auto.mode === 'write' ? 'только письма' : 'проверка и письма'}`
+    : 'нажми «Запустить» на нужной вкладке';
+
+  // полосы в обеих вкладках рассылки: каждая говорит про СВОЙ набор
+  runbar('#runbar-p', auto.on && !chats,
+    auto.on && !chats ? '<b>Рассылка по номерам идёт</b>'
+      : auto.on ? '<b>Рассылка идёт, но по чатам</b> — эта вкладка сейчас не работает'
+      : '<b>Рассылка выключена</b>', why);
+  runbar('#runbar-c', auto.on && chats,
+    auto.on && chats ? '<b>Рассылка по чатам идёт</b>'
+      : auto.on ? '<b>Рассылка идёт, но по номерам</b> — эта вкладка сейчас не работает'
+      : '<b>Рассылка выключена</b>', why);
+  runbar('#runbar-w', !!s.warmup,
+    s.warmup ? '<b>Прогрев работает</b>' : '<b>Прогрев выключен</b>',
+    s.warmup ? 'ведёт все вошедшие аккаунты' : 'новые аккаунты не греются');
+
+  paintAccRun('#accrun-p');
+  paintAccRun('#accrun-c');
+  navLamp('warmup', !!s.warmup);
+  navLamp('send', auto.on && !chats);
+  navLamp('chatsend', auto.on && chats);
+}
+
 const state = async () => {
   try {
     const s = await (await fetch('/api/state')).json();
@@ -460,6 +539,7 @@ const state = async () => {
     paintWhoami(s);
     baseLoading = !!s.baseLoading;
     paintSetNow(s);
+    paintRunState(s);
     for (const k of ['base','checked','found','sent']) $('#n-'+k).textContent = s[k];
     $('#n-replies').textContent = s.replies ?? 0;
     // «занят» теперь про выбранный аккаунт: остальные могут работать параллельно
@@ -1919,6 +1999,12 @@ async function egrulView() {
     btn.textContent = d.on ? '🤖 Сам: вкл' : '🤖 Сам: выкл';
     btn.classList.toggle('on', !!d.on);
   }
+
+  runbar('#runbar-eg', !!d.on,
+    d.on ? '<b>Сбор по ИНН работает</b>' : '<b>Сбор по ИНН выключен</b>',
+    d.running ? 'идёт заход прямо сейчас'
+      : d.on ? 'панель будит сборщика сама'
+      : 'нажми «Собрать сейчас» или включи «Сам»');
 
   const wait = d.nextAt && d.nextAt > Date.now()
     ? ` · следующий заход ${new Date(d.nextAt).toLocaleTimeString('ru', {hour: '2-digit', minute: '2-digit'})}` : '';

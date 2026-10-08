@@ -135,6 +135,10 @@ const proxyGuard = makeProxyGuard({
   rotateLink: () => warmup.rotate || auto.rotate || '',
   rotateIp: (url) => rotateIp(url),
   note: (icon, text) => events.note(icon, text),
+  // Пока мы сами переключаем модем, прокси и должен не отвечать. Без этого
+  // сторож честно объявлял наше же переключение падением — отсюда и лента,
+  // наполовину состоящая из «прокси лежит… прокси снова работает».
+  switching: () => Date.now() < Math.max(warmup.holdUntil || 0, auto.holdUntil || 0),
 });
 
 const stats = makeStats({ DIR, readCsv });
@@ -649,7 +653,8 @@ function warmTick() {
     // следующий аккаунт — сначала новый адрес: иначе оба наследят с одного.
     // Запоминаем, КОМУ меняем: без этого свежий адрес достался бы тому, кто
     // первым подвернулся на следующем круге
-    if (warmup.rotate && warmup.lastId && warmup.lastId !== acc.id && !warmup.fresh) {
+    if (warmup.rotate && warmup.lastId && warmup.lastId !== acc.id && !warmup.fresh
+        && !rotatedRecently()) {
       warmup.pending = acc.id;
       rotateForWarm();
       return;
@@ -1010,16 +1015,24 @@ function pickJob(left, id) {
   // Отметка лежит в аккаунте и переживает перезапуск панели: иначе после
   // каждого перезапуска аккаунт снова ломился бы в закрытую квоту
   const quotaOut = !!acc?.quotaUntil && Date.now() < Date.parse(acc.quotaUntil);
-  // срок ожидания квоты прошёл — сначала пробуем ОДИН номер: вернулась ли
+  // срок ожидания квоты прошёл — первую проверку по номерам делаем одним
+  // номером: вернулась квота или нет
   const quotaProbe = !!acc?.quotaUntil && !quotaOut;
-  // рассылка идёт по чатам (контакты там не нужны), а квоту проверяем по базе
-  // номеров: вернулась — можно будет вернуться к базе клиентов
-  if (quotaProbe && baseSet === 'chats') {
-    return { name: 'check', limit: 1, delay: auto.check.delay, probe: true, set: 'phones' };
-  }
+
+  // Пока рассылка идёт ПО ЧАТАМ, номера не трогаем вовсе.
+  //
+  // Раньше тут была проба: срок ожидания квоты прошёл — спросим один номер,
+  // вернулась ли она. Но проба — это добавление контакта, ровно та операция,
+  // за которую Telegram и ограничивает аккаунты. По чатам пишут по @нику, и
+  // квота для этой работы не нужна совсем: тратить на неё риск незачем.
+  // Квота проверится сама, когда рассылку переключат обратно на номера —
+  // первая же проверка покажет, открылась она или нет.
   // людям из чатов пишем по @нику — контакты не добавляются, квота не мешает
   const canWrite = auto.mode !== 'check' && isWorkTime() && (!quotaOut || baseSet === 'chats');
-  const canCheck = auto.mode !== 'write' && !quotaOut;
+  // Проверка номеров — только когда работаем ПО НОМЕРАМ. По чатам людям пишут
+  // по @нику, проверять там нечего, а каждая проверка — это добавление
+  // контакта, то самое действие, за которое Telegram ограничивает аккаунты.
+  const canCheck = auto.mode !== 'write' && !quotaOut && baseSet === 'phones';
   // дневной потолок считаем ВСЕГДА (даже если «беречь аккаунты» выключено) —
   // иначе один тумблер снимает всю защиту от бана. Галка лишь отключает отлёжку.
   const w = acc ? warm(acc) : null;
@@ -1139,7 +1152,22 @@ function rotateUrlProblem(raw) {
   return '';
 }
 
+/**
+ * Не чаще, чем раз в столько, дёргаем смену IP.
+ *
+ * Прогрев меняет адрес перед каждым переходом на другой аккаунт, а аккаунтов
+ * два десятка — модем переключался каждые несколько минут. Каждое
+ * переключение это секундный обрыв: сторож объявляет прокси лежащим, задачи
+ * не стартуют, лента забита «прокси лежит». Смысл ротации — чтобы соседние
+ * аккаунты не светились с одного адреса, и он сохраняется: просто подряд
+ * идущие заходы в пределах этого окна делят один IP.
+ */
+const ROTATE_MIN_GAP = 6 * 60_000;
+let lastRotateAt = 0;
+const rotatedRecently = () => Date.now() - lastRotateAt < ROTATE_MIN_GAP;
+
 async function rotateIp(url) {
+  lastRotateAt = Date.now();
   const bad = rotateUrlProblem(url);
   if (bad) return { ok: false, reason: bad };
   try {
@@ -1233,7 +1261,7 @@ function autoTick() {
   if (auto.serial) {
     if (busy) return;                       // кто-то ещё работает — ждём его
     if (now < auto.holdUntil) return;       // модем поднимает новый адрес
-    if (auto.rotate && !auto.fresh) { rotateForRun(); return; }
+    if (auto.rotate && !auto.fresh && !rotatedRecently()) { rotateForRun(); return; }
   }
 
   // По очереди работает кто-то один, поэтому порядок решает: без него первые

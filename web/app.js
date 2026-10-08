@@ -506,7 +506,9 @@ function navLamp(view, on) {
 function paintRunState(s) {
   const auto = s.auto || {};
   const chats = s.baseSet === 'chats';
-  const inRun = (auto.ids || []).length;
+  // список аккаунтов прогона панель в состоянии не отдаёт — считаем по ролям:
+  // в рассылке участвуют все вошедшие, кроме тех, кто на «только прогреве»
+  const inRun = accs.filter((a) => accReady(a) && a.role !== 'warm').length;
   const why = auto.on
     ? `${inRun} аккаунт(ов) в прогоне · режим: ${
         auto.mode === 'check' ? 'только проверка' : auto.mode === 'write' ? 'только письма' : 'проверка и письма'}`

@@ -34,7 +34,8 @@ function why(connect, exit) {
   return `проверка не прошла (curl ${exit}${connect && connect !== '000' ? `, шлюз ${connect}` : ''})`;
 }
 
-export function makeProxyGuard({ parseProxy, label, proxies, rotateLink, rotateIp, note }) {
+export function makeProxyGuard({ parseProxy, label, proxies, rotateLink, rotateIp, note,
+                                 switching = () => false }) {
   const st = new Map();       // строка прокси -> состояние
   let timer = null;
 
@@ -109,6 +110,8 @@ export function makeProxyGuard({ parseProxy, label, proxies, rotateLink, rotateI
 
   async function tick() {
     const now = Date.now();
+    // идёт смена IP — модем сейчас и не должен отвечать, это не падение
+    if (switching()) return;
     for (const raw of new Set(proxies())) {
       const s = stateOf(raw);
       if (now - s.checkedAt < (s.down ? EVERY_DOWN : EVERY_OK)) continue;

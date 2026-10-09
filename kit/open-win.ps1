@@ -59,7 +59,7 @@ Write-Host "Аккаунт: $($cfg.title)"
 Write-Host 'Проверяю прокси…'
 try {
   $ip = & $self -NoProfile -ExecutionPolicy Bypass -File 'bridge.ps1' -Check
-  Write-Host "  прокси в порядке, наружу видно IP $ip"
+  Write-Host "  прокси в порядке: $ip"
 } catch {
   Die "Прокси не отвечает: $($_.Exception.Message)`nTelegram без прокси не запускаю — иначе аккаунт выйдет с твоего IP."
 }

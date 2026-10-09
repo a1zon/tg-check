@@ -1829,16 +1829,16 @@ const KIT_STEPS = {
   win: ['Распакуй папку из архива — из архива не запускать.',
         'Двойной щелчок по <b>«Открыть аккаунт.bat»</b>. Если SmartScreen ругнётся: «Подробнее» → «Выполнить в любом случае».',
         'Откроется ПУСТОЙ Telegram — без аккаунта. Подтверди <b>«Включить прокси»</b> и закрой окно.',
-        'Telegram откроется снова — уже с аккаунтом и через его прокси.'],
+        'Telegram откроется снова — уже с аккаунтом и через его прокси. В следующие разы пустого запуска не будет.'],
   linux: ['Распакуй папку туда, где она останется жить.',
         'В терминале: <b>./открыть-аккаунт.sh</b> (или двойным щелчком, если файловый менеджер умеет).',
         'Откроется ПУСТОЙ Telegram — без аккаунта. Подтверди <b>«Включить прокси»</b> и закрой окно: Ctrl+Q.',
         'Telegram откроется снова — уже с аккаунтом и через его прокси.'],
 };
 const KIT_NEED = {
-  mac: 'Нужны: Telegram Desktop (не клиент из App Store — тот не читает tdata) и Python 3.',
-  win: 'Нужен Telegram Desktop с desktop.telegram.org.',
-  linux: 'Нужны: Telegram Desktop и Python 3.',
+  mac: 'Нужны: <b>Telegram Desktop</b> с desktop.telegram.org (или <b>brew install --cask telegram-desktop</b>) и Python 3. Клиент из App Store не подходит — он не открывает чужую папку с аккаунтом.',
+  win: 'Нужен <b>Telegram Desktop</b> с desktop.telegram.org. Версия из Microsoft Store не подходит — она не открывает чужую папку с аккаунтом.',
+  linux: 'Нужны: <b>Telegram Desktop</b> (desktop.telegram.org или snap) и Python 3.',
 };
 let kitOs = /Win/i.test(navigator.userAgent) ? 'win'
           : /Mac/i.test(navigator.userAgent) ? 'mac' : 'linux';

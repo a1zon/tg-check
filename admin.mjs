@@ -129,6 +129,30 @@ for (const a of accounts.list()) {
   if (!a.role) accounts.setField(a.id, { role: wroteAny().has(a.id) ? 'send' : 'warm' });
 }
 
+/**
+ * Прогрев кончился — аккаунт сам переходит в рассылку.
+ *
+ * Раньше он так и оставался «только прогревом», пока про него не вспомнят:
+ * во вкладке прогрева висел готовый аккаунт, а в рассылке его не было.
+ * Теперь созревший уходит из прогрева и появляется свободным в обеих
+ * вкладках рассылки — там его можно отметить и пустить в работу.
+ *
+ * Делаем это ОДИН раз на аккаунт (отметка `graduated`): если потом его
+ * вернут на «только прогрев» руками, это решение человека, и мы его не
+ * переигрываем.
+ */
+function graduateWarm() {
+  for (const a of accounts.list()) {
+    if (a.graduated || a.role !== 'warm') continue;
+    if (!accounts.hasSession(a) || !accounts.isAuthed(a)) continue;
+    const w = warm(a);
+    if (!w.atMax || w.resting) continue;
+    accounts.setField(a.id, { role: 'send', graduated: true });
+    events.note('✅', `прогрев закончен (день ${w.day}) — аккаунт перешёл в рассылку, можно пускать в прогон`, a.title);
+  }
+}
+setInterval(graduateWarm, 5 * 60_000);
+
 const proxyOf = (id) => accounts.list().find((a) => a.id === id)?.proxy || '';
 const proxyGuard = makeProxyGuard({
   parseProxy: accounts.parseProxy,

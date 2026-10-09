@@ -519,22 +519,21 @@ function paintAccRun(id, set) {
     const st = elsewhere ? `работает ${other === 'chats' ? 'по чатам' : 'по номерам'}`
       : busy ? esc(a.busy)
       : a.quarantine ? 'ограничен Telegram'
-      : onlyWarm ? 'только прогрев'
       : here ? (esc(a.now || '') || 'ждёт очереди')
-      : sel.has(a.id) ? 'выбран — ждёт запуска' : 'не выбран';
+      : sel.has(a.id) ? 'выбран — ждёт запуска'
+      : onlyWarm ? 'только прогрев' : 'не выбран';
     const cnt = onlyWarm ? '—'
       : `сегодня ${a.sentToday || 0} из ${w.cap ?? '?'}`;
-    // Занятый соседним режимом и те, кто только греется, не выбираются.
-    // Остальных можно отмечать и когда рассылка идёт: состав меняется на ходу.
-    const lock = onlyWarm || elsewhere;
+    // Не выбирается только занятый СОСЕДНИМ режимом: аккаунт работает в одном
+    // наборе за раз. «Только прогрев» отмечать можно — панель переведёт его в
+    // рассылку сама, когда будешь запускать (и спросит перед этим).
+    const lock = elsewhere;
     return `<label class="r ${busy ? 'work' : ''} ${onlyWarm || elsewhere ? 'off' : ''}">
       <input type="checkbox" data-pick="${a.id}" data-set="${set}"
              ${sel.has(a.id) ? 'checked' : ''} ${lock ? 'disabled' : ''}>
       <span class="nm">${esc(a.name || a.title)}</span>
       <span class="cnt">${cnt}</span>
-      ${onlyWarm ? `<button class="tag act" data-torun="${a.id}"
-          title="Сейчас аккаунт только греется. Нажми, чтобы он мог писать людям"
-          >не в рассылке — включить</button>` : ''}
+      ${onlyWarm ? '<span class="tag">только греется — возьмём в рассылку</span>' : ''}
       <span class="st">${st}</span></label>`;
   }).join('');
   if (el.dataset.html === html) return;     // не перерисовываем на каждый опрос
@@ -551,22 +550,6 @@ function paintAccRun(id, set) {
     el.dataset.html = '';
     paintAccRun(id, set);
     paintAuto();
-  }; });
-  // «только прогрев» → в рассылку, не уходя с вкладки. Кнопка внутри label,
-  // поэтому гасим клик: иначе он заодно переключил бы галочку
-  el.querySelectorAll('[data-torun]').forEach((b) => { b.onclick = async (e) => {
-    e.preventDefault(); e.stopPropagation();
-    const a = accs.find(x => x.id === b.dataset.torun);
-    if (!a) return;
-    const w = a.warm || {};
-    if (!w.atMax && !confirm(
-        `«${a.name || a.title}» ещё на разгоне: ${w.note || 'прогрет не полностью'}.\n\n` +
-        `Если взять его в рассылку сейчас, писать он будет по графику прогрева — ` +
-        `не больше ${w.cap ?? '?'} в сутки.\n\nВключить?`)) return;
-    await post('/api/accounts/role', {id: a.id, role: 'send', set});
-    crew[set].add(a.id);
-    el.dataset.html = '';
-    loop();
   }; });
 }
 
@@ -1062,7 +1045,8 @@ const canPick = (a) => accReady(a) && a.role !== 'warm';
 function crewDiff(set, run) {
   const sel = crew[set] || new Set();
   const cur = new Set(run.ids || []);
-  const free = (id) => { const a = accs.find(x => x.id === id); return a && canPick(a) && (!a.run || a.run === set); };
+  // прогревной тоже считается: при запуске панель переведёт его в рассылку
+  const free = (id) => { const a = accs.find(x => x.id === id); return a && accReady(a) && (!a.run || a.run === set); };
   return {
     add: [...sel].filter(id => !cur.has(id) && free(id)),
     drop: [...cur].filter(id => !sel.has(id)),
@@ -1116,7 +1100,7 @@ function paintAuto(a) {
   const onP = !!(runs.phones || {}).on, onC = !!(runs.chats || {}).on;
   // кнопка каждой вкладки живёт своей жизнью: выбор — её галочки, а блокировка
   // — её собственный режим
-  const ready = (set) => accs.filter(x => crew[set] && crew[set].has(x.id) && canPick(x) && !x.run);
+  const ready = (set) => accs.filter(x => crew[set] && crew[set].has(x.id) && accReady(x) && !x.run);
 
   // Строки «кто чем занят» — у каждой вкладки СВОИ: показываем только те
   // аккаунты, что работают в её режиме. Проверок бывает больше лимита — это
@@ -1238,6 +1222,29 @@ function paintStage(box, set, run, a) {
     `</span><div class="bar"><i style="width:${chats ? (n.found ? Math.round(n.sent / n.found * 100) : 0) : pct}%"></i></div>`;
 }
 
+/**
+ * Отмеченные «только прогрев» — переводим в рассылку перед работой.
+ * Роль не переключается молча: у аккаунта может быть не дописан прогрев,
+ * и это надо показать словами, а не графиком.
+ */
+async function takeWarmIntoRun(set) {
+  const warm = [...(crew[set] || [])]
+    .map(id => accs.find(a => a.id === id))
+    .filter(a => a && accReady(a) && a.role === 'warm');
+  if (!warm.length) return true;
+  const lines = warm.map(a => {
+    const w = a.warm || {};
+    return `• ${a.name || a.title} — ${w.note || 'на прогреве'}` +
+           (w.resting ? ' (ещё отлёживается)' : ` · сегодня может ${w.left ?? w.cap ?? '?'}`);
+  }).join('\n');
+  if (!confirm(`Эти аккаунты сейчас только греются:\n\n${lines}\n\n` +
+      'Взять их в рассылку? Писать они будут по графику прогрева — не больше своего ' +
+      'дневного предела, а те, что на отлёжке, начнут, когда она кончится.')) return false;
+  for (const a of warm) await post('/api/accounts/role', {id: a.id, role: 'send', set});
+  await loop();
+  return true;
+}
+
 async function startAuto(set) {
   const run = ((lastState && lastState.auto && lastState.auto.runs) || {})[set] || {};
   if (run.on) {
@@ -1245,6 +1252,7 @@ async function startAuto(set) {
     // выводим; рассылка при этом не останавливается
     const d = crewDiff(set, run);
     if (d.add.length || d.drop.length) {
+      if (!await takeWarmIntoRun(set)) return;
       const r = await post('/api/auto/crew', {set, ids: [...crew[set]]});
       if (!r.ok && r.reason) alert(r.reason);
       crewDirty[set] = false;
@@ -1259,6 +1267,7 @@ async function startAuto(set) {
   }
   crewDirty[set] = false;
   useWork(set);
+  if (!await takeWarmIntoRun(set)) return;
   await useSet(set, true);          // экраны переводим на этот набор, если можно
   const mode = $('#amode').value;
   const voice = mode !== 'check' && $('#voicemode').checked;
@@ -1752,7 +1761,21 @@ const warmup = async () => {
     $('#warm-state').textContent = warmOn
       ? `работает сам по ${w.accounts.length} аккаунт(ам): новые сначала лежат сутки, потом прогрев стартует автоматически с 1-го дня — тыкать ничего не надо`
       : 'выключен — нажми, чтобы аккаунты начали подписываться и читать';
-    $('#warm-list').innerHTML = w.accounts.length ? w.accounts.map(a => {
+    /**
+     * В списке прогрева — только те, кто ещё греется. Созревший уходит отсюда
+     * сам и появляется свободным в обеих вкладках рассылки: там его отмечают
+     * галочкой и пускают в работу. Иначе готовый аккаунт висел бы на прогреве,
+     * пока про него не вспомнят.
+     */
+    const grown = w.accounts.filter(a => a.day >= a.fullDay && !a.resting);
+    const warming = w.accounts.filter(a => !(a.day >= a.fullDay && !a.resting));
+    const grownLine = grown.length
+      ? `<p class="hint" style="margin:10px 0 0">Прогрелись и ушли в рассылку: <b>${grown.length}</b>` +
+        ` — ${grown.map(a => esc(a.title)).join(', ')}.` +
+        ` Отметь их на вкладках <button class="linkbtn" data-goto="send">по номерам</button>` +
+        ` или <button class="linkbtn" data-goto="chatsend">по чатам</button> и запускай.</p>`
+      : '';
+    $('#warm-list').innerHTML = (warming.length ? warming.map(a => {
       // человеческий статус: что с аккаунтом прямо сейчас
       let now = '';
       const nextTxt = a.dayLeft <= 0 ? 'на сегодня всё' : `дальше через ${fmtWarmWait(a.wait)}`;
@@ -1787,7 +1810,9 @@ const warmup = async () => {
           <div class="track"><i style="width:${pct}%"></i></div>
           <small>${esc(barLbl)}</small>
         </div>
-      </div>`; }).join('') : '<p style="color:var(--mut);margin:0">Нет вошедших аккаунтов.</p>';
+      </div>`; }).join('')
+      : `<p style="color:var(--mut);margin:0">${w.accounts.length
+          ? 'Все аккаунты прогреты — греть больше некого.' : 'Нет вошедших аккаунтов.'}</p>`) + grownLine;
   } catch {}
 };
 
@@ -2271,8 +2296,11 @@ function showView(name) {
 document.querySelectorAll('.nav-i').forEach((a) => {
   a.onclick = (e) => { e.preventDefault(); showView(a.dataset.view); };
 });
-document.querySelectorAll('[data-goto]').forEach((b) => {
-  b.onclick = () => showView(b.dataset.goto);
+// через делегирование: такие кнопки появляются и в списках, которые панель
+// перерисовывает на ходу, — вешать обработчик на каждую пришлось бы заново
+document.addEventListener('click', (e) => {
+  const b = e.target.closest('[data-goto]');
+  if (b) { e.preventDefault(); showView(b.dataset.goto); }
 });
 showView((location.hash || '').replace('#', '') || localStorage.getItem('tg-view') || 'overview');
 

@@ -128,12 +128,22 @@ export function buildKit({ id, title, proxy, os, uploadsZip, kitDir, tmpRoot }) 
   add('kit.json', JSON.stringify({ id, title, listen: LISTEN, proxy }, null, 1) + '\n');
 
   const src = (f) => fs.readFileSync(path.join(kitDir, f));
-  // PowerShell, который идёт с Windows (5.1), читает скрипт без метки BOM как
-  // ANSI — и весь русский текст превращается в кашу. Поэтому для винды метку
-  // ставим. В .bat её ставить нельзя: cmd попробует выполнить её как команду.
-  const bom = (f) => Buffer.concat([Buffer.from('﻿', 'utf8'), src(f)]);
+  /**
+   * Текст для Windows — с переводами строк по-виндовому.
+   *
+   * У нас в репозитории они юниксовые. Блокнот такой файл ещё покажет, а вот
+   * cmd разбирает .bat построчно и на одних переводах строки ведёт себя
+   * по-разному от версии к версии. Чинить это на чужом компьютере нечем,
+   * поэтому кладём сразу правильные.
+   *
+   * А метка BOM нужна PowerShell, который идёт с самой Windows (5.1): без неё
+   * он читает скрипт как ANSI, и весь русский текст превращается в кашу.
+   * В .bat метку ставить нельзя — cmd попробует выполнить её как команду.
+   */
+  const crlf = (f) => Buffer.from(src(f).toString('utf8').replace(/\r?\n/g, '\r\n'), 'utf8');
+  const bom = (f) => Buffer.concat([Buffer.from('﻿', 'utf8'), crlf(f)]);
   if (os === 'win') {
-    add('Открыть аккаунт.bat', src('open-win.bat'));
+    add('Открыть аккаунт.bat', crlf('open-win.bat'));
     add('open-win.ps1', bom('open-win.ps1'));
     add('bridge.ps1', bom('bridge.ps1'));
     add('ЧИТАЙ-МЕНЯ.txt', bom('readme-win.txt'));

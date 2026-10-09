@@ -2,10 +2,15 @@
 $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath $PSScriptRoot
 
-$cfg  = Get-Content -Raw -LiteralPath 'kit.json' -Encoding UTF8 | ConvertFrom-Json
+$cfg  = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'kit.json') -Encoding UTF8 | ConvertFrom-Json
 $port = [int]$cfg.listen
 $work = Join-Path $PSScriptRoot 'workdir'
 $self = (Get-Process -Id $PID).Path          # тот же PowerShell, в котором мы сами
+# Путь к мосту — полный. Set-Location меняет папку только для самого
+# PowerShell; у процессов, которые он запускает, рабочая папка остаётся
+# прежней, и короткое «bridge.ps1» у них не находится. Пока комплект
+# запускают двойным щелчком, это совпадает, а из командной строки — уже нет.
+$bridgePs = Join-Path $PSScriptRoot 'bridge.ps1'
 
 function Die($msg) {
   Write-Host ''
@@ -57,15 +62,20 @@ Write-Host "Telegram Desktop: $tg"
 Write-Host ''
 Write-Host "Аккаунт: $($cfg.title)"
 Write-Host 'Проверяю прокси…'
-try {
-  $ip = & $self -NoProfile -ExecutionPolicy Bypass -File 'bridge.ps1' -Check
-  Write-Host "  прокси в порядке: $ip"
-} catch {
-  Die "Прокси не отвечает: $($_.Exception.Message)`nTelegram без прокси не запускаю — иначе аккаунт выйдет с твоего IP."
+# Отдельный процесс падением не «бросается»: PowerShell не делает из чужого
+# кода ошибку, как бы ни был настроен ErrorActionPreference. Поэтому смотрим
+# код возврата сами — иначе мёртвый прокси проскакивал бы молча, а человек
+# видел бы потом невнятное «мост не поднялся».
+$out = & $self -NoProfile -ExecutionPolicy Bypass -File $bridgePs -Check 2>&1
+if ($LASTEXITCODE -ne 0) {
+  Die ("Прокси не отвечает: " + (($out | Out-String).Trim()) +
+       "`n`nTelegram без прокси не запускаю — иначе аккаунт выйдет с твоего IP." +
+       "`nПодожди пару минут и запусти снова: мобильные прокси иногда переподключаются.")
 }
+Write-Host "  прокси в порядке: $(($out | Select-Object -Last 1))"
 
 $bridge = Start-Process -FilePath $self -PassThru -WindowStyle Hidden `
-  -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'bridge.ps1'
+  -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$bridgePs`""
 
 try {
   $up = $false
@@ -80,7 +90,11 @@ try {
   if (-not $up) { Die 'Мост не ответил за минуту.' }
 
   New-Item -ItemType Directory -Force -Path $work | Out-Null
-  $tgArgs = @('-workdir', $work, '--', "tg://socks?server=127.0.0.1&port=$port")
+  # Путь в кавычках. Start-Process склеивает аргументы через пробел и сам
+  # ничего не заключает в кавычки: комплект, распакованный в «Рабочий стол»
+  # или любую папку с пробелом в имени, разъезжался на два аргумента, и
+  # Telegram открывался СО СВОЕЙ обычной папкой — без нашего аккаунта.
+  $tgArgs = @('-workdir', "`"$work`"", '--', "tg://socks?server=127.0.0.1&port=$port")
 
   # Первый запуск — ПУСТОЙ Telegram. Ключ у Desktop и у панели один: если
   # Desktop выйдет в сеть с домашнего IP, а панель ходит через прокси, Telegram

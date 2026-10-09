@@ -11,7 +11,8 @@ param([switch]$Check)
 $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath $PSScriptRoot
 
-$cfg   = Get-Content -Raw -LiteralPath 'kit.json' -Encoding UTF8 | ConvertFrom-Json
+# полным путём: рабочая папка у запущенного процесса может быть любой
+$cfg   = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'kit.json') -Encoding UTF8 | ConvertFrom-Json
 $proxy = $cfg.proxy
 $port  = [int]$cfg.listen
 

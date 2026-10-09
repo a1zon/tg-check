@@ -1741,6 +1741,50 @@ function finishSet(set, why) {
   autoRemember();
 }
 
+/**
+ * Состав работающего режима меняют галочками прямо на вкладке, не останавливая
+ * рассылку: отметил — аккаунт входит в работу, снял — выходит.
+ *
+ * Выходящему задачу не дорабатываем: иначе галочка снята, а он ещё пишет.
+ */
+function setCrew(set, want) {
+  if (!auto.live[set]) return { ok: false, reason: 'этот режим сейчас не работает' };
+  const byId = new Map(accounts.list().map((a) => [a.id, a]));
+  const other = SETS.find((s) => s !== set);
+  const taken = new Set(auto.live[other] ? idsOfSet(other) : []);
+  const now = idsOfSet(set);
+  const keep = want.filter((id) => {
+    const a = byId.get(id);
+    return a && accounts.hasSession(a) && accounts.isAuthed(a)
+      && accounts.inOutreach(a) && !taken.has(id);
+  });
+  if (!keep.length) { stopSet(set, 'сняли все аккаунты'); return { ok: true, stopped: true }; }
+
+  const add = keep.filter((id) => !now.includes(id));
+  const drop = now.filter((id) => !keep.includes(id));
+  for (const id of drop) {
+    auto.sets.delete(id);
+    auto.per.delete(id);
+    auto.ids = auto.ids.filter((x) => x !== id);
+    const r = running.get(id);
+    if (r) { r.child.kill('SIGTERM'); push(`⏹ «${title(id)}» снят с рассылки ${setWord(set)} — задача остановлена`); }
+    else push(`⏹ «${title(id)}» снят с рассылки ${setWord(set)}`);
+  }
+  for (const id of add) {
+    auto.ids.push(id);
+    auto.sets.set(id, set);
+    auto.per.set(id, autoPer((auto.opts[set]?.mode || 'full') !== 'check' && inQuarantine(byId.get(id))));
+    push(`▶ «${title(id)}» добавлен в рассылку ${setWord(set)}`);
+  }
+  if (add.length || drop.length) {
+    // чтобы перезапуск панели поднял тот же состав, а не прежний
+    if (auto.opts[set]?.raw) auto.opts[set].raw.accounts = idsOfSet(set);
+    autoRemember();
+    autoTick();
+  }
+  return { ok: true, ids: idsOfSet(set) };
+}
+
 /** Остановка одного режима руками: его задачи дорабатывать незачем. */
 function stopSet(set, why) {
   const ids = idsOfSet(set);
@@ -3255,6 +3299,13 @@ async function handler(req, res) {
       else if (on === true) warmStart();
       else warmSave();
       return json(res, 200, { ok: true, ...warmView() });
+    }
+
+    // состав работающего режима — галочками на вкладке, без остановки
+    if (u.pathname === '/api/auto/crew' && req.method === 'POST') {
+      const { set, ids } = await body(req);
+      if (!SETS.includes(set)) return json(res, 200, { ok: false, reason: 'нет такого режима' });
+      return json(res, 200, setCrew(set, Array.isArray(ids) ? ids : []));
     }
 
     if (u.pathname === '/api/auto' && req.method === 'POST') {

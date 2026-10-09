@@ -435,7 +435,7 @@ function paintSetNow(s) {
   // Режимы независимы: отметь аккаунты здесь и запускай, даже если второй
   // режим уже работает. Один аккаунт — один режим.
   const line = (mine, other, word) => mine
-    ? 'Эта рассылка идёт. Чтобы сменить состав — останови её.'
+    ? 'Рассылка идёт. Состав можно менять на ходу: снял галочку — аккаунт выходит из работы, поставил — входит.'
     : other ? `Сейчас работает рассылка ${word} — здесь можно запустить свою, на свободных аккаунтах.`
     : 'Отметь аккаунты в списке выше и запускай.';
   if (p) p.innerHTML = line(!!(runs.phones || {}).on, !!(runs.chats || {}).on, 'по чатам');
@@ -493,12 +493,20 @@ function paintAccRun(id, set) {
   const run = (lastState && lastState.auto && lastState.auto.runs || {})[set] || {};
   const sel = crewOf(set);
   if (set === pickSet) work = sel;     // состав открытой вкладки — он же work
-  // аккаунт забрали в другой режим — из нашего состава он выбывает сам,
-  // а кто работает в нашем — тот в составе и остаётся, в том числе после
-  // остановки: иначе пришлось бы отмечать их заново перед каждым запуском
-  for (const a of list) {
-    if (a.run && a.run !== set) sel.delete(a.id);
-    else if (a.run === set) sel.add(a.id);
+  /**
+   * Состав и правда: галочки должны показывать то, что есть на сервере.
+   * Кто работает в нашем режиме — тот отмечен (и остаётся отмеченным после
+   * остановки, чтобы не набирать состав заново). Занятый соседним режимом
+   * выбывает. А пока рассылка идёт, отмечены РОВНО её аккаунты: иначе
+   * галочка стояла бы у того, кто на самом деле не работает.
+   * crewBusy — пока сервер не ответил на нашу же правку, её не затираем.
+   */
+  if (!crewDirty[set]) {
+    for (const a of list) {
+      if (a.run === set) sel.add(a.id);
+      else if (a.run) sel.delete(a.id);
+      else if (run.on) sel.delete(a.id);
+    }
   }
   const html = list.map((a) => {
     const w = a.warm || {};
@@ -516,11 +524,12 @@ function paintAccRun(id, set) {
       : sel.has(a.id) ? 'выбран — ждёт запуска' : 'не выбран';
     const cnt = onlyWarm ? '—'
       : `сегодня ${a.sentToday || 0} из ${w.cap ?? '?'}`;
-    // пока режим работает, состав не меняем: аккаунт посреди пачки не вынешь
-    const lock = onlyWarm || elsewhere || run.on;
+    // Занятый соседним режимом и те, кто только греется, не выбираются.
+    // Остальных можно отмечать и когда рассылка идёт: состав меняется на ходу.
+    const lock = onlyWarm || elsewhere;
     return `<label class="r ${busy ? 'work' : ''} ${onlyWarm || elsewhere ? 'off' : ''}">
       <input type="checkbox" data-pick="${a.id}" data-set="${set}"
-             ${sel.has(a.id) || here ? 'checked' : ''} ${lock ? 'disabled' : ''}>
+             ${sel.has(a.id) ? 'checked' : ''} ${lock ? 'disabled' : ''}>
       <span class="nm">${esc(a.name || a.title)}</span>
       <span class="cnt">${cnt}</span>
       ${onlyWarm ? `<button class="tag act" data-torun="${a.id}"
@@ -534,8 +543,14 @@ function paintAccRun(id, set) {
   el.querySelectorAll('[data-pick]').forEach((c) => { c.onchange = () => {
     const s = crew[c.dataset.set];
     c.checked ? s.add(c.dataset.pick) : s.delete(c.dataset.pick);
+    // Состояние режима берём свежее: обработчик живёт дольше, чем та
+    // перерисовка, на которой его повесили, и запомненное в ней
+    // «не запущено» давно устарело бы.
+    const live = !!(((lastState && lastState.auto && lastState.auto.runs) || {})[set] || {}).on;
+    if (live) crewDirty[set] = true;   // применит кнопка — до неё состав наш
     el.dataset.html = '';
     paintAccRun(id, set);
+    paintAuto();
   }; });
   // «только прогрев» → в рассылку, не уходя с вкладки. Кнопка внутри label,
   // поэтому гасим клик: иначе он заодно переключил бы галочку
@@ -1038,8 +1053,22 @@ let work = null, autoOn = false, autoLast = {on: false, accounts: []}, autoRaw =
  */
 const crew = {phones: null, chats: null};
 let pickSet = 'phones';
+// Состав тронули, но ещё не применили: пока так, галочки не подгоняем под
+// сервер — иначе снятая вернулась бы обратно на ближайшей перерисовке.
+const crewDirty = {phones: false, chats: false};
 /** Можно ли вообще брать этот аккаунт в рассылку. */
 const canPick = (a) => accReady(a) && a.role !== 'warm';
+/** Чем отмеченный состав отличается от того, что работает прямо сейчас. */
+function crewDiff(set, run) {
+  const sel = crew[set] || new Set();
+  const cur = new Set(run.ids || []);
+  const free = (id) => { const a = accs.find(x => x.id === id); return a && canPick(a) && (!a.run || a.run === set); };
+  return {
+    add: [...sel].filter(id => !cur.has(id) && free(id)),
+    drop: [...cur].filter(id => !sel.has(id)),
+  };
+}
+
 /**
  * Состав вкладки. По умолчанию — все, кто может писать и ничем не занят, но
  * придумать его можно только когда аккаунты уже загрузились: на пустом списке
@@ -1105,12 +1134,27 @@ function paintAuto(a) {
   rows($('#autostate'), 'phones', onP);
   rows($('#cs-state'), 'chats', onC);
 
-  const btn = (el, set, run, word) => {
-    if (!el) return;
+  /**
+   * Кнопка режима делает ровно то, что сейчас имеет смысл:
+   * не работает — «Запустить»; работает и состав поменяли галочками —
+   * «Добавить в работу» (встроит новых в идущий поток, лишних выведет);
+   * работает и состав тот же — «Остановить».
+   */
+  const btn = (el, set, live, word) => {
+    if (!el) return [];
     const chosen = ready(set);
-    el.textContent = run ? 'Остановить' : word;
-    el.className = run ? 'danger big' : 'primary big';
-    el.disabled = !chosen.length && !run;
+    const d = crewDiff(set, runs[set] || {});
+    if (live && (d.add.length || d.drop.length)) {
+      el.textContent = d.add.length && !d.drop.length ? `Добавить в работу: ${d.add.length}`
+        : d.drop.length && !d.add.length ? `Снять с работы: ${d.drop.length}`
+        : `Применить состав: +${d.add.length} / −${d.drop.length}`;
+      el.className = 'primary big';
+      el.disabled = false;
+    } else {
+      el.textContent = live ? 'Остановить' : word;
+      el.className = live ? 'danger big' : 'primary big';
+      el.disabled = !chosen.length && !live;
+    }
     return chosen;
   };
   btn($('#b-auto'), 'phones', onP, 'Запустить');
@@ -1196,8 +1240,24 @@ function paintStage(box, set, run, a) {
 
 async function startAuto(set) {
   const run = ((lastState && lastState.auto && lastState.auto.runs) || {})[set] || {};
-  // «Остановить» гасит только свой режим — второй работает дальше
-  if (run.on) { await post('/api/auto', {on: false, set}); state(); return; }
+  if (run.on) {
+    // состав поменяли галочками — встраиваем новых в идущий поток, а снятых
+    // выводим; рассылка при этом не останавливается
+    const d = crewDiff(set, run);
+    if (d.add.length || d.drop.length) {
+      const r = await post('/api/auto/crew', {set, ids: [...crew[set]]});
+      if (!r.ok && r.reason) alert(r.reason);
+      crewDirty[set] = false;
+      state();
+      return;
+    }
+    // состав тот же — значит нажали «Остановить». Гасим только свой режим
+    await post('/api/auto', {on: false, set});
+    crewDirty[set] = false;
+    state();
+    return;
+  }
+  crewDirty[set] = false;
   useWork(set);
   await useSet(set, true);          // экраны переводим на этот набор, если можно
   const mode = $('#amode').value;

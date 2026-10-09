@@ -148,6 +148,10 @@ const { counts, replies, total: statsTotal } = stats;
 const statsFold = stats.fold;
 // чистка уносит оба набора — и в «за всё время» должны уйти числа обоих
 const countsAll = makeStats({ DIR, readCsv: readAll }).counts;
+// числа отдельно по каждому набору: вкладки рассылки показывают свои, а не
+// те, что сейчас выбраны для экранов
+const countsOf = Object.fromEntries(SETS.map((s) =>
+  [s, makeStats({ DIR, readCsv: (name) => readRaw(setPath(name, s)) }).counts]));
 const { warm, doneToday, doneTodayAll, setMaxCap, getMaxCap, getPlan,
         checksOf, setCheckMax, getCheckMax,
         setWarmDays, getWarmDays } = makeWarmup({ readCsv: readAll, accounts });
@@ -2862,6 +2866,9 @@ async function handler(req, res) {
         ...(() => { const r = replies(); return { replies: r.n, repliesCheckedAt: r.checkedAt, repliesChecksHour: r.checkedLastHour }; })(),
         baseLoading: running.has('_base'),
         baseSet,
+        // своё по каждому набору — для полос «по номерам» и «по чатам»
+        bySet: Object.fromEntries(SETS.map((s) =>
+          [s, { base: readCsv('numbers.csv', s).length, ...countsOf[s]() }])),
         wiping: running.has('_wipe'),
         claims: claims.active(),
         proxy: proxyGuard.summary(),
@@ -3189,22 +3196,22 @@ async function handler(req, res) {
 
     // роль: только прогрев или прогрев + рассылка
     if (u.pathname === '/api/accounts/role' && req.method === 'POST') {
-      const { id, role } = await body(req);
+      const { id, role, set: want } = await body(req);
       const acc = accounts.list().find((a) => a.id === id);
       if (!acc) return json(res, 200, { ok: false, reason: 'аккаунт не найден' });
       const send = role === 'send';
       accounts.setField(id, { role: send ? 'send' : 'warm' });
       // прогон уже идёт — новичок в рассылке подхватывается сразу, без перезапуска
-      if (send && auto.on && !auto.ids.includes(id) && accounts.hasSession(acc) && accounts.isAuthed(acc)) {
-        // в какой режим его взять: в единственный работающий, а если работают
-        // оба — в тот, что сейчас открыт на экране
-        const set = SETS.filter((s) => auto.live[s]).length === 1
-          ? SETS.find((s) => auto.live[s]) : baseSet;
-        if (auto.live[set]) {
-          auto.ids.push(id);
-          auto.sets.set(id, set);
-          auto.per.set(id, autoPer((auto.opts[set]?.mode || 'full') !== 'check' && inQuarantine(acc)));
-        }
+      // Вкладка рассылки говорит, в какой режим его берут. Если этот режим уже
+      // идёт — аккаунт подхватывается сразу, без перезапуска; если нет — просто
+      // становится свободным, и его можно отметить галочкой.
+      // Без набора (экран аккаунтов) в чужой прогон не суём: там не видно,
+      // в какой из двух, а угадывать — значит отправить аккаунт не туда.
+      if (send && SETS.includes(want) && auto.live[want] && !auto.ids.includes(id)
+          && accounts.hasSession(acc) && accounts.isAuthed(acc)) {
+        auto.ids.push(id);
+        auto.sets.set(id, want);
+        auto.per.set(id, autoPer((auto.opts[want]?.mode || 'full') !== 'check' && inQuarantine(acc)));
       }
       events.note(send ? '✉️' : '🌱', send ? 'переведён в рассылку' : 'только прогрев — в рассылке не участвует', acc.title);
       return json(res, 200, { ok: true });

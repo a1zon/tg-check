@@ -458,6 +458,8 @@ textarea{font-family:-apple-system,system-ui,"Segoe UI",Roboto,Arial,sans-serif;
 .accrun .r input:disabled{opacity:.35}
 .accrun .r:has(input:disabled){cursor:default}
 .accrun .tag{font-size:11px;color:var(--mut);border:1px solid var(--line);border-radius:999px;padding:1px 8px}
+.accrun .tag.act{background:none;cursor:pointer;font-family:inherit}
+.accrun .tag.act:hover{color:var(--ink);border-color:var(--acc)}
 
 /* ——— точка у вкладки, когда её функция работает ——— */
 .nav-i .lamp{width:7px;height:7px;border-radius:50%;background:var(--ok);display:inline-block;

@@ -523,7 +523,9 @@ function paintAccRun(id, set) {
              ${sel.has(a.id) || here ? 'checked' : ''} ${lock ? 'disabled' : ''}>
       <span class="nm">${esc(a.name || a.title)}</span>
       <span class="cnt">${cnt}</span>
-      ${onlyWarm ? '<span class="tag">не в рассылке</span>' : ''}
+      ${onlyWarm ? `<button class="tag act" data-torun="${a.id}"
+          title="Сейчас аккаунт только греется. Нажми, чтобы он мог писать людям"
+          >не в рассылке — включить</button>` : ''}
       <span class="st">${st}</span></label>`;
   }).join('');
   if (el.dataset.html === html) return;     // не перерисовываем на каждый опрос
@@ -534,6 +536,22 @@ function paintAccRun(id, set) {
     c.checked ? s.add(c.dataset.pick) : s.delete(c.dataset.pick);
     el.dataset.html = '';
     paintAccRun(id, set);
+  }; });
+  // «только прогрев» → в рассылку, не уходя с вкладки. Кнопка внутри label,
+  // поэтому гасим клик: иначе он заодно переключил бы галочку
+  el.querySelectorAll('[data-torun]').forEach((b) => { b.onclick = async (e) => {
+    e.preventDefault(); e.stopPropagation();
+    const a = accs.find(x => x.id === b.dataset.torun);
+    if (!a) return;
+    const w = a.warm || {};
+    if (!w.atMax && !confirm(
+        `«${a.name || a.title}» ещё на разгоне: ${w.note || 'прогрет не полностью'}.\n\n` +
+        `Если взять его в рассылку сейчас, писать он будет по графику прогрева — ` +
+        `не больше ${w.cap ?? '?'} в сутки.\n\nВключить?`)) return;
+    await post('/api/accounts/role', {id: a.id, role: 'send', set});
+    crew[set].add(a.id);
+    el.dataset.html = '';
+    loop();
   }; });
 }
 
@@ -1071,15 +1089,21 @@ function paintAuto(a) {
   // — её собственный режим
   const ready = (set) => accs.filter(x => crew[set] && crew[set].has(x.id) && canPick(x) && !x.run);
 
-  // строки «кто чем занят» — только пока прогон идёт
-  // строка аккаунта: имя · что делает (решает сервер) · сегодня проверено и написано.
-  // Проверок бывает больше лимита — это сделанное до его введения, не превышение
-  $('#autostate').innerHTML = !on ? '' : (a.accounts || []).map(x => `<div class="arow">
+  // Строки «кто чем занят» — у каждой вкладки СВОИ: показываем только те
+  // аккаунты, что работают в её режиме. Проверок бывает больше лимита — это
+  // сделанное до его введения, не превышение.
+  const rows = (el, set, live) => {
+    if (!el) return;
+    const mine = live ? (a.accounts || []).filter(x => x.set === set) : [];
+    el.innerHTML = mine.map(x => `<div class="arow">
       <b title="${esc(x.phone || '')}">${esc(x.title)}</b>
       <span style="color:${x.stopped ? 'var(--no)' : x.working ? 'var(--ok)' : 'var(--mut)'}">${esc(x.status || '')}</span>
-      <span class="w">${a.set !== 'chats' && x.checks ? `проверено сегодня ${x.checks.today} (лимит ${x.checks.cap}) · ` : ''}${
+      <span class="w">${set !== 'chats' && x.checks ? `проверено сегодня ${x.checks.today} (лимит ${x.checks.cap}) · ` : ''}${
         `написано сегодня ${x.today ?? 0} из ${x.cap ?? '—'}`}</span>
     </div>`).join('');
+  };
+  rows($('#autostate'), 'phones', onP);
+  rows($('#cs-state'), 'chats', onC);
 
   const btn = (el, set, run, word) => {
     if (!el) return;
@@ -1112,33 +1136,40 @@ function paintAuto(a) {
     ? 'Голосовые уходят людям <b>по-настоящему</b> и не отзываются.'
     : 'Сообщения уйдут людям <b>по-настоящему</b>. Отозвать нельзя — поставь дневной предел.';
 
-  paintStage(a);
+  paintStage($('#stage'), 'phones', runs.phones || {}, a);
+  paintStage($('#cs-stage'), 'chats', runs.chats || {}, a);
 }
 
 /**
  * Крупная строка «что происходит прямо сейчас». Ради неё всё и затевалось:
  * журнал читать никто не будет, а понять этап нужно с одного взгляда.
  */
-function paintStage(a) {
-  const box = $('#stage');
+/**
+ * Полоса «что сейчас происходит» — своя у каждой вкладки: её режим, её
+ * аккаунты, её числа по базе. Раньше была одна на панель и показывала чужое.
+ */
+function paintStage(box, set, run, a) {
   if (!box) return;
   const s = lastState || {};
-  if (baseLoading) {
+  const n = (s.bySet || {})[set] || {};
+  const chats = set === 'chats';
+  if (baseLoading && !chats) {
     box.hidden = false;
     box.innerHTML = '<b>Разбираю таблицу…</b><br><span style="color:var(--mut)">' +
       'ищу колонку с номерами</span>';
     return;
   }
-  if (!a.on) {
-    // прогон не идёт — показываем итог прошлого, если что-то уже сделано
-    if (!s.checked && !s.drafts) { box.hidden = true; return; }
+  if (!run.on) {
+    // режим не идёт — показываем итог прошлого, если что-то уже сделано
+    if (!n.checked && !n.drafts) { box.hidden = true; return; }
     box.hidden = false;
-    box.innerHTML = `<b>Сейчас не работает.</b><br><span style="color:var(--mut)">` +
-      `Проверено ${s.checked} из ${s.base}, найдено ${s.found}, написано ${s.drafts}. ` +
-      `Нажми «Запустить», чтобы продолжить.</span>`;
+    box.innerHTML = '<b>Сейчас не работает.</b><br><span style="color:var(--mut)">' +
+      (chats ? `Написано ${n.sent ?? 0} из ${n.found ?? 0}. `
+             : `Проверено ${n.checked} из ${n.base}, найдено ${n.found}, написано ${n.drafts}. `) +
+      'Нажми «Запустить», чтобы продолжить.</span>';
     return;
   }
-  const st = (a.accounts || []).map(x => x.status || '');
+  const st = (a.accounts || []).filter(x => x.set === set).map(x => x.status || '');
   const has = (w) => st.some(x => x.startsWith(w));
   let head;
   if (a.hold > 0 && a.rotate) head = `Меняю IP на прокси — ещё ${a.hold} с`;
@@ -1149,18 +1180,18 @@ function paintStage(a) {
   else if (st.length && st.every(x => /на сегодня всё|догревается|ограничен/.test(x))) head = 'Рассылка на сегодня всё — аккаунты догреваются, продолжим завтра';
   else if (has('ночь')) head = 'Ночь — письма ждут утра';
   else head = 'Пауза между заходами';
-  const pct = s.base ? Math.round((s.checked / s.base) * 100) : 0;
-  const sendWord = (a.voice ? 'голосовым, уходит сразу'
-                 : a.send ? 'ОТПРАВЛЯЮ по-настоящему' : 'только черновики, никому не уходит')
+  const pct = n.base ? Math.round((n.checked / n.base) * 100) : 0;
+  const sendWord = (run.voice ? 'голосовым, уходит сразу'
+                 : run.send ? 'ОТПРАВЛЯЮ по-настоящему' : 'только черновики, никому не уходит')
                  + (a.serial ? (a.rotate ? ' · по очереди, со сменой IP' : ' · по очереди') : '');
   box.hidden = false;
   box.innerHTML =
     `<b>${head}</b> · режим: ${esc(sendWord)}<br>` +
-    `<span style="color:var(--mut)">${a.set === 'chats'
-      ? `по чатам: людей ${s.found} · написано ${s.sent} · осталось ${Math.max(0, s.found - s.sent)}`
-      : `по номерам: проверено ${s.checked} из ${s.base} · найдено ${s.found} · написано ${s.sent}`}` +
-    `${s.replies ? ` · ответили ${s.replies}` : ''}` +
-    `</span><div class="bar"><i style="width:${a.set === 'chats' ? (s.found ? Math.round(s.sent / s.found * 100) : 0) : pct}%"></i></div>`;
+    `<span style="color:var(--mut)">${chats
+      ? `по чатам: людей ${n.found} · написано ${n.sent} · осталось ${Math.max(0, (n.found || 0) - (n.sent || 0))}`
+      : `по номерам: проверено ${n.checked} из ${n.base} · найдено ${n.found} · написано ${n.sent}`}` +
+    `${n.replies ? ` · ответили ${n.replies}` : ''}` +
+    `</span><div class="bar"><i style="width:${chats ? (n.found ? Math.round(n.sent / n.found * 100) : 0) : pct}%"></i></div>`;
 }
 
 async function startAuto(set) {
@@ -1586,7 +1617,8 @@ $('#b-memcsv').onclick = () => { location.href = '/api/members/csv'; };
 
 const upload = async (file) => {
   if (!file) return;
-  baseLoading = true; paintStage(autoLast);
+  baseLoading = true;
+  paintStage($('#stage'), 'phones', (autoLast.runs || {}).phones || {}, autoLast);
   $('#basenow').innerHTML = `<span style="color:var(--mut)">отправляю ${file.name}…</span>`;
   const r = await (await fetch('/api/upload', {
     method: 'POST',

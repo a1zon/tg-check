@@ -88,8 +88,10 @@ const SET_FILES = new Set(['numbers.csv', 'results.csv', 'drafts.csv']);
 const BASE_SET_FILE = path.join(DIR, 'base-set.json');
 let baseSet = 'phones';
 try { if (JSON.parse(fs.readFileSync(BASE_SET_FILE, 'utf8')).set === 'chats') baseSet = 'chats'; } catch {}
+const SETS = ['phones', 'chats'];
+const setWord = (set) => (set === 'chats' ? 'по чатам' : 'по номерам');
 const setPath = (name, set = baseSet) => (set === 'chats' && SET_FILES.has(name) ? path.join('chats', name) : name);
-const readCsv = (name) => readRaw(setPath(name));
+const readCsv = (name, set) => readRaw(setPath(name, set));
 const readAll = (name) => (SET_FILES.has(name)
   ? [...readRaw(name), ...readRaw(path.join('chats', name))] : readRaw(name));
 function setBaseSet(set) {
@@ -823,7 +825,26 @@ const auto = {
   ids: [],                       // кто участвует
   per: new Map(),                // id -> { nextAt, note, batches, fails, stopped }
   timer: null, since: 0,
+
+  /**
+   * «По номерам» и «по чатам» — два независимых режима: у каждого свой список
+   * аккаунтов и свои настройки рассылки. Один и тот же аккаунт в двух режимах
+   * сразу не работает — набор у него один.
+   *
+   * Общее у режимов одно, зато главное: ПРОКСИ. Поэтому очередь запусков,
+   * работа по одному за раз и смена IP остаются общими на оба — иначе два
+   * режима удвоили бы нагрузку на один адрес, за что Telegram и наказывает.
+   */
+  live: { phones: false, chats: false },   // какие режимы сейчас работают
+  sets: new Map(),                         // id -> набор, по которому идёт аккаунт
+  opts: { phones: null, chats: null },     // настройки каждого режима
 };
+
+/** По какому набору работает аккаунт и с какими настройками. */
+const setOf = (id) => auto.sets.get(id) || baseSet;
+const optOf = (id) => auto.opts[setOf(id)] || auto;
+/** Кто из прогона идёт по этому набору. */
+const idsOfSet = (set) => auto.ids.filter((id) => setOf(id) === set);
 
 // минуты считаем от общего числа, а не от остатка часов: иначе выходит
 // «23 ч 60 мин» — и неправда, и строка скачет на каждом опросе
@@ -841,11 +862,11 @@ const num = (v, d, min, max) => {
  * Сколько работы осталось на самом деле: занятые брони не в счёт (их уже
  * кто-то делает), безнадёжные номера — тоже.
  */
-function work() {
+function work(set = baseSet) {
   const held = claims.heldAll();
-  const base = readCsv('numbers.csv');
-  const res = readCsv('results.csv');
-  const log = readCsv('drafts.csv');
+  const base = readCsv('numbers.csv', set);
+  const res = readCsv('results.csv', set);
+  const log = readCsv('drafts.csv', set);
 
   const checked = new Set(res.filter((r) => ['true', 'false', 'idle'].includes(r.tg)).map((r) => r.phone));
   const tries = {};
@@ -911,7 +932,8 @@ function notedOnce(s, kind) {
 
 /** Чем занять этот аккаунт прямо сейчас. null — пока нечем. */
 function funnelJob(id) {
-  if (!auto.funnel || auto.mode === 'check' || !isWorkTime()) return null;
+  const o = optOf(id);
+  if (!o.funnel || o.mode === 'check' || !isWorkTime()) return null;
   const s = auto.per.get(id);
   // первый раз после запуска панели — от последней настоящей проверки этого
   // аккаунта (её пишет followup.py в followup-runs.json). Раньше бралось
@@ -925,7 +947,7 @@ function funnelJob(id) {
   }
   if (Date.now() < s.funnelAt) return null;
   s.funnelAt = Date.now() + FUNNEL_EVERY;
-  return { name: 'follow', limit: 2, delay: auto.write.delay, delayMax: auto.write.delayMax };
+  return { name: 'follow', limit: 2, delay: o.write.delay, delayMax: o.write.delayMax };
 }
 
 
@@ -1007,6 +1029,9 @@ setInterval(() => {
 
 function pickJob(left, id) {
   const acc = accounts.list().find((a) => a.id === id);
+  // набор и настройки — того режима, в котором этот аккаунт работает
+  const set = setOf(id);
+  const o = optOf(id);
   // «только прогрев»: новых писем и проверок нет, но на ответы тем, кому
   // аккаунт писал раньше, он отвечает — человек не должен ждать
   if (acc && !accounts.inOutreach(acc)) return wroteAny().has(id) ? funnelJob(id) : null;
@@ -1028,11 +1053,11 @@ function pickJob(left, id) {
   // Квота проверится сама, когда рассылку переключат обратно на номера —
   // первая же проверка покажет, открылась она или нет.
   // людям из чатов пишем по @нику — контакты не добавляются, квота не мешает
-  const canWrite = auto.mode !== 'check' && isWorkTime() && (!quotaOut || baseSet === 'chats');
+  const canWrite = o.mode !== 'check' && isWorkTime() && (!quotaOut || set === 'chats');
   // Проверка номеров — только когда работаем ПО НОМЕРАМ. По чатам людям пишут
   // по @нику, проверять там нечего, а каждая проверка — это добавление
   // контакта, то самое действие, за которое Telegram ограничивает аккаунты.
-  const canCheck = auto.mode !== 'write' && !quotaOut && baseSet === 'phones';
+  const canCheck = o.mode !== 'write' && !quotaOut && set === 'phones';
   // дневной потолок считаем ВСЕГДА (даже если «беречь аккаунты» выключено) —
   // иначе один тумблер снимает всю защиту от бана. Галка лишь отключает отлёжку.
   const w = acc ? warm(acc) : null;
@@ -1069,15 +1094,15 @@ function pickJob(left, id) {
     const capLeft = w ? w.left : Infinity;
     if (capLeft > 0) {
       return { name: 'drafts',
-               limit: Math.max(1, Math.min(auto.write.limit, canDo, capLeft)),
-               delay: auto.write.delay, delayMax: auto.write.delayMax,
-               hold: auto.write.hold, holdMax: auto.write.holdMax };
+               limit: Math.max(1, Math.min(o.write.limit, canDo, capLeft)),
+               delay: o.write.delay, delayMax: o.write.delayMax,
+               hold: o.write.hold, holdMax: o.write.holdMax };
     }
     const s = auto.per.get(id);
     if (s) {
       s.note = 'дневной предел';
       // со вторым шагом — вернёмся к очередной проверке ответов, без него — завтра
-      s.nextAt = auto.funnel ? Math.max(Date.now() + 60_000, s.funnelAt || 0) : untilTomorrow();
+      s.nextAt = o.funnel ? Math.max(Date.now() + 60_000, s.funnelAt || 0) : untilTomorrow();
       if (notedOnce(s, 'cap')) push(`⏸ «${title(id)}» выбрал дневной предел (${w ? w.cap : '—'}) — вернётся завтра`);
     }
   }
@@ -1099,21 +1124,29 @@ function pickJob(left, id) {
   if (canCheck && left.check > 0 && !backlogFull) {
     const c = checksOf(id);
     if (c.left > 0) {
+      if (quotaProbe) return { name: 'check', limit: 1, delay: o.check.delay, probe: true };
+      // Если писать сегодня ещё можно — берём РОВНО ОДИН номер: нашли живого,
+      // следующим шагом сразу ему пишем, и только потом берём следующий номер.
+      // Так найденный не лежит в адресной книге и не ждёт своей пачки.
+      // Пачкой проверяем лишь когда писать нельзя (режим «только проверять»,
+      // ночь, выбран дневной предел) — тогда очередь готовится заранее.
+      if (canWrite && (!w || w.left > 0)) {
+        return { name: 'check', limit: 1, delay: o.check.delay, step: true };
+      }
       // в Telegram находится ~70% номеров — пачку берём по свободному месту в очереди
       const room = Math.max(1, Math.ceil((backlogMax - (left.own[id] || 0)) / 0.7));
-      if (quotaProbe) return { name: 'check', limit: 1, delay: auto.check.delay, probe: true };
-      return { name: 'check', limit: Math.min(auto.check.limit, left.check, c.left, room), delay: auto.check.delay };
+      return { name: 'check', limit: Math.min(o.check.limit, left.check, c.left, room), delay: o.check.delay };
     }
     const s = auto.per.get(id);
     // и писать нечего/нельзя, и проверки на сегодня кончились — до завтра
     // (со вторым шагом — до очередной проверки ответов)
     if (s && !(canWrite && canDo > 0)) {
       s.note = 'проверки на сегодня';
-      s.nextAt = auto.funnel ? Math.max(Date.now() + 60_000, s.funnelAt || 0) : untilTomorrow();
+      s.nextAt = o.funnel ? Math.max(Date.now() + 60_000, s.funnelAt || 0) : untilTomorrow();
       if (notedOnce(s, 'checks')) push(`⏸ «${title(id)}» проверил на сегодня ${c.today} из ${c.cap} номеров — продолжит завтра`);
     }
   }
-  if (auto.mode !== 'check' && !isWorkTime()) {
+  if (o.mode !== 'check' && !isWorkTime()) {
     const s = auto.per.get(id);
     if (s) s.note = `ночь — пишем с ${WORK_FROM}:00 по Екатеринбургу`;
     const night = new Date().toISOString().slice(0, 10);
@@ -1236,21 +1269,33 @@ function autoTick() {
   // прокси лежит — ни смены IP, ни запусков: они только копили бы сбои
   if (live.every((id) => proxyGuard.down(proxyOf(id)))) return;
 
-  const left = work();
+  // Остаток работы считаем ОТДЕЛЬНО по каждому работающему режиму: у номеров
+  // и у чатов свои файлы, своя очередь и свой конец.
+  const lefts = {};
+  for (const set of SETS) if (auto.live[set]) lefts[set] = work(set);
   const busy = live.some((id) => running.has(id));
-  // работы нет и никто её не доделывает — прогон закончен. Считаем только ту
-  // работу, которую этот прогон вообще делает: в режиме «только писать»
-  // непройденная база — не повод держать прогон включённым
-  // работа, которую МОГУТ сделать оставшиеся в прогоне: людей, доступных
-  // только выбывшему аккаунту, ждать бессмысленно
-  const canWrite = left.shared + senders.reduce((n, id) => n + (left.own[id] || 0), 0);
-  const need = auto.mode === 'check' ? left.check
-             : auto.mode === 'write' ? canWrite : left.check + canWrite;
-  if (!need && !busy) {
-    return autoStop(auto.mode === 'check' ? 'база пройдена'
-                  : auto.mode === 'write' ? 'всем найденным написано'
-                  : 'база пройдена, всем найденным написано');
+
+  // Режим заканчивается сам по себе: его база пройдена и его аккаунты
+  // свободны. Второй при этом продолжает — они друг от друга не зависят.
+  for (const set of SETS) {
+    if (!auto.live[set] || !lefts[set]) continue;
+    const mine = senders.filter((id) => setOf(id) === set);
+    if (!mine.length) { finishSet(set, 'в нём не осталось аккаунтов'); continue; }
+    if (mine.some((id) => running.has(id))) continue;
+    const l = lefts[set];
+    const o = auto.opts[set] || auto;
+    // работа, которую МОГУТ сделать оставшиеся: людей, доступных только
+    // выбывшему аккаунту, ждать бессмысленно
+    const canWrite = l.shared + mine.reduce((n, id) => n + (l.own[id] || 0), 0);
+    const need = o.mode === 'check' ? l.check
+               : o.mode === 'write' ? canWrite : l.check + canWrite;
+    if (!need) {
+      finishSet(set, o.mode === 'check' ? 'база пройдена'
+                   : o.mode === 'write' ? 'всем найденным написано'
+                   : 'база пройдена, всем найденным написано');
+    }
   }
+  if (!auto.on) return;
 
   /**
    * Режим «по очереди»: работает ровно один аккаунт за раз, и перед каждым
@@ -1275,6 +1320,10 @@ function autoTick() {
     if (running.has(id)) continue;
     if (proxyGuard.down(proxyOf(id))) continue;
     const s = auto.per.get(id);
+    const set = setOf(id);
+    const left = lefts[set];
+    const o = auto.opts[set] || auto;
+    if (!left) continue;            // режим этого аккаунта уже закончил работу
     let job;
     if (now < s.nextAt) {
       // отдыхает между пачками писем — но посмотреть, ответили ли ему, можно:
@@ -1298,16 +1347,18 @@ function autoTick() {
     } else left.check -= job.limit;
 
     s.probe = !!job.probe;          // пробный заход «вернулась ли квота»
-    s.jobSet = job.set || baseSet;  // по какому набору шла задача: по чатам контакты не добавляются
+    s.jobName = job.name;           // чем аккаунт был занят — это решает длину отдыха
+    s.jobStep = !!job.step;         // шаг цепочки «проверил → написал», а не отдельная пачка
+    s.jobSet = set;                 // по какому набору шла задача: по чатам контакты не добавляются
     launchedBy = 'auto';
     const r = start(job.name, {
-      account: id, limit: job.limit, delay: job.delay, set: job.set,
+      account: id, limit: job.limit, delay: job.delay, set,
       delayMax: job.delayMax, hold: job.hold, holdMax: job.holdMax,
       warm: auto.warm,
       // второе письмо — это всегда отправка: черновиком ссылку не оставишь,
       // человек уже ответил и ждёт
-      send: ['drafts', 'follow'].includes(job.name) && auto.send && !auto.voice,
-      voice: job.name === 'drafts' && auto.voice,
+      send: ['drafts', 'follow'].includes(job.name) && o.send && !o.voice,
+      voice: job.name === 'drafts' && o.voice,
     }, (code, st) => autoAfter(id, code, st));
     launchedBy = 'manual';
 
@@ -1348,6 +1399,7 @@ function autoFail(id, s) {
 function autoAfter(id, code, st) {
   const s = auto.per.get(id);
   if (!s || !auto.on) return;
+  const o = optOf(id);
   const now = Date.now();
   // задача была проверкой ответов посреди отдыха: что бы ни случилось, отметку снимаем
   const restUntil = s.restUntil || 0;
@@ -1375,9 +1427,9 @@ function autoAfter(id, code, st) {
       accounts.setField(id, { quotaUntil: new Date(until).toISOString() });
       // по чатам пишем по @нику, квота тут не нужна — аккаунт не усыпляем,
       // откладываем только следующую пробу квоты
-      s.nextAt = baseSet === 'chats' ? now + 60_000 : until;
+      s.nextAt = s.jobSet === 'chats' ? now + 60_000 : until;
       events.note('⏳', `квота Telegram на добавление контактов закрыта — пробую одним номером в ${ekbTime(until)} по Екб, ` +
-        `через ${fmtLeft(QUOTA_RETRY / 1000)}` + (baseSet === 'chats'
+        `через ${fmtLeft(QUOTA_RETRY / 1000)}` + (s.jobSet === 'chats'
           ? ' (по чатам продолжает писать — там контакты не нужны)' : ' (пока ответы смотрим и догреваемся)'), title(id));
     }
     s.note = st.stop === 'quota' ? 'квота на сегодня'
@@ -1411,22 +1463,50 @@ function autoAfter(id, code, st) {
     accounts.setField(id, { quotaUntil: '' });
     events.note('✅', 'квота на добавление контактов вернулась — продолжаю проверку и письма', acc.title);
   }
-  // Глубокий сон: отработав свою пачку, аккаунт уходит из пула не на ровное
+  /**
+   * Проверка по одному номеру и письмо найденному — это не две пачки, а шаги
+   * ОДНОЙ цепочки: проверил номер → написал → взял следующий. Между шагами
+   * пауза такая же, как была между номерами внутри пачки, иначе на каждое
+   * письмо уходило бы по сорок минут и дневной предел не выбрать за сутки.
+   *
+   * Долгий отдых — когда аккаунт выдал свою порцию писем (столько, сколько
+   * раньше уходило за одну пачку) или когда делать стало нечего.
+   */
+  // Цепочку, оборвавшуюся надолго (новые сутки, упор в дневной предел,
+  // остановка прогона), начинаем с нуля: иначе вчерашние письма укоротили бы
+  // сегодняшнюю порцию.
+  const stepMax = Math.max(o.check.delay, o.write.delayMax || o.write.delay) * 2 + 60;
+  if (now - (s.chainAt || 0) > stepMax * 1000) s.chain = 0;
+  s.chainAt = now;
+  if (s.jobName === 'drafts') s.chain = (s.chain || 0) + (st?.done || 0);
+  const portion = Math.max(1, o.write.limit);
+  const chaining = (s.jobStep || s.jobName === 'drafts')
+    && (st?.done || 0) > 0 && (s.chain || 0) < portion;
+
+  // Глубокий сон: отработав свою порцию, аккаунт уходит из пула не на ровное
   // число секунд, а на вилку от заданной паузы до полутора от неё (40 минут
   // превращаются в 40-60). Ровный интервал виден по секундомеру не хуже,
   // чем полное его отсутствие.
-  // Пачка, не взявшая ни одного номера (всё разобрали другие), столько ждать
-  // не должна — там просто нечего было делать.
-  const wait = st && st.done === 0
-    ? Math.max(30, Math.min(auto.pause, 60))
-    : Math.round(auto.pause * (1 + Math.random() * 0.5));
+  // Заход, не взявший ни одного номера (всё разобрали другие), столько ждать
+  // не должен — там просто нечего было делать.
+  let wait;
+  if (chaining) {
+    wait = s.jobName === 'drafts'
+      ? Math.max(20, rnd(o.write.delay, Math.max(o.write.delay, o.write.delayMax)))
+      : Math.max(10, Math.round(o.check.delay * (1 + Math.random() * 0.5)));
+  } else {
+    s.chain = 0;
+    wait = st && st.done === 0
+      ? Math.max(30, Math.min(o.pause, 60))
+      : Math.round(o.pause * (1 + Math.random() * 0.5));
+  }
   s.nextAt = now + wait * 1000;
   // это была проверка ответов посреди отдыха — возвращаем аккаунт в тот же отдых
   if (restUntil) {
     s.nextAt = Math.max(s.nextAt, restUntil);
     if (!(st && st.done)) return;
   }
-  if (st && st.done) push(`   «${title(id)}» уходит отдыхать на ${Math.round(wait / 60)} мин`);
+  if (st && st.done && !chaining) push(`   «${title(id)}» уходит отдыхать на ${Math.round(wait / 60)} мин`);
 }
 
 /**
@@ -1441,37 +1521,71 @@ const AUTO_RUN = path.join(DIR, 'auto-run.json');
 // последние настройки запуска — форма показывает их после обновления страницы,
 // а не значения по умолчанию (галочки «второй шаг», «по очереди» слетали)
 const AUTO_LAST = path.join(DIR, 'auto-last.json');
-const autoLastForm = () => {
-  try { return JSON.parse(fs.readFileSync(AUTO_LAST, 'utf8')); } catch {}
-  try { return JSON.parse(fs.readFileSync(AUTO_RUN, 'utf8')).o; } catch { return null; }
+const readJson = (f) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return null; } };
+
+/**
+ * Настройки последнего запуска — у каждого режима свои.
+ * Файлы прежнего образца (одни настройки на всю панель) понимаем тоже:
+ * их значения достаются обоим режимам.
+ */
+const autoLastForm = (set) => {
+  const saved = readJson(AUTO_LAST) || readJson(AUTO_RUN)?.o || null;
+  if (!saved) return null;
+  const bySet = SETS.some((s) => saved[s]) ? saved : Object.fromEntries(SETS.map((s) => [s, saved]));
+  return set ? (bySet[set] || null) : bySet;
 };
+
+/** Запомнить, что сейчас работает: это и переживает перезапуск, и помнит форма. */
+function autoRemember() {
+  const runs = {};
+  for (const s of SETS) if (auto.live[s] && auto.opts[s]) runs[s] = auto.opts[s].raw;
+  try {
+    if (Object.keys(runs).length) {
+      fs.writeFileSync(AUTO_RUN, JSON.stringify({ runs, at: new Date().toISOString() }, null, 2) + '\n');
+    } else fs.rmSync(AUTO_RUN, { force: true });
+  } catch {}
+  const keep = autoLastForm() || {};
+  for (const s of SETS) if (auto.opts[s]?.raw) keep[s] = auto.opts[s].raw;
+  try { fs.writeFileSync(AUTO_LAST, JSON.stringify(keep, null, 2) + '\n'); } catch {}
+}
 function autoForget() { try { fs.rmSync(AUTO_RUN, { force: true }); } catch {} }
+
 function autoResume() {
-  let saved;
-  try { saved = JSON.parse(fs.readFileSync(AUTO_RUN, 'utf8')); } catch { return; }
-  if (saved.set && saved.set !== baseSet) {
-    push(`\n⚠ прогон был запущен по набору «${saved.set === 'chats' ? 'по чатам' : 'по номерам'}», ` +
-         'а сейчас выбран другой — сам не продолжаю, запусти заново');
-    autoForget();
-    return;
-  }
+  const saved = readJson(AUTO_RUN);
+  if (!saved) return;
+  // новый образец — по режиму на запись; старый — один запуск с общим набором
+  const runs = saved.runs
+    || (saved.o ? { [SETS.includes(saved.set) ? saved.set : baseSet]: saved.o } : null);
+  if (!runs) return;
   push('\n↺ панель перезапустилась — продолжаю автопрогон с прежними настройками');
-  const r = autoStart(saved.o || {});
-  if (!r.ok) { push(`   продолжить не вышло: ${r.reason}`); autoForget(); }
+  for (const [set, o] of Object.entries(runs)) {
+    if (!SETS.includes(set)) continue;
+    const r = autoStart({ ...o, set });
+    if (!r.ok) push(`   ${setWord(set)}: продолжить не вышло — ${r.reason}`);
+  }
+  if (!auto.on) autoForget();
 }
 
 const autoPer = (q = false) => ({ nextAt: 0, lastAt: 0, note: q ? 'ограничение Telegram' : '',
                                   batches: 0, fails: 0, stopped: q, quarantine: q });
 
 function autoStart(o) {
-  if (auto.on) return { ok: false, reason: 'автопрогон уже идёт' };
+  // какой режим запускают: вкладка присылает свой набор, старые запуски
+  // (и возобновление после перезапуска) — текущий общий
+  const set = SETS.includes(o.set) ? o.set : baseSet;
+  if (auto.live[set]) return { ok: false, reason: `рассылка ${setWord(set)} уже идёт` };
   const entered = accounts.list().filter((a) => accounts.hasSession(a) && accounts.isAuthed(a));
   // аккаунты «только прогрев» в рассылку не идут, даже если их отметили
   const ready = entered.filter(accounts.inOutreach);
   const held = ready.filter(inQuarantine);
   const want = Array.isArray(o.accounts) ? o.accounts : [];
   const repliers = entered.filter((a) => !accounts.inOutreach(a) && wroteAny().has(a.id));
-  const ids = (want.length ? ready.filter((a) => want.includes(a.id)) : ready).map((a) => a.id);
+  // Аккаунт работает в одном режиме за раз: его набор — это его файлы,
+  // его брони и его дневной счёт. Занятых другим режимом не берём молча.
+  const other = SETS.find((s) => s !== set);
+  const taken = new Set(auto.live[other] ? idsOfSet(other) : []);
+  const ids = (want.length ? ready.filter((a) => want.includes(a.id)) : ready)
+    .map((a) => a.id).filter((id) => !taken.has(id));
   if (ids.length) {
     // отвеченные письма аккаунтов на прогреве тоже разбираем — в прогоне они только за этим
     for (const a of repliers) if (!want.length || want.includes(a.id)) ids.push(a.id);
@@ -1480,6 +1594,7 @@ function autoStart(o) {
     return { ok: false, reason: !entered.length
       ? 'нет ни одного вошедшего аккаунта — подключи хотя бы один (шаг 1)'
       : !ready.length ? 'все вошедшие аккаунты стоят «только прогрев» — переведи хотя бы один в рассылку'
+      : taken.size ? `выбранные аккаунты уже работают ${setWord(other)} — возьми свободные`
       : 'ни один из выбранных аккаунтов не вошёл или все они «только прогрев»' };
   }
   const mode = ['full', 'check', 'write'].includes(o.mode) ? o.mode : 'full';
@@ -1519,14 +1634,11 @@ function autoStart(o) {
   // раздаёт ограничения быстрее всего, и полагаться тут на внимательность
   // человека нельзя.
   const shared = !ownProxyEach();
-  Object.assign(auto, {
-    on: true, mode, voice,
+  // Настройки — свои у каждого режима: «по номерам» может идти с проверкой и
+  // паузой в час, «по чатам» — только письмами и по сорок минут.
+  auto.opts[set] = {
+    mode, voice,
     funnel: !!o.funnel,
-    serial: !!o.serial || !!rotate || shared,
-    rotate,
-    rotateWait: num(o.rotateWait, warmup.rotateWait || 10, 3, 600),
-    fresh: false, holdUntil: 0, rotateFails: 0,
-    warm: o.warm !== false,
     send: !!o.send && !voice && mode !== 'check',
     check: { limit: num(o.checkLimit, 20, 1, 500), delay: num(o.checkDelay, 15, 5, 3600) },
     // пауза между людьми и пауза между «завёл контакт» и «написал» — обе
@@ -1538,12 +1650,33 @@ function autoStart(o) {
              holdMax: num(o.holdMax, 120, 5, 7200) },
     // после пачки аккаунт уходит из работы «вглубь»: 40-60 минут по умолчанию
     pause: num(o.pause, 40 * 60, 10, 24 * 3600),
+    since: Date.now(),
+    raw: o,                      // как режим запускали: это уходит в файл и в форму
+  };
+  auto.live[set] = true;
+  for (const id of ids) auto.sets.set(id, set);
+
+  // Прокси один на оба режима, поэтому очередь, работа по одному за раз и
+  // смена IP — общие. Если второй режим просит строже, берём строже.
+  Object.assign(auto, {
+    on: true,
+    serial: (auto.on && auto.serial) || !!o.serial || !!rotate || shared,
+    rotate: rotate || (auto.on ? auto.rotate : ''),
+    rotateWait: num(o.rotateWait, warmup.rotateWait || 10, 3, 600),
+    fresh: false, holdUntil: 0, rotateFails: 0,
+    warm: auto.on ? (auto.warm && o.warm !== false) : o.warm !== false,
     // ограниченных Telegram держим в прогоне, но стоящими: когда срок
     // ограничения пройдёт, autoTick вернёт их в работу сам
-    ids,
-    since: Date.now(),
-    per: new Map(ids.map((id) => [id, autoPer(mode !== 'check' && held.some((a) => a.id === id))])),
+    ids: [...new Set([...(auto.on ? auto.ids : []), ...ids])],
+    since: auto.on ? auto.since : Date.now(),
   });
+  if (!auto.on) auto.per = new Map();
+  for (const id of ids) auto.per.set(id, autoPer(mode !== 'check' && held.some((a) => a.id === id)));
+  // поля верхнего уровня держим в согласии с последним запуском: на них
+  // смотрят старые экраны и ручные задачи
+  Object.assign(auto, { mode, voice, funnel: auto.opts[set].funnel, send: auto.opts[set].send,
+                        check: auto.opts[set].check, write: auto.opts[set].write,
+                        pause: auto.opts[set].pause });
 
   const what = mode === 'check' ? 'только проверка базы'
              : mode === 'write' ? 'только рассылка' : 'проверка и рассылка';
@@ -1559,13 +1692,17 @@ function autoStart(o) {
             : auto.send ? 'С ОТПРАВКОЙ — сообщения уходят людям' : 'только черновики';
   // в заголовке — те, кто РЕАЛЬНО работает: снятые карантином сюда не попадают,
   // иначе строка обещает больше, чем прогон делает
-  push(`\n▶▶ АВТОПРОГОН: ${auto.ids.map(title).join(', ')}`);
+  push(`\n▶▶ АВТОПРОГОН ${setWord(set).toUpperCase()}: ${ids.map(title).join(', ')}`);
+  if (auto.live[other]) {
+    push(`   параллельно идёт рассылка ${setWord(other)} (${idsOfSet(other).map(title).join(', ')}) — ` +
+         'аккаунты разные, прокси общий, работают по очереди');
+  }
   push(`   ${what} · ${how} · отдых между пачками ${Math.round(auto.pause / 60)}-` +
        `${Math.round(auto.pause * 1.5 / 60)} мин` +
        ` · максимум ${getMaxCap() || 15} в сутки на аккаунт` +
        (auto.warm ? ' · прогрев новых аккаунтов включён' : ' · ПРОГРЕВ ВЫКЛЮЧЕН'));
   if (auto.warm) {
-    for (const id of auto.ids) {
+    for (const id of ids) {
       const acc = accounts.list().find((a) => a.id === id);
       const w = warm(acc);
       push(`   «${acc.title}»: день ${w.day} — ${w.note}` +
@@ -1578,19 +1715,45 @@ function autoStart(o) {
     warmup.rotateWait = auto.rotateWait;
     warmSave();
   }
-  auto.timer = setInterval(autoTick, AUTO_TICK);
-  try {
-    fs.writeFileSync(AUTO_RUN, JSON.stringify({ o, set: baseSet, at: new Date().toISOString() }, null, 2) + '\n');
-    fs.writeFileSync(AUTO_LAST, JSON.stringify(o, null, 2) + '\n');
-  } catch {}
+  if (!auto.timer) auto.timer = setInterval(autoTick, AUTO_TICK);
+  autoRemember(set, o);
   autoTick();
   return { ok: true };
+}
+
+/**
+ * Один режим закончил работу. Второй при этом продолжает: у них разные
+ * аккаунты, разные файлы и свой конец у каждого.
+ */
+function finishSet(set, why) {
+  if (!auto.live[set]) return;
+  const ids = idsOfSet(set);          // считаем ДО того, как разберём таблицу наборов
+  auto.live[set] = false;
+  auto.opts[set] = null;
+  for (const id of ids) { auto.sets.delete(id); auto.per.delete(id); }
+  auto.ids = auto.ids.filter((id) => !ids.includes(id));
+  if (!SETS.some((s) => auto.live[s])) return autoStop(`рассылка ${setWord(set)} — ${why}`);
+  push(`■ рассылка ${setWord(set)} остановлена: ${why}`);
+  autoRemember();
+}
+
+/** Остановка одного режима руками: его задачи дорабатывать незачем. */
+function stopSet(set, why) {
+  const ids = idsOfSet(set);
+  finishSet(set, why);
+  for (const id of ids) {
+    const r = running.get(id);
+    if (r) { r.child.kill('SIGTERM'); push(`⏹ остановлено вручную: ${r.title}`); }
+  }
 }
 
 function autoStop(why) {
   if (!auto.on) return;
   autoForget();
   auto.on = false;
+  auto.live = { phones: false, chats: false };
+  auto.opts = { phones: null, chats: null };
+  auto.sets = new Map();
   clearInterval(auto.timer);
   auto.timer = null;
   push(`■■ автопрогон остановлен: ${why}`);
@@ -1618,10 +1781,11 @@ const ekbTime = (t) => new Intl.DateTimeFormat('ru-RU',
 
 /** Рассылке этот аккаунт сегодня больше не нужен (или не нужен до утра). */
 function outreachDoneForNow(acc) {
+  const o = optOf(acc.id);
   const cap = warm(acc).cap;
   const writeDone = cap > 0 && doneToday(acc.id) >= cap;
-  const checkDone = auto.mode === 'write' || baseSet === 'chats' || checksOf(acc.id).left <= 0;
-  const cantWrite = auto.mode === 'check' || writeDone || !isWorkTime();
+  const checkDone = o.mode === 'write' || setOf(acc.id) === 'chats' || checksOf(acc.id).left <= 0;
+  const cantWrite = o.mode === 'check' || writeDone || !isWorkTime();
   return cantWrite && checkDone;
 }
 
@@ -1649,15 +1813,16 @@ function autoStatus(s, busy, { today, cap, checks, wait }, acc) {
     return s.funnelAt ? `на прогреве — ответы смотрит раз в час, следующий раз в ${ekbTime(s.funnelAt)} по Екб`
                       : 'на прогреве — в прогоне только смотрит ответы';
   }
+  const o = acc ? optOf(acc.id) : auto;
   const writeDone = cap > 0 && today >= cap;
   // по чатам номера не проверяются — «проверки на сегодня» тут ни при чём
-  const checkDone = baseSet === 'chats' || checks.left <= 0;
-  if (writeDone && (checkDone || auto.mode === 'write')) {
+  const checkDone = (acc && setOf(acc.id) === 'chats') || checks.left <= 0;
+  if (writeDone && (checkDone || o.mode === 'write')) {
     return (warmup.on ? 'рассылка на сегодня всё — пока догревается' : 'на сегодня всё — продолжит завтра')
-      + (auto.funnel ? ', ответы смотрит раз в час' : '');
+      + (o.funnel ? ', ответы смотрит раз в час' : '');
   }
   if (manualBusy()) return 'пауза — ты работаешь с аккаунтами';
-  if (!isWorkTime() && auto.mode !== 'check' && (checkDone || auto.mode === 'write')) {
+  if (!isWorkTime() && o.mode !== 'check' && (checkDone || o.mode === 'write')) {
     return `ночь — пишет с ${WORK_FROM}:00`;
   }
   if (wait > 0) {
@@ -1669,11 +1834,23 @@ function autoStatus(s, busy, { today, cap, checks, wait }, acc) {
 
 function autoView() {
   const now = Date.now();
+  // по режиму на вкладку: что идёт, с какими настройками и чьими аккаунтами
+  const runs = Object.fromEntries(SETS.map((set) => {
+    const o = auto.opts[set];
+    return [set, {
+      on: !!auto.live[set],
+      mode: o?.mode || 'full', send: !!o?.send, voice: !!o?.voice,
+      pause: o?.pause || 0, since: o?.since || 0,
+      ids: idsOfSet(set),
+      form: autoLastForm(set),
+    }];
+  }));
   return {
     on: auto.on, mode: auto.mode, send: auto.send, voice: auto.voice,
     pause: auto.pause, since: auto.since,
     set: baseSet,
-    form: autoLastForm(),
+    runs,
+    form: autoLastForm(baseSet),
     serial: auto.serial, rotate: !!auto.rotate,
     hold: Math.max(0, Math.round((auto.holdUntil - now) / 1000)),
     accounts: auto.ids.map((id) => {
@@ -1685,6 +1862,7 @@ function autoView() {
       const wait = Math.max(0, Math.round(((s.nextAt || 0) - now) / 1000));
       return {
         id, title: acc ? (acc.name || acc.title) : id, phone: acc?.title || '',
+        set: setOf(id),
         stopped: !!s.stopped,
         today, cap, checks,
         // что аккаунт делает — человеческим языком; решает сервер, а не
@@ -2029,6 +2207,9 @@ async function handler(req, res) {
         warm: accounts.hasSession(a) ? warm(a, today.get(a.id) || 0) : null,
         dailyCap: Number(a.dailyCap) || 0,   // ручной предел на аккаунт (0 — авто)
         role: accounts.inOutreach(a) ? 'send' : 'warm',
+        // в каком режиме аккаунт сейчас занят: по нему вкладки показывают,
+        // кто свободен, а кого брать нельзя
+        run: auto.on && auto.ids.includes(a.id) ? setOf(a.id) : '',
         sentToday: today.get(a.id) || 0,
         checks: checksOf(a.id),          // проверки номеров сегодня и дневной предел
         now: autoStatusFor(a.id),        // что делает в прогоне и почему отдыхает
@@ -2399,15 +2580,16 @@ async function handler(req, res) {
       if (req.method !== 'POST') return json(res, 200, { set: baseSet });
       const { set } = await body(req);
       if (set !== 'phones' && set !== 'chats') return json(res, 200, { ok: false, reason: 'нет такого режима' });
-      // посреди проверки или рассылки набор не меняем: задача дописала бы
-      // половину в один набор, половину в другой
-      const busy = auto.on || [...running.values()].some((v) =>
+      // Прогону это теперь безразлично: набор у каждого аккаунта свой, он
+      // задаётся при запуске режима. Общий остаётся только для экранов —
+      // какую базу и какие результаты смотрит человек. А вот ручные задачи
+      // посреди работы переключать нельзя: допишут половину в другой набор.
+      const busy = [...running.values()].some((v) =>
         /^(Проверка базы|Черновики|Смотрит ответы|Загрузка базы)/.test(v.title));
       if (busy && set !== baseSet) {
-        return json(res, 200, { ok: false, reason: 'сначала останови запуск — он работает по текущему набору' });
+        return json(res, 200, { ok: false, reason: 'сейчас идёт задача по текущему набору — дождись её' });
       }
       setBaseSet(set);
-      push(`\n⇄ рассылка переключена: ${baseSet === 'chats' ? 'по чатам' : 'по номерам'}`);
       return json(res, 200, { ok: true, set: baseSet });
     }
 
@@ -3014,8 +3196,15 @@ async function handler(req, res) {
       accounts.setField(id, { role: send ? 'send' : 'warm' });
       // прогон уже идёт — новичок в рассылке подхватывается сразу, без перезапуска
       if (send && auto.on && !auto.ids.includes(id) && accounts.hasSession(acc) && accounts.isAuthed(acc)) {
-        auto.ids.push(id);
-        auto.per.set(id, autoPer(auto.mode !== 'check' && inQuarantine(acc)));
+        // в какой режим его взять: в единственный работающий, а если работают
+        // оба — в тот, что сейчас открыт на экране
+        const set = SETS.filter((s) => auto.live[s]).length === 1
+          ? SETS.find((s) => auto.live[s]) : baseSet;
+        if (auto.live[set]) {
+          auto.ids.push(id);
+          auto.sets.set(id, set);
+          auto.per.set(id, autoPer((auto.opts[set]?.mode || 'full') !== 'check' && inQuarantine(acc)));
+        }
       }
       events.note(send ? '✉️' : '🌱', send ? 'переведён в рассылку' : 'только прогрев — в рассылке не участвует', acc.title);
       return json(res, 200, { ok: true });
@@ -3063,7 +3252,12 @@ async function handler(req, res) {
 
     if (u.pathname === '/api/auto' && req.method === 'POST') {
       const o = await body(req);
-      if (o.on === false) { autoStop('остановлено вручную'); return json(res, 200, { ok: true }); }
+      // «Остановить» с вкладки гасит ЕЁ режим, второй продолжает работать
+      if (o.on === false) {
+        if (SETS.includes(o.set) && auto.live[o.set]) stopSet(o.set, 'остановлено вручную');
+        else autoStop('остановлено вручную');
+        return json(res, 200, { ok: true });
+      }
       return json(res, 200, autoStart(o));
     }
     /* ───────── РУЧНОЙ ЗАПУСК И ОСТАНОВКА ЗАДАЧ ───────── */

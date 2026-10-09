@@ -717,13 +717,30 @@ def spam_verdict(text):
     return False, "не понял ответ бота: " + t[:160]
 
 
+SPAM_FRESH = 30 * 60          # столько держим прошлый ЧИСТЫЙ вердикт
+
+
 async def spam_check(client, acc):
     """
     Спросить бота и записать вердикт в реестр аккаунтов.
 
     Панель смотрит на эти поля: аккаунт с ограничением в рассылку не идёт,
     и в его строке видно, до какого числа он придержан.
+
+    Чистый вердикт получасовой свежести переспрашивать незачем. Раньше письма
+    уходили пачками и бота спрашивали раз на пачку; теперь аккаунт пишет по
+    одному письму за заход, и вопрос на каждое письмо — это лишний разговор
+    через прокси и пять секунд ожидания на ровном месте. Запрет не кешируем
+    никогда: ограничение надо увидеть сразу.
     """
+    if acc.get("spamOk") is True and acc.get("spamAt"):
+        try:
+            age = (datetime.now(timezone.utc) - datetime.fromisoformat(
+                str(acc["spamAt"]).replace("Z", "+00:00"))).total_seconds()
+            if 0 <= age < SPAM_FRESH:
+                return True, f"ограничений нет (спрашивали {int(age // 60)} мин назад)"
+        except Exception:
+            pass
     try:
         await client.send_message(SPAM_BOT, "/start")
         await asyncio.sleep(5)

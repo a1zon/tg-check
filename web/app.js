@@ -132,18 +132,20 @@ function paintAccounts() {
     return;
   }
   if (!accs.some(a => a.id === cur)) cur = accs[0].id;
-  if (work === null) work = new Set(accs.filter(accReady).map(a => a.id));
+  // кого пустить в работу, выбирают вкладки рассылки — здесь только показ
+  if (work === null) useWork(pickSet);
   // роль: прогрев идёт у всех, в рассылку попадают только отмеченные ✉️
   const rolePill = (a) => a.role === 'warm'
     ? `<span class="daypill rolepill warm" data-role="${a.id}" title="В рассылке не участвует, только греется. Нажми, чтобы перевести в рассылку">🌱 только прогрев</span>`
     : `<span class="daypill rolepill" data-role="${a.id}" title="Греется и участвует в рассылке. Нажми, чтобы оставить только прогрев">✉️ в рассылке</span>`;
+  // где аккаунт сейчас занят — чтобы не искать его по вкладкам
+  const where = (a) => a.run === 'chats' ? '<span class="tag">в рассылке по чатам</span>'
+    : a.run === 'phones' ? '<span class="tag">в рассылке по номерам</span>' : '';
   const html = accs.map(a => `
-    <label class="acc ${work.has(a.id) ? 'sel' : ''}">
-      <input type="checkbox" data-work="${a.id}" ${work.has(a.id) ? 'checked' : ''}
-             ${accReady(a) ? '' : 'disabled'}>
+    <label class="acc ${a.id === cur ? 'sel' : ''}">
       ${a.avatar ? `<img class="ava" src="/api/avatar?id=${a.id}&v=${a.avatar}" alt="">`
         : `<span class="ava ava-none">${esc((a.name || a.title || '?').trim().charAt(0).toUpperCase())}</span>`}
-      <span class="nm"><b class="acc-name">${esc(a.name || a.title)} ${accBadge(a)}</b>
+      <span class="nm"><b class="acc-name">${esc(a.name || a.title)} ${accBadge(a)} ${where(a)}</b>
         <span class="${accReady(a) ? 'on' : 'off'}">${accSub(a)}</span>
         <span>${esc(a.proxyLabel)}${a.device ? ' · ' + esc(a.device) : ''} · написано ${a.sent} · черновиков ${a.drafts}${
           a.held ? ` · держит ${a.held}` : ''}</span>
@@ -181,12 +183,6 @@ function paintAccounts() {
   accsHtml = html;
   $('#accs').innerHTML = html;
 
-  // галочки — единственный выбор на всю панель: по нему идут и запуск, и ручные заходы
-  document.querySelectorAll('#accs [data-work]').forEach(c => c.onchange = () => {
-    c.checked ? work.add(c.dataset.work) : work.delete(c.dataset.work);
-    accsRaw = ''; accsHtml = '';   // подсветка строки меняется — рисуем заново
-    paintAccounts();
-  });
   document.querySelectorAll('[data-ren]').forEach(b => b.onclick = async (e) => {
     e.preventDefault();
     const a = accs.find(x => x.id === b.dataset.ren);
@@ -360,15 +356,20 @@ function paintAccounts() {
     if (!r.ok) alert(r.reason || 'не удалось'); else loop();
   });
 
-  const chosen = accs.filter(x => work.has(x.id) && accReady(x));
-  $('#acct').innerHTML = chosen.length
-    ? `Работают: <b style="color:var(--ok)">${chosen.map(x => esc(x.title)).join(', ')}</b>`
-    : '<b style="color:var(--no)">не отмечен ни один вошедший аккаунт</b>';
-  $('#selcount').innerHTML = chosen.length
-    ? `Отмечено <b>${chosen.length}</b> из ${accs.length}. Базу они поделят между собой: ` +
-      `чем больше аккаунтов, тем больше можно за сутки.`
-    : 'Отметь хотя бы один вошедший аккаунт — иначе запускать нечем.';
-  $('#s1').classList.toggle('done', chosen.length > 0);
+  const ready = accs.filter(accReady);
+  const inP = accs.filter(x => x.run === 'phones'), inC = accs.filter(x => x.run === 'chats');
+  const free = ready.filter(x => !x.run && x.role !== 'warm');
+  $('#acct').innerHTML = ready.length
+    ? `Вошли: <b style="color:var(--ok)">${ready.map(x => esc(x.title)).join(', ')}</b>`
+    : '<b style="color:var(--no)">ни один аккаунт не вошёл</b>';
+  // где кто занят — состав набирают вкладки рассылки, здесь только итог
+  $('#selcount').innerHTML = !ready.length
+    ? 'Ни один аккаунт не вошёл — подключи хотя бы один.'
+    : [inP.length ? `<b>${inP.length}</b> в рассылке по номерам` : '',
+       inC.length ? `<b>${inC.length}</b> по чатам` : '',
+       `свободны <b>${free.length}</b>`].filter(Boolean).join(' · ')
+      + '. Состав набирают вкладки «Рассылка по номерам» и «Рассылка по чатам».';
+  $('#s1').classList.toggle('done', ready.length > 0);
 }
 
 /**
@@ -414,23 +415,31 @@ const accounts = async () => {
  * момент запуска: открыть вкладку безопасно, идущий прогон от этого не
  * переключится (сервер и не даст — он откажет, пока прогон жив).
  */
-async function useSet(want) {
+/**
+ * Какой набор показывают экраны «база», «результаты», «что напишем».
+ * На прогон это больше не влияет: набор у каждого аккаунта свой, он
+ * задаётся при запуске режима. Поэтому отказ (мешает ручная задача) —
+ * не повод не запускать рассылку: quiet значит «молча, не беда».
+ */
+async function useSet(want, quiet) {
   if (lastState && lastState.baseSet === want) return true;
   const r = await post('/api/base-set', {set: want});
-  if (!r.ok) { alert(r.reason || 'не удалось переключить список получателей'); return false; }
+  if (!r.ok) { if (!quiet) alert(r.reason || 'не удалось переключить список получателей'); return false; }
   base(); state();
   return true;
 }
 
 function paintSetNow(s) {
-  const chats = s.baseSet === 'chats';
+  const runs = (s.auto || {}).runs || {};
   const p = $('#setnow-p'), c = $('#setnow-c');
-  if (p) p.innerHTML = chats
-    ? 'Панель сейчас работает <b>по чатам</b>. Нажмёшь «Запустить» здесь — переключится на номера.'
-    : 'Панель сейчас работает <b>по номерам</b> — всё на этой вкладке про них.';
-  if (c) c.innerHTML = chats
-    ? 'Панель сейчас работает <b>по чатам</b> — всё на этой вкладке про них.'
-    : 'Панель сейчас работает <b>по номерам</b>. Нажмёшь «Запустить по чатам» — переключится на чаты.';
+  // Режимы независимы: отметь аккаунты здесь и запускай, даже если второй
+  // режим уже работает. Один аккаунт — один режим.
+  const line = (mine, other, word) => mine
+    ? 'Эта рассылка идёт. Чтобы сменить состав — останови её.'
+    : other ? `Сейчас работает рассылка ${word} — здесь можно запустить свою, на свободных аккаунтах.`
+    : 'Отметь аккаунты в списке выше и запускай.';
+  if (p) p.innerHTML = line(!!(runs.phones || {}).on, !!(runs.chats || {}).on, 'по чатам');
+  if (c) c.innerHTML = line(!!(runs.chats || {}).on, !!(runs.phones || {}).on, 'по номерам');
 }
 
 // В каком профиле сидим. Рисуем один раз: имя профиля за жизнь вкладки
@@ -469,29 +478,63 @@ function runbar(id, on, title, why) {
 }
 
 /** Чем заняты аккаунты прямо сейчас — без ухода на вкладку «Аккаунты». */
+/**
+ * Аккаунты этой вкладки: галочками выбираем, кого пустить в работу, и тут же
+ * видно, чем каждый занят. Занятый другим режимом не выбирается — аккаунт
+ * работает в одном наборе за раз, иначе он делил бы дневной предел надвое
+ * и путал бы свои очереди.
+ */
 function paintAccRun(id, set) {
   const el = $(id);
   if (!el) return;
   const list = accs.filter(accReady);
   if (!list.length) { el.innerHTML = ''; return; }
-  el.innerHTML = list.map((a) => {
+  const other = set === 'chats' ? 'phones' : 'chats';
+  const run = (lastState && lastState.auto && lastState.auto.runs || {})[set] || {};
+  const sel = crewOf(set);
+  if (set === pickSet) work = sel;     // состав открытой вкладки — он же work
+  // аккаунт забрали в другой режим — из нашего состава он выбывает сам,
+  // а кто работает в нашем — тот в составе и остаётся, в том числе после
+  // остановки: иначе пришлось бы отмечать их заново перед каждым запуском
+  for (const a of list) {
+    if (a.run && a.run !== set) sel.delete(a.id);
+    else if (a.run === set) sel.add(a.id);
+  }
+  const html = list.map((a) => {
     const w = a.warm || {};
     const onlyWarm = a.role === 'warm';
     const busy = !!a.busy;
+    const elsewhere = a.run === other;
+    const here = a.run === set;
     // «сейчас» панель считает на сервере: отдыхает до…, на сегодня всё,
     // ночь, ограничен, квота. Пусто — значит прогон не идёт
-    const st = busy ? esc(a.busy)
+    const st = elsewhere ? `работает ${other === 'chats' ? 'по чатам' : 'по номерам'}`
+      : busy ? esc(a.busy)
       : a.quarantine ? 'ограничен Telegram'
       : onlyWarm ? 'только прогрев'
-      : esc(a.now || '') || (lastState && lastState.auto && lastState.auto.on ? 'ждёт очереди' : 'прогон не запущен');
+      : here ? (esc(a.now || '') || 'ждёт очереди')
+      : sel.has(a.id) ? 'выбран — ждёт запуска' : 'не выбран';
     const cnt = onlyWarm ? '—'
       : `сегодня ${a.sentToday || 0} из ${w.cap ?? '?'}`;
-    return `<div class="r ${busy ? 'work' : ''} ${onlyWarm ? 'off' : ''}">
+    // пока режим работает, состав не меняем: аккаунт посреди пачки не вынешь
+    const lock = onlyWarm || elsewhere || run.on;
+    return `<label class="r ${busy ? 'work' : ''} ${onlyWarm || elsewhere ? 'off' : ''}">
+      <input type="checkbox" data-pick="${a.id}" data-set="${set}"
+             ${sel.has(a.id) || here ? 'checked' : ''} ${lock ? 'disabled' : ''}>
       <span class="nm">${esc(a.name || a.title)}</span>
       <span class="cnt">${cnt}</span>
       ${onlyWarm ? '<span class="tag">не в рассылке</span>' : ''}
-      <span class="st">${st}</span></div>`;
+      <span class="st">${st}</span></label>`;
   }).join('');
+  if (el.dataset.html === html) return;     // не перерисовываем на каждый опрос
+  el.dataset.html = html;
+  el.innerHTML = html;
+  el.querySelectorAll('[data-pick]').forEach((c) => { c.onchange = () => {
+    const s = crew[c.dataset.set];
+    c.checked ? s.add(c.dataset.pick) : s.delete(c.dataset.pick);
+    el.dataset.html = '';
+    paintAccRun(id, set);
+  }; });
 }
 
 /** Точка у вкладки в боковом меню, пока её функция работает. */
@@ -505,33 +548,28 @@ function navLamp(view, on) {
 
 function paintRunState(s) {
   const auto = s.auto || {};
-  const chats = s.baseSet === 'chats';
-  // список аккаунтов прогона панель в состоянии не отдаёт — считаем по ролям:
-  // в рассылке участвуют все вошедшие, кроме тех, кто на «только прогреве»
-  const inRun = accs.filter((a) => accReady(a) && a.role !== 'warm').length;
-  const why = auto.on
-    ? `${inRun} аккаунт(ов) в прогоне · режим: ${
-        auto.mode === 'check' ? 'только проверка' : auto.mode === 'write' ? 'только письма' : 'проверка и письма'}`
-    : 'нажми «Запустить» на нужной вкладке';
-
-  // полосы в обеих вкладках рассылки: каждая говорит про СВОЙ набор
-  runbar('#runbar-p', auto.on && !chats,
-    auto.on && !chats ? '<b>Рассылка по номерам идёт</b>'
-      : auto.on ? '<b>Рассылка идёт, но по чатам</b> — эта вкладка сейчас не работает'
-      : '<b>Рассылка выключена</b>', why);
-  runbar('#runbar-c', auto.on && chats,
-    auto.on && chats ? '<b>Рассылка по чатам идёт</b>'
-      : auto.on ? '<b>Рассылка идёт, но по номерам</b> — эта вкладка сейчас не работает'
-      : '<b>Рассылка выключена</b>', why);
+  const runs = auto.runs || {};
+  // Каждая вкладка говорит только про СВОЙ режим: по номерам и по чатам
+  // работают разные аккаунты и останавливаются они независимо.
+  const bar = (el, set, word) => {
+    const r = runs[set] || {};
+    const n = (r.ids || []).length;
+    runbar(el, !!r.on,
+      r.on ? `<b>Рассылка ${word} идёт</b>` : `<b>Рассылка ${word} выключена</b>`,
+      r.on ? `${n} аккаунт(ов) · режим: ${
+        r.mode === 'check' ? 'только проверка' : r.mode === 'write' ? 'только письма' : 'проверка и письма'}`
+        : 'отметь аккаунты ниже и нажми «Запустить»');
+    navLamp(set === 'chats' ? 'chatsend' : 'send', !!r.on);
+  };
+  bar('#runbar-p', 'phones', 'по номерам');
+  bar('#runbar-c', 'chats', 'по чатам');
   runbar('#runbar-w', !!s.warmup,
     s.warmup ? '<b>Прогрев работает</b>' : '<b>Прогрев выключен</b>',
     s.warmup ? 'ведёт все вошедшие аккаунты' : 'новые аккаунты не греются');
 
-  paintAccRun('#accrun-p');
-  paintAccRun('#accrun-c');
+  paintAccRun('#accrun-p', 'phones');
+  paintAccRun('#accrun-c', 'chats');
   navLamp('warmup', !!s.warmup);
-  navLamp('send', auto.on && !chats);
-  navLamp('chatsend', auto.on && chats);
 }
 
 const state = async () => {
@@ -975,6 +1013,28 @@ function paintTotal(t) {
  */
 let lastState = null, baseLoading = false;
 let work = null, autoOn = false, autoLast = {on: false, accounts: []}, autoRaw = '';
+/**
+ * Кого запускаем — отдельно по номерам и отдельно по чатам. Выбор живёт на
+ * самих вкладках рассылки: там же видно, кто свободен, а кто уже работает в
+ * другом режиме. Экран «Аккаунты» теперь только показывает, ничего не выбирает.
+ */
+const crew = {phones: null, chats: null};
+let pickSet = 'phones';
+/** Можно ли вообще брать этот аккаунт в рассылку. */
+const canPick = (a) => accReady(a) && a.role !== 'warm';
+/**
+ * Состав вкладки. По умолчанию — все, кто может писать и ничем не занят, но
+ * придумать его можно только когда аккаунты уже загрузились: на пустом списке
+ * получился бы пустой состав, и вкладка навсегда осталась бы без галочек.
+ */
+function crewOf(set) {
+  if (!crew[set] && accs.length) {
+    crew[set] = new Set(accs.filter(a => canPick(a) && !a.run).map(a => a.id));
+  }
+  return crew[set] || new Set();
+}
+/** Выбор текущей вкладки: он же work — по нему идут и запуск, и ручные заходы. */
+function useWork(set) { pickSet = set; work = crewOf(set); }
 const fmtWait = (s) => s >= 3600 ? `${Math.floor(s / 3600)} ч ${Math.round(s % 3600 / 60)} мин`
   : `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 
@@ -1005,7 +1065,11 @@ function paintAuto(a) {
   autoLast = a = a || autoLast;
   restoreForm(a.form);
   const on = autoOn = !!a.on;
-  const chosen = accs.filter(x => work && work.has(x.id) && accReady(x));
+  const runs = a.runs || {};
+  const onP = !!(runs.phones || {}).on, onC = !!(runs.chats || {}).on;
+  // кнопка каждой вкладки живёт своей жизнью: выбор — её галочки, а блокировка
+  // — её собственный режим
+  const ready = (set) => accs.filter(x => crew[set] && crew[set].has(x.id) && canPick(x) && !x.run);
 
   // строки «кто чем занят» — только пока прогон идёт
   // строка аккаунта: имя · что делает (решает сервер) · сегодня проверено и написано.
@@ -1017,19 +1081,23 @@ function paintAuto(a) {
         `написано сегодня ${x.today ?? 0} из ${x.cap ?? '—'}`}</span>
     </div>`).join('');
 
-  $('#b-auto').textContent = on ? 'Остановить' : 'Запустить';
-  $('#b-auto').className = on ? 'danger big' : 'primary big';
-  $('#b-auto').disabled = !chosen.length && !on;
-  const cs = $('#cs-auto');
-  if (cs) {
-    cs.textContent = on ? 'Остановить' : 'Запустить по чатам';
-    cs.className = on ? 'danger big' : 'primary big';
-    cs.disabled = !chosen.length && !on;
-    const note = $('#cs-note');
-    if (note) note.textContent = chosen.length
-      ? `работают: ${chosen.map(a => a.name || a.title).join(', ')}`
-      : 'отметь аккаунты на вкладке «Аккаунты»';
-  }
+  const btn = (el, set, run, word) => {
+    if (!el) return;
+    const chosen = ready(set);
+    el.textContent = run ? 'Остановить' : word;
+    el.className = run ? 'danger big' : 'primary big';
+    el.disabled = !chosen.length && !run;
+    return chosen;
+  };
+  btn($('#b-auto'), 'phones', onP, 'Запустить');
+  const csChosen = btn($('#cs-auto'), 'chats', onC, 'Запустить по чатам') || [];
+  const note = $('#cs-note');
+  if (note) note.textContent = onC
+    ? `работают: ${(runs.chats.ids || []).map(id => {
+        const x = accs.find(y => y.id === id); return x ? (x.name || x.title) : id; }).join(', ')}`
+    : csChosen.length ? `запустим: ${csChosen.map(x => x.name || x.title).join(', ')}`
+    : 'отметь аккаунты в списке выше';
+  // настройки запуска общие на оба режима — запираем их, пока работает любой
   for (const id of ['#amode','#apause','#delay','#ddelay','#ddelaymax','#dhold',
                     '#dholdmax','#limit','#dlimit',
                     '#sm-draft','#sm-send','#serial','#rotate','#rotwait'])
@@ -1096,8 +1164,11 @@ function paintStage(a) {
 }
 
 async function startAuto(set) {
-  if (autoOn) { await post('/api/auto', {on: false}); state(); return; }
-  if (!await useSet(set)) return;
+  const run = ((lastState && lastState.auto && lastState.auto.runs) || {})[set] || {};
+  // «Остановить» гасит только свой режим — второй работает дальше
+  if (run.on) { await post('/api/auto', {on: false, set}); state(); return; }
+  useWork(set);
+  await useSet(set, true);          // экраны переводим на этот набор, если можно
   const mode = $('#amode').value;
   const voice = mode !== 'check' && $('#voicemode').checked;
   const send = mode !== 'check' && !voice && $('#send').checked;
@@ -1115,7 +1186,7 @@ async function startAuto(set) {
       `Не больше ${cap} в сутки на аккаунт (новые — меньше, по графику разгона).\n` +
       `\nОтозвать отправленное нельзя. Продолжить?`)) return;
   const r = await post('/api/auto', {
-    on: true, mode, send, voice, warm: $('#warmon').checked,
+    on: true, set, mode, send, voice, warm: $('#warmon').checked,
     funnel: $('#funnel').checked,
     serial: $('#serial').checked, rotate: $('#rotate').value.trim(),
     rotateWait: +$('#rotwait').value || 10,
@@ -2094,6 +2165,13 @@ function showView(name) {
   document.querySelectorAll('.nav-i').forEach((a) => a.classList.toggle('active', a.dataset.view === name));
   const t = $('#view-title'); if (t) t.textContent = VIEW_TITLE[name];
   try { localStorage.setItem('tg-view', name); } catch {}
+  // какая вкладка рассылки открыта — тот состав и считается выбранным:
+  // по нему идут и запуск, и ручные заходы
+  if (name === 'send' || name === 'chatsend') {
+    const set = name === 'chatsend' ? 'chats' : 'phones';
+    useWork(set);
+    useSet(set, true);              // и база с результатами — про эту же вкладку
+  }
   if (location.hash !== '#' + name) history.replaceState(null, '', '#' + name);
   window.scrollTo(0, 0);
   if (name === 'results') resultsView(true);

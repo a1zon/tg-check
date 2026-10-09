@@ -240,7 +240,7 @@ async def main():
                     cooldown=tglib.until_tomorrow(), note="карантин")
         return
     else:
-        say(f"@SpamBot: ограничений нет")
+        say(f"@SpamBot: {note}")
 
     # кого проверка оставила в контактах этого аккаунта и кому ещё не писали
     keep = tglib.kept_waiting(acc["id"])

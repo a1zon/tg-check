@@ -446,7 +446,7 @@ textarea{font-family:-apple-system,system-ui,"Segoe UI",Roboto,Arial,sans-serif;
 
 /* ——— кто чем занят прямо сейчас ——— */
 .accrun{display:flex;flex-direction:column;gap:1px;margin:0 0 14px}
-.accrun .r{display:flex;align-items:center;gap:10px;padding:7px 12px;font-size:13px;
+.accrun .r{display:flex;align-items:center;gap:10px;padding:7px 12px;font-size:13px;cursor:pointer;
   border-bottom:1px solid var(--line)}
 .accrun .r:last-child{border-bottom:0}
 .accrun .nm{min-width:170px;color:var(--ink)}
@@ -454,6 +454,9 @@ textarea{font-family:-apple-system,system-ui,"Segoe UI",Roboto,Arial,sans-serif;
 .accrun .st{color:var(--mut);margin-left:auto;text-align:right}
 .accrun .r.work .st{color:var(--ok)}
 .accrun .r.off .nm{color:var(--mut)}
+.accrun .r input[type=checkbox]{width:15px;height:15px;accent-color:var(--acc);flex:none}
+.accrun .r input:disabled{opacity:.35}
+.accrun .r:has(input:disabled){cursor:default}
 .accrun .tag{font-size:11px;color:var(--mut);border:1px solid var(--line);border-radius:999px;padding:1px 8px}
 
 /* ——— точка у вкладки, когда её функция работает ——— */

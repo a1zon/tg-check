@@ -2,7 +2,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Telegram — панель</title>
-<link rel="stylesheet" href="/app.css?v=r53">
+<link rel="stylesheet" href="/app.css?v=r54">
 <div class="app">
 
   <!-- ЛЕВАЯ ПАНЕЛЬ РЕЖИМОВ -->
@@ -279,10 +279,11 @@
                   Набрал на сегодня — отдыхает до завтра, остальные продолжают.
                   Меняется сразу, даже на ходу. <span id="daycap-note" class="hint"></span></span></div>
               <div class="frow"><input id="checkcap" type="number" value="50" min="1">
-                <span><b>максимум проверок номеров в день с одного аккаунта.</b> Проверка —
-                  это «добавить номер в контакты», у Telegram на это свой лимит. Новый
-                  аккаунт наращивает сам: 10 → 25 → до этого числа. Набрал — проверяет
-                  завтра. Меняется сразу. <span id="checkcap-note" class="hint"></span></span></div>
+                <span><b>потолок проверок номеров в день с одного аккаунта.</b> Обычно
+                  проверок столько же, сколько писем: проверка — это «добавить номер
+                  в контакты», с этого же начинается и письмо, и лимит у Telegram на них
+                  общий. Это поле только опускает планку ниже дневного предела писем;
+                  поднять выше него оно не может. <span id="checkcap-note" class="hint"></span></span></div>
               <div class="frow"><input id="delay" type="number" value="15" min="5">
                 <span><b>секунд между номерами при проверке базы.</b>
                   Проверка тоже тратит лимит Telegram, спешить нельзя.</span></div>
@@ -809,4 +810,4 @@
 
   </main>
 </div>
-<script src="/app.js?v=r53"></script>
+<script src="/app.js?v=r54"></script>

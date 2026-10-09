@@ -2124,7 +2124,7 @@ async function handler(req, res) {
      * MTProto не перенести, там пришлось бы входить заново по QR.
      */
     if (u.pathname === '/api/accounts/profile' && req.method === 'POST') {
-      const { id, name, last, about, username } = await body(req);
+      const { id, name, last, about, username, dropPhotos } = await body(req);
       const acc = accounts.list().find((a) => a.id === id);
       if (!acc) return json(res, 200, { ok: false, reason: 'аккаунт не найден' });
       if (running.has(id)) return json(res, 200, { ok: false, reason: 'аккаунт сейчас занят' });
@@ -2133,6 +2133,8 @@ async function handler(req, res) {
       for (const [k, v] of [['name', name], ['last', last], ['about', about], ['username', username]]) {
         if (v !== undefined && v !== null) args.push(`--${k}`, String(v));
       }
+      // чужие фотографии прежнего хозяина: новая аватарка их не отменяет
+      if (dropPhotos) args.push('--drop-photos');
       run(id, acc.title, `Профиль — ${acc.title}`, pythonCmd(), args);
       return json(res, 200, { ok: true });
     }

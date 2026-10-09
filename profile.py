@@ -12,6 +12,7 @@
     python profile.py --account a1 --about "Подбор техники"
     python profile.py --account a1 --username andrey_boldo
     python profile.py --account a1 --photo /путь/avatar.jpg
+    python profile.py --account a1 --drop-photos        # убрать все старые фото
     python profile.py --account a1                       # просто показать, что сейчас
 """
 import asyncio
@@ -28,8 +29,9 @@ async def main():
     about = tglib.arg("about")
     username = tglib.arg("username")
     photo = tglib.arg("photo")
+    drop_photos = tglib.flag("drop-photos")
 
-    from telethon import functions
+    from telethon import functions, types
     from telethon.errors import (UsernameOccupiedError, UsernameInvalidError,
                                  FloodWaitError)
 
@@ -63,6 +65,22 @@ async def main():
                 say(f"✗ @{username} уже кем-то занят — придумай другой")
             except UsernameInvalidError:
                 say(f"✗ @{username} не подходит: 5–32 знака, латиница, цифры и _")
+
+        # Купленные аккаунты приезжают с чужими фотографиями прежнего хозяина.
+        # Новая аватарка их не отменяет: она просто встаёт первой, а старые
+        # остаются в профиле — их видно, если нажать на аватар. Люди это
+        # замечают и спрашивают, почему у «Егора» две фотографии девушки.
+        if drop_photos:
+            got = await client(functions.photos.GetUserPhotosRequest(
+                user_id="me", offset=0, max_id=0, limit=100))
+            if got.photos:
+                await client(functions.photos.DeletePhotosRequest(
+                    id=[types.InputPhoto(id=ph.id, access_hash=ph.access_hash,
+                                         file_reference=ph.file_reference) for ph in got.photos]))
+                say(f"✓ убрал старые фотографии: {len(got.photos)}")
+                changed = True
+            else:
+                say("старых фотографий нет")
 
         if photo:
             p = Path(photo)

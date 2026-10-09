@@ -15,16 +15,44 @@ function Die($msg) {
   exit 1
 }
 
-$tg = @(
+# Telegram Desktop ставится в разные места: у одних в профиль пользователя,
+# у других в Program Files, у третьих вообще портативно. Поэтому смотрим все
+# обычные места, спрашиваем реестр и PATH — и, если не нашли, честно
+# показываем, где искали: так понятно, что делать дальше.
+$looked = @(
   "$env:APPDATA\Telegram Desktop\Telegram.exe",
   "$env:LOCALAPPDATA\Programs\Telegram Desktop\Telegram.exe",
+  "$env:LOCALAPPDATA\Telegram Desktop\Telegram.exe",
   "$env:ProgramFiles\Telegram Desktop\Telegram.exe",
-  "${env:ProgramFiles(x86)}\Telegram Desktop\Telegram.exe"
-) | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1
+  "${env:ProgramFiles(x86)}\Telegram Desktop\Telegram.exe",
+  "$env:ProgramW6432\Telegram Desktop\Telegram.exe",
+  (Join-Path $PSScriptRoot 'Telegram.exe')
+) | Where-Object { $_ }
+
+$tg = $looked | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
 
 if (-not $tg) {
-  Die "Не найден Telegram Desktop. Скачай с desktop.telegram.org и поставь,`nпотом запусти этот файл снова."
+  # реестр: туда установщик Telegram пишет путь к себе
+  foreach ($key in @('HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\Telegram.exe',
+                     'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\Telegram.exe')) {
+    try {
+      $v = (Get-ItemProperty -Path $key -ErrorAction Stop).'(default)'
+      if ($v -and (Test-Path -LiteralPath $v)) { $tg = $v; break }
+    } catch {}
+  }
 }
+if (-not $tg) {
+  $w = (& where.exe Telegram.exe 2>$null | Select-Object -First 1)
+  if ($w -and (Test-Path -LiteralPath $w)) { $tg = $w }
+}
+
+if (-not $tg) {
+  Die ("Не найден Telegram Desktop. Искал здесь:`n  " + ($looked -join "`n  ") +
+       "`n`nЧто делать:`n" +
+       "  1. Поставь Telegram Desktop с desktop.telegram.org (версия из Microsoft Store не подходит: она не умеет открывать чужую папку с аккаунтом).`n" +
+       "  2. Если он уже стоит — положи этот комплект рядом с Telegram.exe и запусти снова.")
+}
+Write-Host "Telegram Desktop: $tg"
 
 Write-Host ''
 Write-Host "Аккаунт: $($cfg.title)"

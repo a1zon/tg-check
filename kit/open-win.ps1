@@ -66,8 +66,17 @@ Write-Host 'Проверяю прокси…'
 # кода ошибку, как бы ни был настроен ErrorActionPreference. Поэтому смотрим
 # код возврата сами — иначе мёртвый прокси проскакивал бы молча, а человек
 # видел бы потом невнятное «мост не поднялся».
+#
+# А вот слить его ругань к себе (2>&1) при ErrorActionPreference = Stop нельзя
+# в лоб: каждая строка чужого stderr превращается в ошибку, которая обрывает
+# скрипт прямо здесь. Человек вместо понятного «прокси не отвечает» получал
+# простыню из .NET. Поэтому на время вызова поблажка.
+$prev = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
 $out = & $self -NoProfile -ExecutionPolicy Bypass -File $bridgePs -Check 2>&1
-if ($LASTEXITCODE -ne 0) {
+$code = $LASTEXITCODE
+$ErrorActionPreference = $prev
+if ($code -ne 0) {
   Die ("Прокси не отвечает: " + (($out | Out-String).Trim()) +
        "`n`nTelegram без прокси не запускаю — иначе аккаунт выйдет с твоего IP." +
        "`nПодожди пару минут и запусти снова: мобильные прокси иногда переподключаются.")
@@ -104,8 +113,16 @@ try {
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue (Join-Path $work 'tdata')
     Write-Host ''
     Write-Host 'ПЕРВЫЙ ЗАПУСК. Сейчас откроется ПУСТОЙ Telegram — без аккаунта.'
-    Write-Host 'В окне подтверди «Включить прокси» (Enable proxy) и закрой окно.'
-    Write-Host 'Аккаунт добавится следующим шагом, уже через прокси.'
+    Write-Host 'Так задумано: прокси надо включить ДО того, как в него попадёт аккаунт.'
+    Write-Host ''
+    Write-Host 'В окне Telegram сделай это один раз:' -ForegroundColor Yellow
+    Write-Host '  Settings (шестерёнка) → Advanced → Connection type →'
+    Write-Host '  Use custom proxy → Add proxy → SOCKS5'
+    Write-Host "     Hostname: 127.0.0.1"
+    Write-Host "     Port:     $port"
+    Write-Host '  Save. Логин и пароль не нужны.'
+    Write-Host ''
+    Write-Host 'Потом закрой окно Telegram — аккаунт добавится следующим шагом.'
     Write-Host ''
     Start-Process -FilePath $tg -ArgumentList $tgArgs -Wait
     if (-not (Test-Path -LiteralPath (Join-Path $work 'tdata\settingss'))) {

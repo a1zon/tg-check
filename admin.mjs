@@ -1085,10 +1085,17 @@ function pickJob(left, id) {
   // Проверка номеров — только когда работаем ПО НОМЕРАМ. По чатам людям пишут
   // по @нику, проверять там нечего, а каждая проверка — это добавление
   // контакта, то самое действие, за которое Telegram ограничивает аккаунты.
-  const canCheck = o.mode !== 'write' && !quotaOut && set === 'phones';
+  //
+  // И только пока на сегодня есть что написать. Выбрал дневной предел — день
+  // для аккаунта кончился целиком: проверять «про запас» он не идёт. Проверка
+  // стоит ровно того же, что письмо (добавление контакта), а лежать в адресной
+  // книге до завтра найденному незачем.
   // дневной потолок считаем ВСЕГДА (даже если «беречь аккаунты» выключено) —
   // иначе один тумблер снимает всю защиту от бана. Галка лишь отключает отлёжку.
   const w = acc ? warm(acc) : null;
+  const capLeftNow = w ? w.left : Infinity;      // сколько писем осталось сегодня
+  const canCheck = o.mode !== 'write' && !quotaOut && set === 'phones'
+    && (o.mode === 'check' || capLeftNow > 0);
 
   // отлёжка: свежий аккаунт сутки не делает вообще ничего — ни проверок,
   // ни сообщений. Это единственный способ не потерять его в первый же день.
@@ -1119,7 +1126,7 @@ function pickJob(left, id) {
   const canDo = left.shared + (left.own[id] || 0);
   if (canWrite && canDo > 0) {
     // дневной предел один — из графика разгона с общим «максимумом в день»
-    const capLeft = w ? w.left : Infinity;
+    const capLeft = capLeftNow;
     if (capLeft > 0) {
       return { name: 'drafts',
                limit: Math.max(1, Math.min(o.write.limit, canDo, capLeft)),
@@ -1158,7 +1165,7 @@ function pickJob(left, id) {
       // Так найденный не лежит в адресной книге и не ждёт своей пачки.
       // Пачкой проверяем лишь когда писать нельзя (режим «только проверять»,
       // ночь, выбран дневной предел) — тогда очередь готовится заранее.
-      if (canWrite && (!w || w.left > 0)) {
+      if (canWrite && capLeftNow > 0) {
         return { name: 'check', limit: 1, delay: o.check.delay, step: true };
       }
       // в Telegram находится ~70% номеров — пачку берём по свободному месту в очереди
@@ -1174,6 +1181,18 @@ function pickJob(left, id) {
       if (notedOnce(s, 'checks')) push(`⏸ «${title(id)}» проверил на сегодня ${c.today} из ${c.cap} номеров — продолжит завтра`);
     }
   }
+  // Дневной предел выбран, а работы для него сегодня и не было (очередь писем
+  // пуста): без этого аккаунт висел бы с пустой пометкой и «ждёт своей
+  // очереди», хотя на сегодня он уже всё.
+  if (canWrite && capLeftNow <= 0) {
+    const s = auto.per.get(id);
+    if (s && s.note !== 'дневной предел') {
+      s.note = 'дневной предел';
+      s.nextAt = o.funnel ? Math.max(Date.now() + 60_000, s.funnelAt || 0) : untilTomorrow();
+    }
+    return null;
+  }
+
   if (o.mode !== 'check' && !isWorkTime()) {
     const s = auto.per.get(id);
     if (s) s.note = `ночь — пишем с ${WORK_FROM}:00 по Екатеринбургу`;
@@ -1887,10 +1906,14 @@ function autoStatus(s, busy, { today, cap, checks, wait }, acc) {
   }
   const o = acc ? optOf(acc.id) : auto;
   const writeDone = cap > 0 && today >= cap;
-  // по чатам номера не проверяются — «проверки на сегодня» тут ни при чём
-  const checkDone = (acc && setOf(acc.id) === 'chats') || checks.left <= 0;
+  // Выбрал дневной предел писем — день кончился целиком: проверять номера
+  // про запас аккаунт не идёт, проверка стоит того же, что письмо.
+  // «Только проверять» — особый случай: там предел считается по проверкам.
+  const checkDone = (acc && setOf(acc.id) === 'chats') || checks.left <= 0
+    || (writeDone && o.mode !== 'check');
   if (writeDone && (checkDone || o.mode === 'write')) {
-    return (warmup.on ? 'рассылка на сегодня всё — пока догревается' : 'на сегодня всё — продолжит завтра')
+    return 'на сегодня всё — продолжит завтра'
+      + (warmup.on ? ' (в перерыве догревается)' : '')
       + (o.funnel ? ', ответы смотрит раз в час' : '');
   }
   if (manualBusy()) return 'пауза — ты работаешь с аккаунтами';

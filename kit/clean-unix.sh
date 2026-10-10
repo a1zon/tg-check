@@ -10,8 +10,10 @@ cd "$(dirname "$0")"
 HERE="$PWD"
 
 TITLE="этот аккаунт"
+KID=""
 if command -v python3 >/dev/null 2>&1 && [ -f kit.json ]; then
   TITLE="$(python3 -c "import json;print(json.load(open('kit.json')).get('title') or 'этот аккаунт')" 2>/dev/null || echo "этот аккаунт")"
+  KID="$(python3 -c "import json;print(json.load(open('kit.json')).get('id') or '')" 2>/dev/null || echo "")"
 fi
 
 printf '\nУберу «%s» с этого компьютера.\n\n' "$TITLE"
@@ -39,6 +41,18 @@ for p in workdir tdata kit.json; do
   if [ -e "$HERE/$p" ]; then printf '  %s: НЕ УДАЛИЛОСЬ\n' "$p"; else printf '  %s: удалено\n' "$p"; fi
 done
 
+# В архиве лежит ТА ЖЕ копия аккаунта: почистили папку, распаковали архив
+# заново — и аккаунт снова здесь. Поэтому ищем и его.
+if [ -n "$KID" ]; then
+  found=0
+  for z in "$(dirname "$HERE")"/tg-"$KID"-*.zip "$HOME/Downloads"/tg-"$KID"-*.zip \
+           "$HOME/Desktop"/tg-"$KID"-*.zip "$HOME/Загрузки"/tg-"$KID"-*.zip; do
+    [ -f "$z" ] || continue
+    rm -f "$z" && printf '  архив %s: удалён\n' "$z" && found=1
+  done
+  [ "$found" = 1 ] || printf '  скачанного архива рядом не нашёл\n'
+fi
+
 printf '\n'
 if [ -e "$HERE/tdata" ]; then
   printf 'Что-то осталось — похоже, Telegram ещё держит файлы.\n'
@@ -47,4 +61,6 @@ else
   printf 'Готово: аккаунта на этом компьютере больше нет.\n'
   printf 'Осталось удалить саму папку — перетащи её в корзину.\n'
 fi
+printf '\nЕсли архив с комплектом лежит ещё где-то — удали и его: распакуешь\n'
+printf 'заново, и аккаунт снова окажется на компьютере.\n'
 printf '\nОкно можно закрыть.\n'

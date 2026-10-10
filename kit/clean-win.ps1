@@ -8,9 +8,11 @@ $ErrorActionPreference = 'Continue'
 Set-Location -LiteralPath $PSScriptRoot
 
 $title = 'этот аккаунт'
+$kitId = ''
 try {
   $cfg = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'kit.json') -Encoding UTF8 | ConvertFrom-Json
   if ($cfg.title) { $title = $cfg.title }
+  if ($cfg.id) { $kitId = $cfg.id }
 } catch {}
 
 Write-Host ''
@@ -18,7 +20,8 @@ Write-Host "Уберу «$title» с этого компьютера." -Foregrou
 Write-Host ''
 Write-Host 'Что будет сделано:'
 Write-Host '  • закроется Telegram, запущенный из этой папки;'
-Write-Host '  • удалятся файлы аккаунта и настройки — папки tdata и workdir.'
+Write-Host '  • удалятся файлы аккаунта и настройки — папки tdata и workdir;'
+Write-Host '  • найдётся и удалится скачанный архив комплекта, если он ещё лежит.'
 Write-Host ''
 Write-Host 'Из аккаунта НЕ выходим: в панели он продолжит работать как ни в чём'
 Write-Host 'не бывало. Пропадёт только копия на этом компьютере.'
@@ -89,6 +92,25 @@ public static extern bool MoveFileEx(string a, string b, int f);
   }
 }
 
+# В архиве лежит ТА ЖЕ копия аккаунта. Папку почистили, а распакуют архив
+# заново — и аккаунт снова на компьютере. Поэтому ищем и его.
+if ($kitId) {
+  $where = @((Split-Path -Parent $PSScriptRoot), "$env:USERPROFILE\Downloads",
+             "$env:USERPROFILE\Desktop", "$env:USERPROFILE\OneDrive\Desktop",
+             "$env:USERPROFILE\OneDrive\Рабочий стол") | Select-Object -Unique
+  $zips = @()
+  foreach ($dir in $where) {
+    if (-not $dir -or -not (Test-Path -LiteralPath $dir)) { continue }
+    $zips += Get-ChildItem -LiteralPath $dir -Filter "tg-$kitId-*.zip" -File -ErrorAction SilentlyContinue
+  }
+  foreach ($z in $zips) {
+    Remove-Item -LiteralPath $z.FullName -Force -ErrorAction SilentlyContinue
+    Write-Host ("  архив " + $z.FullName + ": " +
+                $(if (Test-Path -LiteralPath $z.FullName) { 'НЕ УДАЛИЛСЯ' } else { 'удалён' }))
+  }
+  if (-not $zips.Count) { Write-Host '  скачанного архива рядом не нашёл' }
+}
+
 Write-Host ''
 if ($left.Count) {
   Write-Host 'Аккаунт работать уже не будет, но для чистоты перезагрузи компьютер' -ForegroundColor Yellow
@@ -98,6 +120,9 @@ if ($left.Count) {
   Write-Host 'Готово: аккаунта на этом компьютере больше нет.' -ForegroundColor Green
   Write-Host 'Осталось удалить саму папку — перетащи её в корзину.'
 }
+Write-Host ''
+Write-Host 'Если архив с комплектом лежит ещё где-то (почта, флешка, другая папка) —'
+Write-Host 'удали и его: распакуешь заново, и аккаунт снова окажется на компьютере.'
 Write-Host ''
 Write-Host 'Из аккаунта мы НЕ выходили: в панели он работает как работал.'
 Write-Host ''

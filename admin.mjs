@@ -2611,6 +2611,32 @@ async function handler(req, res) {
      * запускаемый файл под нужную систему. Прокси можно передать свой —
      * пригодится, когда аккаунт смотрят с другого IP, чем работает панель.
      */
+    /**
+     * Устройства аккаунта: кто сейчас имеет к нему доступ и кого выгнать.
+     * Ходим в Telegram через прокси аккаунта, поэтому это обычная задача —
+     * пока на аккаунте работает прогон, ждём его очереди.
+     */
+    if (u.pathname === '/api/accounts/devices') {
+      const post = req.method === 'POST' ? await body(req) : {};
+      const id = u.searchParams.get('id') || post.id || '';
+      const acc = accounts.list().find((a) => a.id === id);
+      if (!acc) return json(res, 200, { ok: false, reason: 'аккаунт не найден' });
+      if (running.has(id)) return json(res, 200, { ok: false, reason: 'аккаунт сейчас занят задачей — подожди' });
+      const kill = post.kill || '';
+      const args = [path.join(CODE, 'access.py'), '--account', id];
+      if (kill === 'others') args.push('--kill-others');
+      else if (kill) args.push('--kill', String(kill));
+      else args.push('--list');
+      try {
+        const out = execFileSync(pythonCmd(), args,
+          { cwd: CODE, env: { ...process.env, TG_PANEL_DIR: DIR }, encoding: 'utf8', timeout: 180_000 });
+        const line = out.trim().split('\n').filter((l) => l.trim().startsWith('[')).pop() || '[]';
+        return json(res, 200, { ok: true, devices: JSON.parse(line) });
+      } catch (e) {
+        return json(res, 200, { ok: false, reason: (e.stderr || e.message || '').split('\n').pop() || 'не вышло' });
+      }
+    }
+
     if (u.pathname === '/api/accounts/kit') {
       const id = u.searchParams.get('id') || '';
       const os = ['mac', 'win', 'linux'].includes(u.searchParams.get('os'))
@@ -2641,15 +2667,42 @@ async function handler(req, res) {
           'аккаунт, залитый как TDATA (.zip). Перезалей его кнопкой «Сессия».' });
       }
 
+      /**
+       * Отдельный вход. Панель создаёт аккаунту ВТОРУЮ авторизацию и кладёт
+       * в комплект её, а не свой ключ. Такой комплект можно отозвать из
+       * панели одной кнопкой, и человеку больше нельзя случайно «выйти»
+       * так, чтобы это убило аккаунт.
+       */
+      let freshDir = '';
+      if (u.searchParams.get('fresh') === '1') {
+        if (running.has(id)) {
+          return json(res, 200, { ok: false, reason: 'аккаунт сейчас занят задачей — подожди минуту' });
+        }
+        freshDir = path.join(DESKTOP, `fresh-${id}-${Date.now()}`);
+        try {
+          fs.mkdirSync(DESKTOP, { recursive: true });
+          execFileSync(pythonCmd(), [path.join(CODE, 'access.py'), '--account', id, '--out', freshDir],
+            { cwd: CODE, env: { ...process.env, TG_PANEL_DIR: DIR }, encoding: 'utf8', timeout: 240_000 });
+        } catch (e) {
+          fs.rmSync(freshDir, { recursive: true, force: true });
+          const why = String(e.stdout || e.stderr || e.message || '').trim().split('\n').pop();
+          return json(res, 200, { ok: false, reason: why || 'не вышло создать отдельный вход' });
+        }
+      }
+
       let kit;
       try {
         fs.mkdirSync(DESKTOP, { recursive: true });
         kit = buildKit({ id, title: acc.name || acc.title, proxy, os, kitDir: path.join(CODE, 'kit'),
-                         uploadsZip: path.join(UPLOADS, src), tmpRoot: DESKTOP });
+                         uploadsZip: path.join(UPLOADS, src), tdataDir: freshDir || '', tmpRoot: DESKTOP });
       } catch (e) {
+        fs.rmSync(freshDir, { recursive: true, force: true });
         return json(res, 200, { ok: false, reason: 'не смог собрать комплект: ' + e.message });
       }
-      push(`\n🖥 «${acc.title}»: собран комплект запуска на компьютере (${os})`);
+      // ключ уже внутри архива — на сервере ему делать нечего
+      if (freshDir) fs.rmSync(freshDir, { recursive: true, force: true });
+      push(`\n🖥 «${acc.title}»: собран комплект запуска на компьютере (${os})` +
+           (freshDir ? ' — с отдельным входом, его видно в «Устройствах»' : ''));
       res.writeHead(200, {
         'content-type': 'application/zip',
         'content-disposition': `attachment; filename="${kit.name}"`,

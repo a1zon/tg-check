@@ -801,6 +801,13 @@
       </div>
 
       <label class="bigopt" style="margin:10px 0">
+        <input type="checkbox" id="kit-fresh" checked>
+        <span><b>Отдельный вход</b> — панель заведёт аккаунту второе устройство и положит
+          в комплект его, а не свой ключ. Такой доступ видно ниже и можно отозвать одной
+          кнопкой; человек при этом может спокойно выходить из аккаунта у себя.
+          Без галочки поедет ключ панели — выйти будет нельзя.</span></label>
+
+      <label class="bigopt" style="margin:10px 0">
         <input type="checkbox" id="kit-direct">
         <span><b>Без прокси — у человека свой VPN.</b> Аккаунт откроется сразу,
           без моста и без настройки прокси в Telegram. Каким адресом он выйдет,
@@ -816,6 +823,16 @@
         <span id="kit-note" class="hint"></span>
       </div>
 
+      <div class="fieldset" style="margin-top:12px">
+        <div class="fh">Кто имеет доступ к аккаунту</div>
+        <div id="kit-devs" class="accrun"></div>
+        <div class="frow" style="margin-top:8px">
+          <button class="ghost mini" id="kit-devs-load">Показать устройства</button>
+          <button class="ghost mini" id="kit-devs-kill">Выгнать всех, кроме панели</button>
+          <span class="hint" id="kit-devs-note"></span>
+        </div>
+      </div>
+
       <ol class="kit-steps" id="kit-steps"></ol>
       <p class="hint kit-warn">Ключ у этого Telegram и у панели <b>один</b>. Из аккаунта
         не выходить и прокси не отключать — иначе панель потеряет сессию.</p>
@@ -823,4 +840,4 @@
 
   </main>
 </div>
-<script src="/app.js?v=r57"></script>
+<script src="/app.js?v=r58"></script>

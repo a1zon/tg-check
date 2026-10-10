@@ -2075,9 +2075,13 @@ function paintKit() {
   document.querySelectorAll('#kit-os button').forEach(b =>
     b.classList.toggle('on', b.dataset.os === kitOs));
   const steps = direct ? KIT_STEPS_DIRECT[kitOs] : KIT_STEPS[kitOs];
+  // с отдельным входом убирать аккаунт файлами не нужно: хватит кнопки «выгнать»
+  const tail = $('#kit-fresh').checked
+    ? 'Убрать доступ: кнопка <b>«выгнать»</b> в списке устройств выше. Файлы у человека после этого мертвы — удалять не обязательно.'
+    : KIT_CLEAN[kitOs];
   $('#kit-steps').innerHTML = steps.map(t => `<li>${t}</li>`).join('')
     + `<li class="hint" style="list-style:none;margin-left:-20px">${KIT_NEED[kitOs]}</li>`
-    + `<li class="hint" style="list-style:none;margin-left:-20px">${KIT_CLEAN[kitOs]}</li>`;
+    + `<li class="hint" style="list-style:none;margin-left:-20px">${tail}</li>`;
 }
 
 function openKit(id) {
@@ -2086,6 +2090,8 @@ function openKit(id) {
   $('#kit-note').textContent = '';
   $('#kit-proxy').value = '';
   $('#kit-direct').checked = false;
+  $('#kit-devs').innerHTML = '';
+  $('#kit-devs-note').textContent = '';
   paintKit();
   $('#kitdlg').showModal();
 }
@@ -2095,6 +2101,33 @@ document.querySelectorAll('#kit-os button').forEach(b => b.onclick = () => {
 });
 $('#kit-close').onclick = () => $('#kitdlg').close();
 $('#kit-direct').onchange = () => paintKit();
+$('#kit-fresh').onchange = () => paintKit();
+
+/** Кто сейчас имеет доступ к аккаунту: панель и все впущенные компьютеры. */
+async function kitDevices(kill) {
+  if (!kitAcc) return;
+  const note = $('#kit-devs-note');
+  note.textContent = kill ? 'выгоняю…' : 'спрашиваю Telegram…';
+  const r = kill
+    ? await post('/api/accounts/devices', {id: kitAcc.id, kill})
+    : await (await fetch('/api/accounts/devices?id=' + encodeURIComponent(kitAcc.id))).json();
+  if (!r.ok) { note.textContent = r.reason || 'не вышло'; return; }
+  note.textContent = '';
+  const d = r.devices || [];
+  $('#kit-devs').innerHTML = d.map(x => `<div class="r">
+      <span class="nm">${x.panel ? '🖥 панель' : esc(x.device || 'компьютер')}</span>
+      <span class="cnt">${esc(x.app || '')}</span>
+      <span class="st">${esc(x.place || '')}${x.at ? ' · ' + esc(String(x.at).slice(0, 16).replace('T', ' ')) : ''}${
+        x.panel ? '' : ` <button class="tag act" data-kick="${x.hash}">выгнать</button>`}</span>
+    </div>`).join('') || '<div class="r"><span class="nm">устройств нет</span></div>';
+  $('#kit-devs').querySelectorAll('[data-kick]').forEach(b => {
+    b.onclick = (e) => { e.preventDefault(); kitDevices(b.dataset.kick); };
+  });
+}
+$('#kit-devs-load').onclick = () => kitDevices('');
+$('#kit-devs-kill').onclick = () => {
+  if (confirm('Выгнать все компьютеры, кроме панели?\n\nУ людей Telegram с этим аккаунтом закроется. Панель продолжит работать.')) kitDevices('others');
+};
 
 $('#kit-go').onclick = async () => {
   if (!kitAcc) return;
@@ -2103,6 +2136,7 @@ $('#kit-go').onclick = async () => {
   const px = $('#kit-proxy').value.trim();
   if ($('#kit-direct').checked) q.set('proxy', 'нет');
   else if (px) q.set('proxy', px);
+  if ($('#kit-fresh').checked) q.set('fresh', '1');
   $('#kit-go').disabled = true;
   note.textContent = 'собираю комплект…';
   try {

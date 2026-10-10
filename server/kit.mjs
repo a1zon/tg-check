@@ -119,7 +119,7 @@ const LISTEN = 18080;   // локальный порт моста — он ви�
  * рядом в архиве часто лежит заметка с паролем, и её имя в не-UTF8 кодировке
  * роняет unzip целиком.
  */
-export function buildKit({ id, title, proxy, os, uploadsZip, kitDir, tmpRoot }) {
+export function buildKit({ id, title, proxy, os, uploadsZip, tdataDir, kitDir, tmpRoot }) {
   const root = `tg-${id}-${os}`;
   const files = [];
   const add = (name, data, exec) => files.push({ name: `${root}/${name}`,
@@ -179,16 +179,26 @@ export function buildKit({ id, title, proxy, os, uploadsZip, kitDir, tmpRoot }) 
     add('ЧИТАЙ-МЕНЯ.txt', readme(os === 'mac' ? 'readme-mac.txt' : 'readme-linux.txt'));
   }
 
-  const tmp = fs.mkdtempSync(path.join(tmpRoot, '_kit'));
-  try {
-    try {
-      execFileSync('unzip', ['-qo', uploadsZip, '*tdata/*', '-d', tmp], { stdio: 'ignore' });
-    } catch {}
-    const tdata = findTdata(tmp);
-    if (!tdata) throw new Error('внутри архива аккаунта нет папки tdata');
+  // Откуда берём аккаунт для комплекта:
+  //   tdataDir — отдельный вход, созданный специально под этот комплект.
+  //              Его можно выгнать из панели, панели это не мешает.
+  //   uploadsZip — копия ключа самой панели. Старый способ: выгнать нельзя,
+  //              выход в Telegram убивает аккаунт и у панели.
+  if (tdataDir) {
+    const tdata = findTdata(tdataDir) || tdataDir;
     for (const rel of walk(tdata)) add(`tdata/${rel}`, fs.readFileSync(path.join(tdata, rel)));
-  } finally {
-    fs.rmSync(tmp, { recursive: true, force: true });
+  } else {
+    const tmp = fs.mkdtempSync(path.join(tmpRoot, '_kit'));
+    try {
+      try {
+        execFileSync('unzip', ['-qo', uploadsZip, '*tdata/*', '-d', tmp], { stdio: 'ignore' });
+      } catch {}
+      const tdata = findTdata(tmp);
+      if (!tdata) throw new Error('внутри архива аккаунта нет папки tdata');
+      for (const rel of walk(tdata)) add(`tdata/${rel}`, fs.readFileSync(path.join(tdata, rel)));
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
   }
 
   return { name: `${root}.zip`, body: buildZip(files) };

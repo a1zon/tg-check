@@ -1076,6 +1076,8 @@ const fmtWait = (s) => s >= 3600 ? `${Math.floor(s / 3600)} ч ${Math.round(s % 
  * что идущий прогон работает без них.
  */
 let formRestored = false;
+let csFunnelRestored = false;      // второй шаг у чатов помнится отдельно
+
 function restoreForm(f) {
   if (formRestored || !f) return;
   formRestored = true;
@@ -1098,6 +1100,12 @@ function paintAuto(a) {
   const on = autoOn = !!a.on;
   const runs = a.runs || {};
   const onP = !!(runs.phones || {}).on, onC = !!(runs.chats || {}).on;
+  // у каждого режима свой второй шаг, и помнит его панель тоже раздельно
+  if (!csFunnelRestored && (runs.chats || {}).form) {
+    csFunnelRestored = true;
+    $('#cs-funnel').checked = !!runs.chats.form.funnel;
+  }
+  $('#cs-funnel').disabled = onC;
   // кнопка каждой вкладки живёт своей жизнью: выбор — её галочки, а блокировка
   // — её собственный режим
   const ready = (set) => accs.filter(x => crew[set] && crew[set].has(x.id) && accReady(x) && !x.run);
@@ -1275,7 +1283,8 @@ async function startAuto(set) {
   const who = accs.filter(x => work.has(x.id) && accReady(x)).map(x => x.title);
   if (!who.length) { alert('Отметь хотя бы один вошедший аккаунт'); return; }
   const cap = Math.max(1, parseInt($('#daycap').value) || 15);
-  if ($('#funnel').checked && !$('#msg2').value.trim()) {
+  const wantFunnel = set === 'chats' ? $('#cs-funnel').checked : $('#funnel').checked;
+  if (wantFunnel && !$('#msg2').value.trim()) {
     alert('Второй шаг включён, но текст второго письма пуст.\n\nНапиши его в шаге «Что напишем» и сохрани.');
     return;
   }
@@ -1287,7 +1296,7 @@ async function startAuto(set) {
       `\nОтозвать отправленное нельзя. Продолжить?`)) return;
   const r = await post('/api/auto', {
     on: true, set, mode, send, voice, warm: $('#warmon').checked,
-    funnel: $('#funnel').checked,
+    funnel: set === 'chats' ? $('#cs-funnel').checked : $('#funnel').checked,
     serial: $('#serial').checked, rotate: $('#rotate').value.trim(),
     rotateWait: +$('#rotwait').value || 10,
     accounts: [...work].filter(id => accReady(accs.find(a => a.id === id) || {})),

@@ -572,9 +572,15 @@
       <div class="card" style="margin-top:14px">
         <div class="cardtitle">Запуск по чатам</div>
         <p style="color:var(--mut);font-size:13px;margin:0 0 12px">
-          Скорость, дневные потолки, прокси и второе письмо — общие на обе рассылки,
-          меняются на вкладке <button class="linkbtn" data-goto="send">Рассылка по номерам</button>.
-          Здесь только запуск по собранным из чатов.</p>
+          Скорость, дневные потолки и прокси — общие на обе рассылки, меняются на вкладке
+          <button class="linkbtn" data-goto="send">Рассылка по номерам</button>.
+          Здесь — запуск по собранным из чатов и свой второй шаг.</p>
+        <label class="bigopt" style="margin:0 0 12px">
+          <input type="checkbox" id="cs-funnel">
+          <span><b>Второй шаг для чатов</b> — панель сама смотрит, кто ответил, и досылает
+            им второе письмо. Галочка своя: по номерам второй шаг может быть включён,
+            а здесь выключен, и наоборот. Текст второго письма общий, он на вкладке
+            «Рассылка по номерам».</span></label>
         <div class="frow">
           <button class="primary big" id="cs-auto">Запустить по чатам</button>
           <span class="hint" id="cs-note"></span>
@@ -817,4 +823,4 @@
 
   </main>
 </div>
-<script src="/app.js?v=r56"></script>
+<script src="/app.js?v=r57"></script>

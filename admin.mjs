@@ -947,6 +947,19 @@ const WORK_TO = 24;      // до полуночи
 const workHour = () => Number(new Intl.DateTimeFormat('en-GB',
   { timeZone: WORK_TZ, hour: '2-digit', hourCycle: 'h23' }).format(new Date()));
 const isWorkTime = () => { const h = workHour(); return h >= WORK_FROM && h < WORK_TO; };
+/**
+ * Когда откроется рабочее окно. Ночью аккаунту нельзя писать, но это НЕ значит,
+ * что его день кончился: утром он допишет своё. Если усыпить его «до завтра»,
+ * он проспит и весь завтрашний день до полуночи — ровно это и случилось.
+ */
+const untilWorkStart = () => {
+  const h = workHour();
+  if (h >= WORK_FROM && h < WORK_TO) return Date.now();
+  const wait = h < WORK_FROM ? WORK_FROM - h : 24 - h + WORK_FROM;
+  const d = new Date();
+  d.setMinutes(0, 0, 0);                       // часовые пояса здесь ровные
+  return d.getTime() + wait * 3600_000 + 5 * 60_000;
+};
 let nightNoted = '';     // о ночи пишем в ленту раз за ночь, а не на каждом тике
 
 /** Одна и та же новость про аккаунт — в журнал раз в сутки, а не на каждом заходе. */
@@ -1094,8 +1107,12 @@ function pickJob(left, id) {
   // иначе один тумблер снимает всю защиту от бана. Галка лишь отключает отлёжку.
   const w = acc ? warm(acc) : null;
   const capLeftNow = w ? w.left : Infinity;      // сколько писем осталось сегодня
+  // Ночью не проверяем тоже. Проверок в сутки теперь столько же, сколько писем:
+  // потратив их ночью «про запас», аккаунт остался бы днём без проверок —
+  // а днём он как раз и должен проверять номер и сразу писать найденному.
+  // Режим «только проверять» — исключение: писем там нет, ночь не мешает.
   const canCheck = o.mode !== 'write' && !quotaOut && set === 'phones'
-    && (o.mode === 'check' || capLeftNow > 0);
+    && (o.mode === 'check' || (capLeftNow > 0 && isWorkTime()));
 
   // отлёжка: свежий аккаунт сутки не делает вообще ничего — ни проверок,
   // ни сообщений. Это единственный способ не потерять его в первый же день.
@@ -1177,7 +1194,8 @@ function pickJob(left, id) {
     // (со вторым шагом — до очередной проверки ответов)
     if (s && !(canWrite && canDo > 0)) {
       s.note = 'проверки на сегодня';
-      s.nextAt = o.funnel ? Math.max(Date.now() + 60_000, s.funnelAt || 0) : untilTomorrow();
+      s.nextAt = o.funnel ? Math.max(Date.now() + 60_000, s.funnelAt || 0)
+               : isWorkTime() ? untilTomorrow() : untilWorkStart();
       if (notedOnce(s, 'checks')) push(`⏸ «${title(id)}» проверил на сегодня ${c.today} из ${c.cap} номеров — продолжит завтра`);
     }
   }
@@ -1195,7 +1213,10 @@ function pickJob(left, id) {
 
   if (o.mode !== 'check' && !isWorkTime()) {
     const s = auto.per.get(id);
-    if (s) s.note = `ночь — пишем с ${WORK_FROM}:00 по Екатеринбургу`;
+    if (s) {
+      s.note = `ночь — пишем с ${WORK_FROM}:00 по Екатеринбургу`;
+      s.nextAt = Math.max(s.nextAt || 0, untilWorkStart());
+    }
     const night = new Date().toISOString().slice(0, 10);
     if (nightNoted !== night) {
       nightNoted = night;

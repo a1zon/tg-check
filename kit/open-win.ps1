@@ -111,15 +111,27 @@ Write-Host 'Проверяю прокси…'
 # в лоб: каждая строка чужого stderr превращается в ошибку, которая обрывает
 # скрипт прямо здесь. Человек вместо понятного «прокси не отвечает» получал
 # простыню из .NET. Поэтому на время вызова поблажка.
-$prev = $ErrorActionPreference
-$ErrorActionPreference = 'Continue'
-$out = & $self -NoProfile -ExecutionPolicy Bypass -File $bridgePs -Check 2>&1
-$code = $LASTEXITCODE
-$ErrorActionPreference = $prev
+# Мобильный прокси раз в несколько минут меняет адрес, и на это время модем
+# уходит из сети: шлюз отвечает 502, соединения рвутся. Длится это полминуты.
+# Сдаваться с первой попытки — значит гонять человека «запусти ещё раз»
+# ровно тогда, когда достаточно подождать.
+$out = $null; $code = 1
+foreach ($try in 1..3) {
+  $prev = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  $out = & $self -NoProfile -ExecutionPolicy Bypass -File $bridgePs -Check 2>&1
+  $code = $LASTEXITCODE
+  $ErrorActionPreference = $prev
+  if ($code -eq 0) { break }
+  if ($try -lt 3) {
+    Write-Host "  не ответил (попытка $try из 3) — похоже, модем меняет адрес. Жду 20 секунд…"
+    Start-Sleep -Seconds 20
+  }
+}
 if ($code -ne 0) {
   Die ("Прокси не отвечает: " + (($out | Out-String).Trim()) +
        "`n`nTelegram без прокси не запускаю — иначе аккаунт выйдет с твоего IP." +
-       "`nПодожди пару минут и запусти снова: мобильные прокси иногда переподключаются.")
+       "`nПробовал три раза за минуту. Подожди пару минут и запусти снова.")
 }
 Write-Host "  прокси в порядке: $(($out | Select-Object -Last 1))"
 

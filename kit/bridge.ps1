@@ -130,14 +130,21 @@ Invoke-Expression $helpers
 
 if ($Check) { Test-Proxy $proxy; exit 0 }
 
-try {
-  $ip = Test-Proxy $proxy
-  Write-Host "  прокси в порядке: $ip"
-} catch {
-  Write-Host "  прокси не ответил: $($_.Exception.Message)"
-  Write-Host "  Telegram без прокси не запускаю — иначе аккаунт выйдет с твоего IP."
-  exit 2
+# Три попытки за минуту: модем мобильного прокси при смене адреса уходит из
+# сети примерно на полминуты, и первая проверка попадает в эту дыру.
+$ip = $null
+foreach ($try in 1..3) {
+  try { $ip = Test-Proxy $proxy; break }
+  catch {
+    if ($try -eq 3) {
+      Write-Host "  прокси не ответил: $($_.Exception.Message)"
+      Write-Host "  Telegram без прокси не запускаю — иначе аккаунт выйдет с твоего IP."
+      exit 2
+    }
+    Start-Sleep -Seconds 20
+  }
 }
+Write-Host "  прокси в порядке: $ip"
 
 $handler = {
   param($client, $p, $helpers)

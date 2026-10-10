@@ -2038,6 +2038,13 @@ const KIT_STEPS_DIRECT = {
         'Если нужен другой IP — включи свой VPN <b>до</b> запуска.',
         'В терминале: <b>./открыть-аккаунт.sh</b>. Аккаунт откроется сразу.'],
 };
+// Убрать аккаунт с чужого компьютера можно только стиранием файлов: выход
+// в самом Telegram отзовёт сессию и у панели.
+const KIT_CLEAN = {
+  mac: 'Убрать аккаунт с того компьютера: <b>«Убрать аккаунт с компьютера.command»</b> в той же папке. Выходить из аккаунта в Telegram нельзя — это отзовёт сессию и у панели.',
+  win: 'Убрать аккаунт с того компьютера: <b>«Убрать аккаунт с компьютера.bat»</b> в той же папке. Выходить из аккаунта в Telegram нельзя — это отзовёт сессию и у панели.',
+  linux: 'Убрать аккаунт с того компьютера: <b>./убрать-аккаунт.sh</b> в той же папке. Выходить из аккаунта в Telegram нельзя — это отзовёт сессию и у панели.',
+};
 const KIT_NEED = {
   mac: 'Нужны: <b>Telegram Desktop</b> с desktop.telegram.org (или <b>brew install --cask telegram-desktop</b>) и Python 3. Клиент из App Store не подходит — он не открывает чужую папку с аккаунтом.',
   win: 'Нужен <b>Telegram Desktop</b> с desktop.telegram.org. Версия из Microsoft Store не подходит — она не открывает чужую папку с аккаунтом.',
@@ -2060,7 +2067,8 @@ function paintKit() {
     b.classList.toggle('on', b.dataset.os === kitOs));
   const steps = direct ? KIT_STEPS_DIRECT[kitOs] : KIT_STEPS[kitOs];
   $('#kit-steps').innerHTML = steps.map(t => `<li>${t}</li>`).join('')
-    + `<li class="hint" style="list-style:none;margin-left:-20px">${KIT_NEED[kitOs]}</li>`;
+    + `<li class="hint" style="list-style:none;margin-left:-20px">${KIT_NEED[kitOs]}</li>`
+    + `<li class="hint" style="list-style:none;margin-left:-20px">${KIT_CLEAN[kitOs]}</li>`;
 }
 
 function openKit(id) {

@@ -160,14 +160,22 @@ export function buildKit({ id, title, proxy, os, uploadsZip, kitDir, tmpRoot }) 
   const readme = (f) => (proxy ? bom(f)
     : Buffer.concat([Buffer.from('\ufeff' + noProxyHead, 'utf8'), crlf(f)]));
 
+  // Убрать аккаунт с чужого компьютера нечем, кроме как стереть файлы: выход
+  // в самом Telegram отзовёт сессию и у панели тоже. Поэтому кладём в каждый
+  // комплект отдельный файл, который закрывает Telegram этой папки и удаляет
+  // аккаунт — и ничего больше.
   if (os === 'win') {
     add('Открыть аккаунт.bat', crlf('open-win.bat'));
     add('open-win.ps1', bom('open-win.ps1'));
     if (proxy) add('bridge.ps1', bom('bridge.ps1'));
+    add('Убрать аккаунт с компьютера.bat', crlf('clean-win.bat'));
+    add('clean-win.ps1', bom('clean-win.ps1'));
     add('ЧИТАЙ-МЕНЯ.txt', readme('readme-win.txt'));
   } else {
     add(os === 'mac' ? 'Открыть аккаунт.command' : 'открыть-аккаунт.sh', src('open-unix.sh'), true);
     if (proxy) add('bridge.py', src('bridge.py'), true);
+    add(os === 'mac' ? 'Убрать аккаунт с компьютера.command' : 'убрать-аккаунт.sh',
+        src('clean-unix.sh'), true);
     add('ЧИТАЙ-МЕНЯ.txt', readme(os === 'mac' ? 'readme-mac.txt' : 'readme-linux.txt'));
   }
 

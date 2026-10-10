@@ -31,31 +31,74 @@ if ($ok -notmatch '^\s*(да|da|yes|y|д|ok|ок|\+)\s*$') {
   exit 0
 }
 
-# Закрываем только тот Telegram, который открыт из этой папки: чужой личный
-# Telegram человека трогать нельзя.
-$mine = 0
-try {
-  Get-CimInstance Win32_Process -Filter "Name='Telegram.exe'" |
-    Where-Object { $_.CommandLine -and $_.CommandLine.Contains($PSScriptRoot) } |
-    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue; $mine++ }
-} catch {}
-if ($mine) { Write-Host "  закрыл Telegram ($mine шт.), жду 5 секунд…"; Start-Sleep -Seconds 5 }
+# Закрываем Telegram и мост, открытые ИЗ ЭТОЙ ПАПКИ. Личный Telegram
+# человека не трогаем — у него другой путь в командной строке.
+function Stop-Mine {
+  $n = 0
+  foreach ($name in @('Telegram', 'powershell')) {
+    try {
+      Get-CimInstance Win32_Process -Filter "Name='$name.exe'" |
+        Where-Object { $_.CommandLine -and $_.CommandLine.Contains($PSScriptRoot) -and $_.ProcessId -ne $PID } |
+        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue; $n++ }
+    } catch {}
+  }
+  return $n
+}
+$mine = Stop-Mine
+if ($mine) { Write-Host "  закрыл программы этой папки ($mine шт.), жду 5 секунд…"; Start-Sleep -Seconds 5 }
 
+# Windows не отдаёт файл, пока его держит программа, а Telegram отпускает
+# его не мгновенно. Поэтому несколько подходов с паузой, а не один.
+function Remove-Hard($full) {
+  foreach ($try in 1..5) {
+    if (-not (Test-Path -LiteralPath $full)) { return $true }
+    Remove-Item -LiteralPath $full -Recurse -Force -ErrorAction SilentlyContinue
+    if (-not (Test-Path -LiteralPath $full)) { return $true }
+    [void](Stop-Mine)
+    Start-Sleep -Seconds 2
+  }
+  return (-not (Test-Path -LiteralPath $full))
+}
+
+$left = @()
 foreach ($p in @('workdir', 'tdata', 'kit.json')) {
   $full = Join-Path $PSScriptRoot $p
-  if (Test-Path -LiteralPath $full) {
-    Remove-Item -LiteralPath $full -Recurse -Force -ErrorAction SilentlyContinue
+  if (Remove-Hard $full) { Write-Host "  $p : удалено" }
+  else { Write-Host "  $p : занято" -ForegroundColor Red; $left += $full }
+}
+
+# Совсем упрямые файлы (Telegram не отпускает, антивирус держит) помечаем
+# на удаление при перезагрузке — это делает сама Windows, без программ.
+if ($left.Count) {
+  Write-Host ''
+  Write-Host 'Часть файлов занята прямо сейчас. Помечаю их на удаление при перезагрузке…'
+  try {
+    Add-Type -Namespace W -Name F -MemberDefinition @'
+[DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+public static extern bool MoveFileEx(string a, string b, int f);
+'@
+    foreach ($f in $left) {
+      Get-ChildItem -LiteralPath $f -Recurse -Force -ErrorAction SilentlyContinue |
+        Sort-Object FullName -Descending |
+        ForEach-Object { [void][W.F]::MoveFileEx($_.FullName, $null, 4) }
+      [void][W.F]::MoveFileEx($f, $null, 4)
+    }
+    Write-Host 'Готово: после перезагрузки компьютера они исчезнут сами.' -ForegroundColor Yellow
+  } catch {
+    Write-Host "Не вышло пометить: $($_.Exception.Message)" -ForegroundColor Red
   }
-  Write-Host ("  " + $p + ": " + $(if (Test-Path -LiteralPath $full) { 'НЕ УДАЛИЛОСЬ' } else { 'удалено' }))
 }
 
 Write-Host ''
-if (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'tdata')) {
-  Write-Host 'Что-то осталось — похоже, Telegram ещё держит файлы.' -ForegroundColor Red
-  Write-Host 'Закрой его полностью (значок у часов → Quit) и запусти этот файл снова.'
+if ($left.Count) {
+  Write-Host 'Аккаунт работать уже не будет, но для чистоты перезагрузи компьютер' -ForegroundColor Yellow
+  Write-Host 'и удали папку. Если не хочешь ждать: Ctrl+Shift+Esc → найди Telegram.exe'
+  Write-Host '→ «Снять задачу» → запусти этот файл снова.'
 } else {
   Write-Host 'Готово: аккаунта на этом компьютере больше нет.' -ForegroundColor Green
   Write-Host 'Осталось удалить саму папку — перетащи её в корзину.'
 }
+Write-Host ''
+Write-Host 'Из аккаунта мы НЕ выходили: в панели он работает как работал.'
 Write-Host ''
 Read-Host 'Enter — закрыть'

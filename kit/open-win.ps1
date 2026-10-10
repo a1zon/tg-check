@@ -63,8 +63,30 @@ if (-not $tg) {
     } catch {}
   }
 }
+# Ярлык в меню «Пуск» установщик Telegram создаёт всегда, и в нём записан
+# настоящий путь — даже если человек поставил программу в своё место.
 if (-not $tg) {
-  $w = (& where.exe Telegram.exe 2>$null | Select-Object -First 1)
+  $lnks = @("$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Telegram Desktop\Telegram.lnk",
+            "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\Telegram Desktop\Telegram.lnk")
+  foreach ($l in $lnks) {
+    if (-not (Test-Path -LiteralPath $l)) { continue }
+    try {
+      $target = (New-Object -ComObject WScript.Shell).CreateShortcut($l).TargetPath
+      if ($target -and (Test-Path -LiteralPath $target)) { $tg = $target; break }
+    } catch {}
+  }
+}
+
+if (-not $tg) {
+  $prev = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  # where.exe, ничего не найдя, пишет «INFO: Could not find files...» в поток
+  # ошибок и выходит с единицей. При ErrorActionPreference = Stop это не
+  # «ничего не нашлось», а обрыв всего скрипта — причём именно у того, у кого
+  # Telegram лежит нестандартно, то есть ровно у того, кому нужна подсказка.
+  $w = $null
+  try { $w = (& where.exe Telegram.exe 2>$null | Select-Object -First 1) } catch {}
+  $ErrorActionPreference = $prev
   if ($w -and (Test-Path -LiteralPath $w)) { $tg = $w }
 }
 
@@ -72,7 +94,8 @@ if (-not $tg) {
   Die ("Не найден Telegram Desktop. Искал здесь:`n  " + ($looked -join "`n  ") +
        "`n`nЧто делать:`n" +
        "  1. Поставь Telegram Desktop с desktop.telegram.org (версия из Microsoft Store не подходит: она не умеет открывать чужую папку с аккаунтом).`n" +
-       "  2. Если он уже стоит — положи этот комплект рядом с Telegram.exe и запусти снова.")
+       "  2. Если он уже стоит — найди, где именно: правой кнопкой по ярлыку Telegram,\n" +
+       "     «Расположение файла». Положи эту папку комплекта туда же и запусти снова.")
 }
 Write-Host "Telegram Desktop: $tg"
 

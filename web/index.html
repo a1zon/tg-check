@@ -2,7 +2,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Telegram — панель</title>
-<link rel="stylesheet" href="/app.css?v=r54">
+<link rel="stylesheet" href="/app.css?v=r59">
 <div class="app">
 
   <!-- ЛЕВАЯ ПАНЕЛЬ РЕЖИМОВ -->
@@ -807,6 +807,15 @@
           кнопкой; человек при этом может спокойно выходить из аккаунта у себя.
           Без галочки поедет ключ панели — выйти будет нельзя.</span></label>
 
+      <div class="fieldset" id="kit-more-box" style="margin-top:12px" hidden>
+        <div class="fh">Один пульт на несколько аккаунтов</div>
+        <p class="hint" style="margin:0 0 8px">Отметь ещё аккаунты — соберётся один
+          архив «Пульт»: человек запускает один файл, выбирает в меню нужный аккаунт,
+          и каждый открывается в своём окне. Ограничения в три аккаунта нет.
+          У каждого — свой отдельный вход (Windows).</p>
+        <div id="kit-more" class="accrun"></div>
+      </div>
+
       <label class="bigopt" style="margin:10px 0">
         <input type="checkbox" id="kit-direct">
         <span><b>Без прокси — у человека свой VPN.</b> Аккаунт откроется сразу,
@@ -840,4 +849,4 @@
 
   </main>
 </div>
-<script src="/app.js?v=r58"></script>
+<script src="/app.js?v=r59"></script>

@@ -52,7 +52,7 @@ import { makeEvents } from './server/events.mjs';
 import { makeResults } from './server/results.mjs';
 import { makeProxyGuard } from './server/proxyguard.mjs';
 import * as desktop from './server/desktop.mjs';
-import { buildKit, kitProxy } from './server/kit.mjs';
+import { buildKit, buildPult, kitProxy } from './server/kit.mjs';
 import * as vercel from './server/vercel.mjs';
 
 // Код один на всех, данные у каждого профиля свои.
@@ -2635,6 +2635,61 @@ async function handler(req, res) {
       } catch (e) {
         return json(res, 200, { ok: false, reason: (e.stderr || e.message || '').split('\n').pop() || 'не вышло' });
       }
+    }
+
+    /**
+     * «Пульт» — один архив на несколько аккаунтов, у каждого свой отдельный
+     * вход. Собираем входы по очереди: это обращения в Telegram через прокси,
+     * поэтому заодно проверяем, что аккаунты сейчас не заняты задачей.
+     */
+    if (u.pathname === '/api/accounts/pult') {
+      const ids = (u.searchParams.get('ids') || '').split(',').map((s) => s.trim()).filter(Boolean);
+      if (!ids.length) return json(res, 200, { ok: false, reason: 'не выбрано ни одного аккаунта' });
+      const busy = ids.filter((id) => running.has(id));
+      if (busy.length) {
+        return json(res, 200, { ok: false,
+          reason: `заняты задачей: ${busy.map(title).join(', ')} — подожди минуту` });
+      }
+      const proxyParam = u.searchParams.get('proxy');   // «нет» — напрямую; иначе прокси аккаунта/свой
+      fs.mkdirSync(DESKTOP, { recursive: true });
+      const parts = [], tmp = [], failed = [];
+      for (const id of ids) {
+        const acc = accounts.list().find((a) => a.id === id);
+        if (!acc) { failed.push(`${id}: не найден`); continue; }
+        let proxy = null;
+        if (proxyParam !== 'нет') {
+          try { proxy = kitProxy(accounts.parseProxy(proxyParam || acc.proxy)); }
+          catch (e) { failed.push(`${acc.title}: ${e.message}`); continue; }
+        }
+        const dir = path.join(DESKTOP, `pult-${id}-${Date.now()}`);
+        try {
+          execFileSync(pythonCmd(), [path.join(CODE, 'access.py'), '--account', id, '--out', dir],
+            { cwd: CODE, env: { ...process.env, TG_PANEL_DIR: DIR }, encoding: 'utf8', timeout: 240_000 });
+          tmp.push(dir);
+          parts.push({ id, title: acc.name || acc.title, proxy, tdataDir: dir });
+        } catch (e) {
+          fs.rmSync(dir, { recursive: true, force: true });
+          failed.push(`${acc.title}: ${String(e.stdout || e.stderr || e.message).trim().split('\n').pop()}`);
+        }
+      }
+      if (!parts.length) {
+        return json(res, 200, { ok: false, reason: 'ни один вход не создан — ' + failed.join(' | ') });
+      }
+      let pult;
+      try { pult = buildPult({ accounts: parts, kitDir: path.join(CODE, 'kit') }); }
+      catch (e) { for (const d of tmp) fs.rmSync(d, { recursive: true, force: true });
+                  return json(res, 200, { ok: false, reason: 'не собрался пульт: ' + e.message }); }
+      for (const d of tmp) fs.rmSync(d, { recursive: true, force: true });
+      push(`\n🖥 собран ПУЛЬТ на ${parts.length} акк. — у каждого отдельный вход` +
+           (failed.length ? ` · не вошли: ${failed.length}` : ''));
+      res.writeHead(200, {
+        'content-type': 'application/zip',
+        'content-disposition': `attachment; filename="${pult.name}"`,
+        'content-length': pult.body.length,
+        'cache-control': 'no-store',
+        'x-skipped': String(failed.length),
+      });
+      return res.end(pult.body);
     }
 
     if (u.pathname === '/api/accounts/kit') {

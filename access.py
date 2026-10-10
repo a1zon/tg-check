@@ -106,10 +106,21 @@ async def main():
     kill = str(tglib.arg("kill", "") or "")
     kill_others = tglib.flag("kill-others")
 
+    # Мобильный прокси при смене адреса уходит из сети на полминуты — первое
+    # подключение может не успеть. Поэтому несколько попыток, а не одна.
     client = tglib.make_client(acc)
-    await client.connect()
-    if not await client.is_user_authorized():
-        raise SystemExit("сессия панели мертва — аккаунт сначала надо вернуть в панель")
+    ok = False
+    for i in range(4):
+        try:
+            await client.connect()
+            if await client.is_user_authorized():
+                ok = True
+                break
+        except Exception as e:
+            say(f"  подключение {i + 1}: {type(e).__name__} — жду")
+        await asyncio.sleep(8)
+    if not ok:
+        raise SystemExit("панель не достучалась до Telegram (прокси?) — попробуй ещё раз")
 
     try:
         if want_list:

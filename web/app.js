@@ -2082,6 +2082,29 @@ function paintKit() {
   $('#kit-steps').innerHTML = steps.map(t => `<li>${t}</li>`).join('')
     + `<li class="hint" style="list-style:none;margin-left:-20px">${KIT_NEED[kitOs]}</li>`
     + `<li class="hint" style="list-style:none;margin-left:-20px">${tail}</li>`;
+
+  // «Пульт» — только Windows и только с отдельным входом (ключ панели так не
+  // раздаём). В список идут остальные вошедшие аккаунты, кроме текущего.
+  const canPult = kitOs === 'win' && $('#kit-fresh').checked;
+  $('#kit-more-box').hidden = !canPult;
+  if (canPult) {
+    const others = accs.filter(x => x.id !== a.id && accReady(x));
+    const keep = new Set([...document.querySelectorAll('#kit-more input:checked')].map(c => c.dataset.more));
+    $('#kit-more').innerHTML = others.length
+      ? others.map(x => `<label class="r">
+          <input type="checkbox" data-more="${x.id}" ${keep.has(x.id) ? 'checked' : ''}>
+          <span class="nm">${esc(x.name || x.title)}</span>
+          <span class="st">${esc(x.proxyLabel || '')}</span></label>`).join('')
+      : '<div class="r"><span class="nm" style="color:var(--mut)">других вошедших нет</span></div>';
+    $('#kit-more').onchange = () => { $('#kit-go').textContent = kitGoLabel(); };
+  }
+  $('#kit-go').textContent = kitGoLabel();
+}
+
+/** Что написать на кнопке: один комплект или пульт на несколько. */
+function kitGoLabel() {
+  const n = document.querySelectorAll('#kit-more input:checked').length;
+  return n ? `⬇ Скачать пульт на ${n + 1} акк.` : '⬇ Скачать комплект';
 }
 
 function openKit(id) {
@@ -2132,28 +2155,45 @@ $('#kit-devs-kill').onclick = () => {
 $('#kit-go').onclick = async () => {
   if (!kitAcc) return;
   const note = $('#kit-note');
-  const q = new URLSearchParams({id: kitAcc.id, os: kitOs});
+  const more = [...document.querySelectorAll('#kit-more input:checked')].map(c => c.dataset.more);
+  const pult = more.length > 0;      // отмечены ещё аккаунты → собираем пульт
+
+  const q = new URLSearchParams({ os: kitOs });
   const px = $('#kit-proxy').value.trim();
   if ($('#kit-direct').checked) q.set('proxy', 'нет');
   else if (px) q.set('proxy', px);
-  if ($('#kit-fresh').checked) q.set('fresh', '1');
+  let path;
+  if (pult) {
+    q.set('ids', [kitAcc.id, ...more].join(','));
+    path = '/api/accounts/pult?' + q;
+  } else {
+    q.set('id', kitAcc.id);
+    if ($('#kit-fresh').checked) q.set('fresh', '1');
+    path = '/api/accounts/kit?' + q;
+  }
+
   $('#kit-go').disabled = true;
-  note.textContent = 'собираю комплект…';
+  note.textContent = pult
+    ? `собираю пульт на ${more.length + 1} акк. — это может занять минуту…`
+    : 'собираю комплект…';
   try {
-    const r = await fetch('/api/accounts/kit?' + q);
-    // ошибку сервер отдаёт как JSON, комплект — как архив
+    const r = await fetch(path);
+    // ошибку сервер отдаёт как JSON, архив — как zip
     if (!(r.headers.get('content-type') || '').includes('zip')) {
       const j = await r.json().catch(() => ({}));
-      note.textContent = j.reason || 'не вышло собрать комплект';
+      note.textContent = j.reason || 'не вышло собрать';
       return;
     }
     const name = (r.headers.get('content-disposition') || '').match(/filename="(.+?)"/);
     const url = URL.createObjectURL(await r.blob());
     const a = document.createElement('a');
-    a.href = url; a.download = name ? name[1] : 'tg-kit.zip';
+    a.href = url; a.download = name ? name[1] : (pult ? 'pult.zip' : 'tg-kit.zip');
     a.click();
     URL.revokeObjectURL(url);
-    note.textContent = 'скачано — дальше по шагам ниже';
+    const skipped = +(r.headers.get('x-skipped') || 0);
+    note.textContent = skipped
+      ? `скачано, но ${skipped} акк. не вошли — смотри журнал панели`
+      : 'скачано — дальше по шагам ниже';
   } catch (e) {
     note.textContent = 'не вышло: ' + e.message;
   } finally {

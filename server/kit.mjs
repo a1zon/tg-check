@@ -119,8 +119,10 @@ const LISTEN = 18080;   // локальный порт моста — он ви�
  * рядом в архиве часто лежит заметка с паролем, и её имя в не-UTF8 кодировке
  * роняет unzip целиком.
  */
-export function buildKit({ id, title, proxy, os, uploadsZip, tdataDir, kitDir, tmpRoot }) {
-  const root = `tg-${id}-${os}`;
+// Файлы одного комплекта под префиксом root — отдельно от упаковки в zip,
+// чтобы тем же набором можно было собрать и «Пульт» на несколько аккаунтов
+// (каждый ложится в свою подпапку, но файлы те же самые и проверенные).
+export function kitEntries({ id, title, proxy, os, uploadsZip, tdataDir, kitDir, tmpRoot }, root) {
   const files = [];
   const add = (name, data, exec) => files.push({ name: `${root}/${name}`,
     data: Buffer.isBuffer(data) ? data : Buffer.from(data, 'utf8'), exec: !!exec });
@@ -201,6 +203,53 @@ export function buildKit({ id, title, proxy, os, uploadsZip, tdataDir, kitDir, t
     }
   }
 
+  return files;
+}
+
+export function buildKit(opts) {
+  const root = `tg-${opts.id}-${opts.os}`;
+  return { name: `${root}.zip`, body: buildZip(kitEntries(opts, root)) };
+}
+
+/**
+ * «Пульт» — один архив на несколько аккаунтов. Внутри меню и папка akkaunty/,
+ * где каждый аккаунт лежит ОБЫЧНЫМ комплектом (теми же проверенными файлами).
+ * Меню просто запускает «Открыть аккаунт» нужной подпапки. Три аккаунта на
+ * окно тут ни при чём: у каждого своя папка данных, значит своё окно.
+ *
+ * accounts: [{ id, title, proxy, tdataDir }]  — tdataDir у каждого свой вход.
+ * Пока только Windows: там все, кому это нужно.
+ */
+export function buildPult({ accounts, kitDir }) {
+  const os = 'win';
+  const root = `Пульт-${accounts.length}-акк`;
+  let files = [];
+  const add = (name, data) => files.push({ name: `${root}/${name}`,
+    data: Buffer.isBuffer(data) ? data : Buffer.from(data, 'utf8'), exec: false });
+
+  const src = (f) => fs.readFileSync(path.join(kitDir, f));
+  const crlf = (f) => Buffer.from(src(f).toString('utf8').replace(/\r?\n/g, '\r\n'), 'utf8');
+  const bom = (f) => Buffer.concat([Buffer.from('﻿', 'utf8'), crlf(f)]);
+
+  add('Пульт.bat', crlf('pult-win.bat'));
+  add('pult-win.ps1', bom('pult-win.ps1'));
+
+  const head = [
+    'ПУЛЬТ — несколько аккаунтов в одном месте.', '',
+    'Запусти «Пульт.bat» — он покажет список. Введи номер — откроется аккаунт,',
+    'каждый в своём окне. Трёх аккаунтов на окно тут нет: у каждого своя папка.', '',
+    'Нужен другой IP — включи VPN ДО запуска.',
+    'Убрать аккаунт с компьютера: в меню набери У и его номер (например У2).', '',
+    'Нужен Telegram Desktop с desktop.telegram.org. Версия из Microsoft Store',
+    'не подходит — она не открывает чужую папку с аккаунтом.', '',
+  ].join('\r\n');
+  add('ЧИТАЙ-МЕНЯ.txt', Buffer.concat([Buffer.from('﻿', 'utf8'), Buffer.from(head, 'utf8')]));
+
+  for (const a of accounts) {
+    const sub = `${root}/akkaunty/tg-${a.id}-${os}`;
+    files = files.concat(kitEntries(
+      { id: a.id, title: a.title, proxy: a.proxy, os, tdataDir: a.tdataDir, kitDir }, sub));
+  }
   return { name: `${root}.zip`, body: buildZip(files) };
 }
 

@@ -101,6 +101,25 @@ Write-Host "Telegram Desktop: $tg"
 
 Write-Host ''
 Write-Host "Аккаунт: $($cfg.title)"
+
+# Комплект собран без прокси: мост не нужен, аккаунт открывается сразу.
+# Каким адресом он выйдет, решает сам компьютер — обычно это VPN у человека.
+if (-not $cfg.proxy) {
+  New-Item -ItemType Directory -Force -Path $work | Out-Null
+  New-Item -ItemType Directory -Force -Path (Join-Path $work 'tdata') | Out-Null
+  Copy-Item -Recurse -Force -Path (Join-Path $PSScriptRoot 'tdata\*') -Destination (Join-Path $work 'tdata')
+  Write-Host 'Прокси в комплекте нет — выйдет тем адресом, что сейчас у компьютера.'
+  Write-Host 'Если нужен другой адрес, включи свой VPN ДО запуска.'
+  Write-Host ''
+  Write-Host "Открываю «$($cfg.title)»."
+  Write-Host 'ИЗ АККАУНТА НЕ ВЫХОДИТЬ — выход отзовёт сессию и панель потеряет аккаунт.'
+  Write-Host ''
+  Start-Process -FilePath $tg -ArgumentList @('-workdir', "`"$work`"") -Wait
+  Write-Host ''
+  Write-Host 'Telegram закрыт.'
+  exit 0
+}
+
 Write-Host 'Проверяю прокси…'
 # Отдельный процесс падением не «бросается»: PowerShell не делает из чужого
 # кода ошибку, как бы ни был настроен ErrorActionPreference. Поэтому смотрим

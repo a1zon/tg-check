@@ -2618,13 +2618,18 @@ async function handler(req, res) {
       const acc = accounts.list().find((a) => a.id === id);
       if (!acc) return json(res, 404, { ok: false, reason: 'аккаунт не найден' });
 
-      let proxy;
-      try {
-        const parsed = accounts.parseProxy(u.searchParams.get('proxy') || acc.proxy);
-        if (!parsed) throw new Error('у аккаунта не задан прокси — без него аккаунт выйдет с твоего IP');
-        proxy = kitProxy(parsed);
-      } catch (e) {
-        return json(res, 200, { ok: false, reason: e.message });
+      // «Напрямую» — комплект без моста: аккаунт открывается сразу, а каким
+      // адресом он выйдет, решает сам компьютер (обычно VPN у человека).
+      const direct = u.searchParams.get('proxy') === 'нет';
+      let proxy = null;
+      if (!direct) {
+        try {
+          const parsed = accounts.parseProxy(u.searchParams.get('proxy') || acc.proxy);
+          if (!parsed) throw new Error('у аккаунта не задан прокси — без него аккаунт выйдет с твоего IP');
+          proxy = kitProxy(parsed);
+        } catch (e) {
+          return json(res, 200, { ok: false, reason: e.message });
+        }
       }
 
       const src = fs.existsSync(UPLOADS)

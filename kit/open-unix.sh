@@ -64,6 +64,30 @@ run_tg() {
   fi
 }
 
+run_tg_direct() {
+  if [ "$TG" = "flatpak-telegram" ]; then
+    flatpak run org.telegram.desktop -- -workdir "$WORK"
+  else
+    "$TG" -workdir "$WORK"
+  fi
+}
+
+# Комплект собран без прокси: моста нет, аккаунт открывается сразу. Каким
+# адресом он выйдет, решает сам компьютер — обычно это VPN у человека.
+if [ -z "$("$PY" -c "import json;print(json.load(open('kit.json')).get('proxy') or '')")" ]; then
+  mkdir -p "$WORK/tdata"
+  cp -R tdata/. "$WORK/tdata/"
+  say ""
+  say "Прокси в комплекте нет — выйдет тем адресом, что сейчас у компьютера."
+  say "Если нужен другой адрес, включи свой VPN ДО запуска."
+  say ""
+  say "Открываю «$TITLE». ИЗ АККАУНТА НЕ ВЫХОДИТЬ — выход отзовёт сессию."
+  run_tg_direct
+  say ""
+  say "Telegram закрыт."
+  exit 0
+fi
+
 # ── мост ─────────────────────────────────────────────────────────────────────
 say ""
 say "Аккаунт: $TITLE"

@@ -2009,19 +2009,34 @@ async function leads() {
  * человека — из браузера процесс там не запустить. Поэтому кнопка отдаёт
  * архив: tdata аккаунта, мост до его прокси и один запускаемый файл.
  */
+// Шаги показываем те же, что человек увидит в чёрном окне. С прокси их
+// больше: Telegram не умеет включать его по ссылке из командной строки
+// (проверено на 7.2.9), поэтому первый раз прокси вбивается руками.
 const KIT_STEPS = {
   mac: ['Распакуй архив туда, где папка останется жить, — например в «Документы». Из архива не запускать.',
         'Первый раз: правой кнопкой по <b>«Открыть аккаунт.command»</b> → «Открыть» → в окне ещё раз «Открыть». Дальше хватит двойного щелчка.',
-        'Откроется ПУСТОЙ Telegram — без аккаунта. Подтверди <b>«Включить прокси»</b> и закрой окно: ⌘Q.',
+        'Откроется ПУСТОЙ Telegram — без аккаунта. Один раз добавь прокси: Settings → Advanced → Connection type → Use custom proxy → Add proxy → <b>SOCKS5, 127.0.0.1, порт 18080</b>, логин и пароль пустые. Save и закрой окно: ⌘Q.',
         'Telegram откроется снова — уже с аккаунтом и через его прокси. Переписывайся как обычно, закрывай через ⌘Q.'],
   win: ['Распакуй папку из архива — из архива не запускать.',
         'Двойной щелчок по <b>«Открыть аккаунт.bat»</b>. Если SmartScreen ругнётся: «Подробнее» → «Выполнить в любом случае».',
-        'Откроется ПУСТОЙ Telegram — без аккаунта. Подтверди <b>«Включить прокси»</b> и закрой окно.',
+        'Откроется ПУСТОЙ Telegram — без аккаунта. Один раз добавь прокси: Settings → Advanced → Connection type → Use custom proxy → Add proxy → <b>SOCKS5, 127.0.0.1, порт 18080</b>, логин и пароль пустые. Save и закрой окно.',
         'Telegram откроется снова — уже с аккаунтом и через его прокси. В следующие разы пустого запуска не будет.'],
   linux: ['Распакуй папку туда, где она останется жить.',
         'В терминале: <b>./открыть-аккаунт.sh</b> (или двойным щелчком, если файловый менеджер умеет).',
-        'Откроется ПУСТОЙ Telegram — без аккаунта. Подтверди <b>«Включить прокси»</b> и закрой окно: Ctrl+Q.',
+        'Откроется ПУСТОЙ Telegram — без аккаунта. Один раз добавь прокси: Settings → Advanced → Connection type → Use custom proxy → Add proxy → <b>SOCKS5, 127.0.0.1, порт 18080</b>. Save и закрой окно: Ctrl+Q.',
         'Telegram откроется снова — уже с аккаунтом и через его прокси.'],
+};
+// Без прокси всё проще: ни моста, ни пустого запуска, ни настроек.
+const KIT_STEPS_DIRECT = {
+  mac: ['Распакуй архив туда, где папка останется жить. Из архива не запускать.',
+        'Если нужен другой IP — включи свой VPN <b>до</b> запуска.',
+        'Первый раз: правой кнопкой по <b>«Открыть аккаунт.command»</b> → «Открыть». Аккаунт откроется сразу.'],
+  win: ['Распакуй папку из архива — из архива не запускать.',
+        'Если нужен другой IP — включи свой VPN <b>до</b> запуска.',
+        'Двойной щелчок по <b>«Открыть аккаунт.bat»</b>. Аккаунт откроется сразу.'],
+  linux: ['Распакуй папку туда, где она останется жить.',
+        'Если нужен другой IP — включи свой VPN <b>до</b> запуска.',
+        'В терминале: <b>./открыть-аккаунт.sh</b>. Аккаунт откроется сразу.'],
 };
 const KIT_NEED = {
   mac: 'Нужны: <b>Telegram Desktop</b> с desktop.telegram.org (или <b>brew install --cask telegram-desktop</b>) и Python 3. Клиент из App Store не подходит — он не открывает чужую папку с аккаунтом.',
@@ -2034,11 +2049,17 @@ let kitAcc = null;
 
 function paintKit() {
   const a = kitAcc; if (!a) return;
+  const direct = $('#kit-direct').checked;
   $('#kit-who').innerHTML = `Аккаунт <b>${esc(a.name || a.title)}</b> · выходит через ${esc(a.proxyLabel)}`;
-  $('#kit-proxy-h').textContent = 'Пусто — поедет прокси аккаунта. Свой нужен, только если смотреть аккаунт с другого IP.';
+  // без прокси поле со своим адресом не нужно — прячем, чтобы не путало
+  $('#kit-proxy').hidden = direct;
+  $('#kit-proxy-h').textContent = direct
+    ? 'Мост не кладём: Telegram пойдёт напрямую, адрес даёт компьютер человека.'
+    : 'Пусто — поедет прокси аккаунта. Свой нужен, только если смотреть аккаунт с другого IP.';
   document.querySelectorAll('#kit-os button').forEach(b =>
     b.classList.toggle('on', b.dataset.os === kitOs));
-  $('#kit-steps').innerHTML = KIT_STEPS[kitOs].map(t => `<li>${t}</li>`).join('')
+  const steps = direct ? KIT_STEPS_DIRECT[kitOs] : KIT_STEPS[kitOs];
+  $('#kit-steps').innerHTML = steps.map(t => `<li>${t}</li>`).join('')
     + `<li class="hint" style="list-style:none;margin-left:-20px">${KIT_NEED[kitOs]}</li>`;
 }
 
@@ -2047,6 +2068,7 @@ function openKit(id) {
   if (!kitAcc) { alert('Аккаунт не найден'); return; }
   $('#kit-note').textContent = '';
   $('#kit-proxy').value = '';
+  $('#kit-direct').checked = false;
   paintKit();
   $('#kitdlg').showModal();
 }
@@ -2055,13 +2077,15 @@ document.querySelectorAll('#kit-os button').forEach(b => b.onclick = () => {
   kitOs = b.dataset.os; paintKit();
 });
 $('#kit-close').onclick = () => $('#kitdlg').close();
+$('#kit-direct').onchange = () => paintKit();
 
 $('#kit-go').onclick = async () => {
   if (!kitAcc) return;
   const note = $('#kit-note');
   const q = new URLSearchParams({id: kitAcc.id, os: kitOs});
   const px = $('#kit-proxy').value.trim();
-  if (px) q.set('proxy', px);
+  if ($('#kit-direct').checked) q.set('proxy', 'нет');
+  else if (px) q.set('proxy', px);
   $('#kit-go').disabled = true;
   note.textContent = 'собираю комплект…';
   try {

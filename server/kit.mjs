@@ -142,15 +142,33 @@ export function buildKit({ id, title, proxy, os, uploadsZip, kitDir, tmpRoot }) 
    */
   const crlf = (f) => Buffer.from(src(f).toString('utf8').replace(/\r?\n/g, '\r\n'), 'utf8');
   const bom = (f) => Buffer.concat([Buffer.from('﻿', 'utf8'), crlf(f)]);
+  /**
+   * Комплект без прокси. Мост не кладём вовсе: аккаунт открывается сразу,
+   * а каким адресом он выйдет, решает компьютер человека (обычно его VPN).
+   * Гайд при этом начинается с предупреждения — иначе человек будет искать
+   * в нём шаги про прокси, которых в его случае нет.
+   */
+  const noProxyHead = [
+    'ЭТОТ КОМПЛЕКТ БЕЗ ПРОКСИ.',
+    '',
+    'Аккаунт откроется сразу, никакой прокси настраивать не надо.',
+    'Выйдет он тем адресом, что сейчас у компьютера: включён VPN — через VPN,',
+    'не включён — домашним адресом. Нужен другой IP — включи VPN ДО запуска.',
+    'Шаги про «включить прокси» ниже к твоему комплекту не относятся.',
+    '', '─────────────────────────────────────────────────────────────', '', '',
+  ].join('\r\n');
+  const readme = (f) => (proxy ? bom(f)
+    : Buffer.concat([Buffer.from('\ufeff' + noProxyHead, 'utf8'), crlf(f)]));
+
   if (os === 'win') {
     add('Открыть аккаунт.bat', crlf('open-win.bat'));
     add('open-win.ps1', bom('open-win.ps1'));
-    add('bridge.ps1', bom('bridge.ps1'));
-    add('ЧИТАЙ-МЕНЯ.txt', bom('readme-win.txt'));
+    if (proxy) add('bridge.ps1', bom('bridge.ps1'));
+    add('ЧИТАЙ-МЕНЯ.txt', readme('readme-win.txt'));
   } else {
     add(os === 'mac' ? 'Открыть аккаунт.command' : 'открыть-аккаунт.sh', src('open-unix.sh'), true);
-    add('bridge.py', src('bridge.py'), true);
-    add('ЧИТАЙ-МЕНЯ.txt', src(os === 'mac' ? 'readme-mac.txt' : 'readme-linux.txt'));
+    if (proxy) add('bridge.py', src('bridge.py'), true);
+    add('ЧИТАЙ-МЕНЯ.txt', readme(os === 'mac' ? 'readme-mac.txt' : 'readme-linux.txt'));
   }
 
   const tmp = fs.mkdtempSync(path.join(tmpRoot, '_kit'));

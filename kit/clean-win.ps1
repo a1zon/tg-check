@@ -92,23 +92,42 @@ public static extern bool MoveFileEx(string a, string b, int f);
   }
 }
 
-# В архиве лежит ТА ЖЕ копия аккаунта. Папку почистили, а распакуют архив
-# заново — и аккаунт снова на компьютере. Поэтому ищем и его.
+# Копий аккаунта на компьютере обычно несколько: папку распаковывали не раз
+# («tg-a2-win (1)»), архив лежит в «Загрузках», внутри папки — ещё одна папка.
+# Чистим всё, что относится К ЭТОМУ ЖЕ аккаунту: имя копий начинается с его
+# номера, чужие папки под это не попадают.
 if ($kitId) {
   $where = @((Split-Path -Parent $PSScriptRoot), "$env:USERPROFILE\Downloads",
              "$env:USERPROFILE\Desktop", "$env:USERPROFILE\OneDrive\Desktop",
-             "$env:USERPROFILE\OneDrive\Рабочий стол") | Select-Object -Unique
-  $zips = @()
+             "$env:USERPROFILE\OneDrive\Рабочий стол",
+             "$env:USERPROFILE\Загрузки", "$env:USERPROFILE\Рабочий стол") |
+           Where-Object { $_ } | Select-Object -Unique
+
+  $found = 0
   foreach ($dir in $where) {
-    if (-not $dir -or -not (Test-Path -LiteralPath $dir)) { continue }
-    $zips += Get-ChildItem -LiteralPath $dir -Filter "tg-$kitId-*.zip" -File -ErrorAction SilentlyContinue
+    if (-not (Test-Path -LiteralPath $dir)) { continue }
+    # архивы комплекта
+    foreach ($z in @(Get-ChildItem -LiteralPath $dir -Filter "tg-$kitId-*.zip" -File -ErrorAction SilentlyContinue)) {
+      $found++
+      Remove-Item -LiteralPath $z.FullName -Force -ErrorAction SilentlyContinue
+      Write-Host ("  архив " + $z.FullName + ": " +
+                  $(if (Test-Path -LiteralPath $z.FullName) { 'НЕ УДАЛИЛСЯ' } else { 'удалён' }))
+    }
+    # другие распаковки того же комплекта, кроме той, из которой нас запустили
+    foreach ($f in @(Get-ChildItem -LiteralPath $dir -Filter "tg-$kitId-*" -Directory -ErrorAction SilentlyContinue)) {
+      if ($f.FullName -eq $PSScriptRoot) { continue }
+      $found++
+      if (Remove-Hard $f.FullName) { Write-Host ("  папка " + $f.FullName + ": удалена") }
+      else { Write-Host ("  папка " + $f.FullName + ": занята") -ForegroundColor Red; $left += $f.FullName }
+    }
   }
-  foreach ($z in $zips) {
-    Remove-Item -LiteralPath $z.FullName -Force -ErrorAction SilentlyContinue
-    Write-Host ("  архив " + $z.FullName + ": " +
-                $(if (Test-Path -LiteralPath $z.FullName) { 'НЕ УДАЛИЛСЯ' } else { 'удалён' }))
+  # вложенная копия внутри нашей же папки
+  foreach ($f in @(Get-ChildItem -LiteralPath $PSScriptRoot -Filter "tg-$kitId-*" -Directory -ErrorAction SilentlyContinue)) {
+    $found++
+    if (Remove-Hard $f.FullName) { Write-Host ("  папка " + $f.FullName + ": удалена") }
+    else { Write-Host ("  папка " + $f.FullName + ": занята") -ForegroundColor Red; $left += $f.FullName }
   }
-  if (-not $zips.Count) { Write-Host '  скачанного архива рядом не нашёл' }
+  if (-not $found) { Write-Host '  других копий этого аккаунта рядом не нашёл' }
 }
 
 Write-Host ''

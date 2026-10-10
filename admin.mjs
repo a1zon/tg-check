@@ -1263,7 +1263,7 @@ function rotateUrlProblem(raw) {
  * аккаунты не светились с одного адреса, и он сохраняется: просто подряд
  * идущие заходы в пределах этого окна делят один IP.
  */
-const ROTATE_MIN_GAP = 6 * 60_000;
+const ROTATE_MIN_GAP = 12 * 60_000;
 let lastRotateAt = 0;
 const rotatedRecently = () => Date.now() - lastRotateAt < ROTATE_MIN_GAP;
 
@@ -1374,7 +1374,8 @@ function autoTick() {
   if (auto.serial) {
     if (busy) return;                       // кто-то ещё работает — ждём его
     if (now < auto.holdUntil) return;       // модем поднимает новый адрес
-    if (auto.rotate && !auto.fresh && !rotatedRecently()) { rotateForRun(); return; }
+    // Сама смена IP перенесена ниже, к запуску задачи: менять адрес стоит
+    // только перед той работой, которая аккаунт действительно светит.
   }
 
   // По очереди работает кто-то один, поэтому порядок решает: без него первые
@@ -1413,6 +1414,22 @@ function autoTick() {
       left.shared = Math.max(0, left.shared - (job.limit - fromOwn));
       left.write -= job.limit;
     } else left.check -= job.limit;
+
+    /**
+     * Смена IP — только перед письмами и проверкой номеров.
+     *
+     * Каждая смена уводит модем из сети примерно на минуту: в журнале это
+     * «прокси лежит», и прогон на это время встаёт. Поэтому платить за неё
+     * стоит там, где аккаунт реально светится — пишет людям или добавляет
+     * контакты. Чтение своих же диалогов («смотрит ответы») адрес не пачкает,
+     * а идёт оно у каждого аккаунта раз в полчаса: на нём и уходило
+     * большинство смен.
+     */
+    if (auto.serial && auto.rotate && !auto.fresh && !rotatedRecently()
+        && (job.name === 'drafts' || job.name === 'check')) {
+      rotateForRun();
+      return;                       // этот же аккаунт пойдёт следующим заходом
+    }
 
     s.probe = !!job.probe;          // пробный заход «вернулась ли квота»
     s.jobName = job.name;           // чем аккаунт был занят — это решает длину отдыха

@@ -252,6 +252,14 @@ const inQuarantine = (acc) => {
 
 /** Что сейчас крутится: ключ — аккаунт (или '_base' для разбора файла). */
 const running = new Map();
+/**
+ * Аккаунты, на которых прямо сейчас идёт вход/выгон (access.py).
+ * Он работает той же сессией аккаунта, что и рассылка, а два процесса на
+ * одной сессии дают «database is locked». Задачи запускаются мимо running
+ * (через execFileSync в обработчике запроса), поэтому автопрогон их не видит
+ * — этот набор и есть недостающий «аккаунт занят».
+ */
+const accessBusy = new Set();
 const log = [];                       // кольцевой буфер строк
 const push = (line) => {
   log.push(line); if (log.length > 1000) log.shift();
@@ -396,6 +404,8 @@ function start(name, opts, onDone) {
   try { acc = accounts.resolve(account); } catch (e) { return { ok: false, reason: e.message }; }
   const cur = running.get(acc.id);
   if (cur) return { ok: false, reason: `«${acc.title}» уже занят: ${cur.title}` };
+  // на этом аккаунте сейчас создают вход или выгоняют устройство — та же сессия
+  if (accessBusy.has(acc.id)) return { ok: false, reason: `«${acc.title}»: идёт вход/выгон на компьютер — подожди` };
 
   // задачи, которым нужна живая сессия: без входа запускать бессмысленно —
   // раньше это молча падало «нет сессии» и путало (проверка/рассылка вхолостую)
@@ -1341,7 +1351,7 @@ function autoTick() {
   // и у чатов свои файлы, своя очередь и свой конец.
   const lefts = {};
   for (const set of SETS) if (auto.live[set]) lefts[set] = work(set);
-  const busy = live.some((id) => running.has(id));
+  const busy = live.some((id) => running.has(id)) || accessBusy.size > 0;
 
   // Режим заканчивается сам по себе: его база пройдена и его аккаунты
   // свободны. Второй при этом продолжает — они друг от друга не зависят.
@@ -1349,7 +1359,7 @@ function autoTick() {
     if (!auto.live[set] || !lefts[set]) continue;
     const mine = senders.filter((id) => setOf(id) === set);
     if (!mine.length) { finishSet(set, 'в нём не осталось аккаунтов'); continue; }
-    if (mine.some((id) => running.has(id))) continue;
+    if (mine.some((id) => running.has(id) || accessBusy.has(id))) continue;
     const l = lefts[set];
     const o = auto.opts[set] || auto;
     // работа, которую МОГУТ сделать оставшиеся: людей, доступных только
@@ -1386,7 +1396,7 @@ function autoTick() {
     : live;
 
   for (const id of queue) {
-    if (running.has(id)) continue;
+    if (running.has(id) || accessBusy.has(id)) continue;
     if (proxyGuard.down(proxyOf(id))) continue;
     const s = auto.per.get(id);
     const set = setOf(id);
@@ -2621,12 +2631,13 @@ async function handler(req, res) {
       const id = u.searchParams.get('id') || post.id || '';
       const acc = accounts.list().find((a) => a.id === id);
       if (!acc) return json(res, 200, { ok: false, reason: 'аккаунт не найден' });
-      if (running.has(id)) return json(res, 200, { ok: false, reason: 'аккаунт сейчас занят задачей — подожди' });
+      if (running.has(id) || accessBusy.has(id)) return json(res, 200, { ok: false, reason: 'аккаунт сейчас занят — подожди' });
       const kill = post.kill || '';
       const args = [path.join(CODE, 'access.py'), '--account', id];
       if (kill === 'others') args.push('--kill-others');
       else if (kill) args.push('--kill', String(kill));
       else args.push('--list');
+      accessBusy.add(id);     // на время запроса прогон этот аккаунт не трогает
       try {
         const out = execFileSync(pythonCmd(), args,
           { cwd: CODE, env: { ...process.env, TG_PANEL_DIR: DIR }, encoding: 'utf8', timeout: 180_000 });
@@ -2634,6 +2645,8 @@ async function handler(req, res) {
         return json(res, 200, { ok: true, devices: JSON.parse(line) });
       } catch (e) {
         return json(res, 200, { ok: false, reason: (e.stderr || e.message || '').split('\n').pop() || 'не вышло' });
+      } finally {
+        accessBusy.delete(id);
       }
     }
 
@@ -2645,10 +2658,10 @@ async function handler(req, res) {
     if (u.pathname === '/api/accounts/pult') {
       const ids = (u.searchParams.get('ids') || '').split(',').map((s) => s.trim()).filter(Boolean);
       if (!ids.length) return json(res, 200, { ok: false, reason: 'не выбрано ни одного аккаунта' });
-      const busy = ids.filter((id) => running.has(id));
+      const busy = ids.filter((id) => running.has(id) || accessBusy.has(id));
       if (busy.length) {
         return json(res, 200, { ok: false,
-          reason: `заняты задачей: ${busy.map(title).join(', ')} — подожди минуту` });
+          reason: `заняты: ${busy.map(title).join(', ')} — подожди минуту` });
       }
       const proxyParam = u.searchParams.get('proxy');   // «нет» — напрямую; иначе прокси аккаунта/свой
       fs.mkdirSync(DESKTOP, { recursive: true });
@@ -2662,6 +2675,7 @@ async function handler(req, res) {
           catch (e) { failed.push(`${acc.title}: ${e.message}`); continue; }
         }
         const dir = path.join(DESKTOP, `pult-${id}-${Date.now()}`);
+        accessBusy.add(id);     // пока создаём вход — прогон этот аккаунт не берёт
         try {
           execFileSync(pythonCmd(), [path.join(CODE, 'access.py'), '--account', id, '--out', dir],
             { cwd: CODE, env: { ...process.env, TG_PANEL_DIR: DIR }, encoding: 'utf8', timeout: 240_000 });
@@ -2670,6 +2684,8 @@ async function handler(req, res) {
         } catch (e) {
           fs.rmSync(dir, { recursive: true, force: true });
           failed.push(`${acc.title}: ${String(e.stdout || e.stderr || e.message).trim().split('\n').pop()}`);
+        } finally {
+          accessBusy.delete(id);
         }
       }
       if (!parts.length) {
@@ -2730,10 +2746,11 @@ async function handler(req, res) {
        */
       let freshDir = '';
       if (u.searchParams.get('fresh') === '1') {
-        if (running.has(id)) {
-          return json(res, 200, { ok: false, reason: 'аккаунт сейчас занят задачей — подожди минуту' });
+        if (running.has(id) || accessBusy.has(id)) {
+          return json(res, 200, { ok: false, reason: 'аккаунт сейчас занят — подожди минуту' });
         }
         freshDir = path.join(DESKTOP, `fresh-${id}-${Date.now()}`);
+        accessBusy.add(id);     // пока создаём вход — прогон этот аккаунт не берёт
         try {
           fs.mkdirSync(DESKTOP, { recursive: true });
           execFileSync(pythonCmd(), [path.join(CODE, 'access.py'), '--account', id, '--out', freshDir],
@@ -2742,6 +2759,8 @@ async function handler(req, res) {
           fs.rmSync(freshDir, { recursive: true, force: true });
           const why = String(e.stdout || e.stderr || e.message || '').trim().split('\n').pop();
           return json(res, 200, { ok: false, reason: why || 'не вышло создать отдельный вход' });
+        } finally {
+          accessBusy.delete(id);
         }
       }
 

@@ -2,6 +2,23 @@
 $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath $PSScriptRoot
 
+# Окно не должно исчезать молча. Любая непредвиденная ошибка — это «чёрный
+# экран мигнул и пропал» на том конце, и разбираться не с чем. Ловим всё,
+# что не поймали по дороге, показываем человеку и ждём, пока он прочтёт.
+trap {
+  Write-Host ''
+  Write-Host 'Сбой при запуске:' -ForegroundColor Red
+  Write-Host "  $($_.Exception.Message)" -ForegroundColor Red
+  if ($_.InvocationInfo) {
+    Write-Host "  строка $($_.InvocationInfo.ScriptLineNumber) в $(Split-Path -Leaf $_.InvocationInfo.ScriptName)"
+  }
+  Write-Host ''
+  Write-Host 'Пришли этот текст — по нему сразу видно причину.'
+  Write-Host ''
+  Read-Host 'Enter — закрыть'
+  exit 1
+}
+
 $cfg  = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'kit.json') -Encoding UTF8 | ConvertFrom-Json
 $port = [int]$cfg.listen
 $work = Join-Path $PSScriptRoot 'workdir'

@@ -984,7 +984,10 @@ function notedOnce(s, kind) {
 /** Чем занять этот аккаунт прямо сейчас. null — пока нечем. */
 function funnelJob(id) {
   const o = optOf(id);
-  if (!o.funnel || o.mode === 'check' || !isWorkTime()) return null;
+  // Проверку ответов делаем ВСЕГДА, даже без второго шага — иначе на наборе
+  // без воронки не копилась бы статистика ответов и нечем было бы работать
+  // руками. Второе письмо при этом не уходит (см. send при запуске задачи).
+  if (o.mode === 'check' || !isWorkTime()) return null;
   const s = auto.per.get(id);
   // первый раз после запуска панели — от последней настоящей проверки этого
   // аккаунта (её пишет followup.py в followup-runs.json). Раньше бралось
@@ -1452,7 +1455,10 @@ function autoTick() {
       warm: auto.warm,
       // второе письмо — это всегда отправка: черновиком ссылку не оставишь,
       // человек уже ответил и ждёт
-      send: ['drafts', 'follow'].includes(job.name) && o.send && !o.voice,
+      // второе письмо (follow) уходит только при включённом втором шаге;
+      // без него «Смотрит ответы» просто фиксирует ответы, ничего не отправляя
+      send: o.send && !o.voice && (job.name === 'drafts'
+        || (job.name === 'follow' && o.funnel)),
       voice: job.name === 'drafts' && o.voice,
     }, (code, st) => autoAfter(id, code, st));
     launchedBy = 'manual';

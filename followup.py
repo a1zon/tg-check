@@ -124,7 +124,7 @@ def history():
     """
     final, unclear = set(), {}
     for r in tglib.read_csv(FILE):
-        if r.get("sent") == "true" or r.get("verdict") == "no":
+        if r.get("sent") == "true" or r.get("verdict") in ("no", "yes"):
             final.add(r["key"])
         elif r.get("verdict") == "unclear":
             unclear[r["key"]] = r.get("msg", "")
@@ -180,10 +180,12 @@ async def main():
     delay_max = float(tglib.arg("delay-max", max(delay, DELAY_MAX)))
     send = tglib.flag("send")
 
-    if not MESSAGE2.exists() or not MESSAGE2.read_text("utf-8").strip():
+    # Текст второго письма нужен, только чтобы ЕГО отправлять. Просто смотреть,
+    # кто ответил (для статистики и ручной работы), можно и без него.
+    text2_raw = MESSAGE2.read_text("utf-8").strip() if MESSAGE2.exists() else ""
+    if send and not text2_raw:
         say("нет текста второго письма — напиши его в панели (шаг «Что напишем»)")
         raise SystemExit(1)
-    text2_raw = MESSAGE2.read_text("utf-8").strip()
 
     say(f"аккаунт: {acc['title']}  |  второй шаг воронки"
         f"{'' if send else ' (только смотрю, ничего не шлю)'}  |  "
@@ -239,17 +241,22 @@ async def main():
             if verdict is None:
                 say(f"    пропускаю до следующего захода: {llm.LAST_ERR}")
                 continue
+            # Ответ фиксируем ВСЕГДА — для статистики и чтобы оператор дальше
+            # работал руками. Второе письмо шлём отдельно, только если включено.
             if verdict != "yes":
-                if send:
-                    if verdict == "no":
-                        await shake_hands(client, ent, last_id)
-                    tglib.append_row(FILE, [who, acc["id"], "false", tglib.now_iso(),
-                                            verdict, str(last_id), tglib.cell(reply)[:300]], HEAD)
+                if send and verdict == "no":
+                    await shake_hands(client, ent, last_id)
+                tglib.append_row(FILE, [who, acc["id"], "false", tglib.now_iso(),
+                                        verdict, str(last_id), tglib.cell(reply)[:300]], HEAD)
                 if verdict == "unclear":
                     say("    не пишу — посмотри этот диалог руками")
                 continue
             yes_n += 1
             if not send:
+                # второе письмо выключено — просто фиксируем «да», дальше руками
+                tglib.append_row(FILE, [who, acc["id"], "false", tglib.now_iso(),
+                                        "yes", str(last_id), tglib.cell(reply)[:300]], HEAD)
+                say("    ответил «да» — записал, дальше руками")
                 continue
             # на каждого — свой вариант и свежая ссылка-зеркало; метка src
             # попадает в таблицу заявок сайта — видно, что человек пришёл отсюда

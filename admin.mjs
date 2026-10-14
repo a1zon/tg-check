@@ -1717,9 +1717,15 @@ function autoStart(o) {
   const voice = !!o.voice && mode !== 'check';
   if (voice && !fs.existsSync(VOICE)) return { ok: false, reason: 'сначала загрузи голосовое (шаг 4)' };
   if (mode !== 'check' && !voice) {
-    const mf = path.join(DIR, 'message.txt');
-    const txt = fs.existsSync(mf) ? fs.readFileSync(mf, 'utf8').trim() : '';
-    if (!txt) return { ok: false, reason: 'сначала сохрани текст сообщения (шаг «Что напишем») — пустой текст прогонит базу вхолостую' };
+    const read = (f) => { try { return fs.readFileSync(path.join(DIR, f), 'utf8').trim(); } catch { return ''; } };
+    // «По чатам» берёт СВОЙ текст из своей вкладки (message-chat.txt) и не зависит
+    // от текста «по номерам»; если своего нет — падает на общий. «По номерам» —
+    // общий текст (message.txt). Раньше проверка всегда смотрела общий и блокировала
+    // запуск чатов, хотя у них был свой текст.
+    const txt = set === 'chats' ? (read('message-chat.txt') || read('message.txt')) : read('message.txt');
+    if (!txt) return { ok: false, reason: set === 'chats'
+      ? 'сначала сохрани текст для чатов на этой вкладке (шаг «Что напишем») — пустой прогонит базу вхолостую'
+      : 'сначала сохрани текст сообщения (шаг «Что напишем») — пустой текст прогонит базу вхолостую' };
   }
   // воронка без второго письма — это заходы вхолостую: задача каждый раз
   // упиралась бы в «нет текста» и возвращалась ни с чем

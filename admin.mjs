@@ -711,8 +711,9 @@ function warmTick() {
       s.actAt = Date.now();
       if (state?.stop === 'flood' && state.cooldown) {
         s.left = 0;
-        s.nextAt = Date.now() + state.cooldown * 1000;
-        s.note = 'Telegram просит паузу';
+        // то же правило, что в рассылке: после ограничения — отлёжка ≥ 3 часов
+        s.nextAt = Date.now() + Math.max(state.cooldown * 1000, REST_AFTER_LIMIT);
+        s.note = 'Telegram просит паузу — отлёжка 3 ч';
       } else if (state?.note) {
         // «отлёжка» или «дневной предел» — до завтра тут делать нечего
         s.left = 0;
@@ -840,6 +841,7 @@ const AUTO_TICK = 3000;          // как часто смотрим, кому �
 const AUTO_FAILS_MAX = 3;        // столько неудачных запусков — аккаунт выбывает
 const AUTO_FAIL_WAIT = 5 * 60;   // после неудачного запуска ждём столько, сек
 const QUOTA_RETRY = 12 * 3600 * 1000;   // закрытая квота контактов — пробуем снова через столько
+const REST_AFTER_LIMIT = 3 * 3600 * 1000;   // после ограничения Telegram (flood) — отлёжка не меньше этого
 // как часто аккаунт смотрит ответы: раз в час. Чаще — при работе по очереди
 // через один прокси проверки съедали почти всё время, писать было некогда
 const FUNNEL_EVERY = 30 * 60_000;   // как часто аккаунт смотрит, ответили ли ему
@@ -1533,8 +1535,13 @@ function autoAfter(id, code, st) {
         `через ${fmtLeft(QUOTA_RETRY / 1000)}` + (s.jobSet === 'chats'
           ? ' (по чатам продолжает писать — там контакты не нужны)' : ' (пока ответы смотрим и догреваемся)'), title(id));
     }
+    // после ограничения Telegram (FloodWait/PEER_FLOOD) — отлёжка не меньше 3
+    // часов: короткий FloodWait и повтор «в лоб» часто ведут к новому
+    // ограничению, даже когда пишешь целевым. Квоту и карантин не трогаем —
+    // у них своя логика (12 ч / 24 ч).
+    if (st.stop === 'flood') s.nextAt = Math.max(s.nextAt, now + REST_AFTER_LIMIT);
     s.note = st.stop === 'quota' ? 'квота на сегодня'
-           : st.stop === 'flood' ? 'придержан Telegram' : 'сбои подряд';
+           : st.stop === 'flood' ? 'придержан Telegram — отлёжка 3 ч' : 'сбои подряд';
     s.fails = 0;
     push(`⏸ «${title(id)}» отдыхает до ${hhmm(s.nextAt)} — ${s.note}`);
     return;

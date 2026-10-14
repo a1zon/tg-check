@@ -674,8 +674,13 @@ const msgPreview = () => {
   const d = new Date();
   const date = `${String(d.getDate()).padStart(2,'0')}.${String(d.getMonth()+1).padStart(2,'0')}.${d.getFullYear()}`;
   const raw = $('#msg').value;
+  // кастомные поля ({brand} и т.п.) в превью подставить нечем — человека тут нет.
+  // Показываем читаемый плейсхолдер, иначе пугает «бренд не подставился», хотя
+  // при реальной отправке он берётся из таблицы (extras.csv).
   const fill = (txt, name, day, nick) => spin(txt).replaceAll('{name}', name)
-    .replaceAll('{date}', day).replaceAll('{username}', nick).trim();
+    .replaceAll('{date}', day).replaceAll('{username}', nick)
+    .replaceAll('{brand}', '«их бренд»').replaceAll('{card}', '«их карточка»')
+    .replaceAll('{lpr}', '«имя ЛПР»').trim();
 
   if (!raw.trim()) { $('#msg-prev').textContent = ''; $('#msg-warn').hidden = true; return; }
   const cnt = spinCount(raw);

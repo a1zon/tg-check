@@ -456,10 +456,15 @@ function start(name, opts, onDone) {
     }
   }
 
-  // пустой текст = холостой прогон, который жжёт номера: не запускаем
+  // пустой текст = холостой прогон, который жжёт номера: не запускаем.
+  // «По чатам» берёт СВОЙ текст (message-chat.txt, с падением на общий), «по
+  // номерам» — общий (message.txt), второе письмо — message2.txt. Тексты вкладок
+  // независимы: у чатов свой текст не должен требовать текста «по номерам».
   if (['drafts', 'follow'].includes(name)) {
-    const mf = path.join(DIR, name === 'follow' ? 'message2.txt' : 'message.txt');
-    const txt = fs.existsSync(mf) ? fs.readFileSync(mf, 'utf8').trim() : '';
+    const read = (f) => { try { return fs.readFileSync(path.join(DIR, f), 'utf8').trim(); } catch { return ''; } };
+    const txt = name === 'follow' ? read('message2.txt')
+      : setOf(acc.id) === 'chats' ? (read('message-chat.txt') || read('message.txt'))
+      : read('message.txt');
     if (!txt) {
       return { ok: false, reason: 'сначала напиши текст сообщения — иначе рассылка пройдёт вхолостую и сожжёт номера' };
     }

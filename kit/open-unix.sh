@@ -8,6 +8,11 @@ set -e
 cd "$(dirname "$0")"
 WORK="$PWD/workdir"
 
+# macOS вешает на скачанные файлы «карантин» и блокирует запуск. Первый раз его
+# снимают вручную (см. ЧИТАЙ-МЕНЯ), но дальше чистим метку со всей папки сами —
+# чтобы «Убрать аккаунт» и повторные запуски больше не упирались в блокировку.
+[ "$(uname -s)" = "Darwin" ] && xattr -dr com.apple.quarantine "$PWD" 2>/dev/null || true
+
 say() { printf '%s\n' "$*"; }
 die() { printf '\n\033[31m%s\033[0m\n\n' "$*" >&2; printf 'Окно можно закрыть.\n'; exit 1; }
 
@@ -58,17 +63,17 @@ fi
 
 run_tg() {
   if [ "$TG" = "flatpak-telegram" ]; then
-    flatpak run org.telegram.desktop -- -workdir "$WORK" -- "tg://socks?server=127.0.0.1&port=$PORT"
+    flatpak run org.telegram.desktop -- -many -workdir "$WORK" -- "tg://socks?server=127.0.0.1&port=$PORT"
   else
-    "$TG" -workdir "$WORK" -- "tg://socks?server=127.0.0.1&port=$PORT"
+    "$TG" -many -workdir "$WORK" -- "tg://socks?server=127.0.0.1&port=$PORT"
   fi
 }
 
 run_tg_direct() {
   if [ "$TG" = "flatpak-telegram" ]; then
-    flatpak run org.telegram.desktop -- -workdir "$WORK"
+    flatpak run org.telegram.desktop -- -many -workdir "$WORK"
   else
-    "$TG" -workdir "$WORK"
+    "$TG" -many -workdir "$WORK"
   fi
 }
 

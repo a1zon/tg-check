@@ -2083,9 +2083,9 @@ function paintKit() {
     + `<li class="hint" style="list-style:none;margin-left:-20px">${KIT_NEED[kitOs]}</li>`
     + `<li class="hint" style="list-style:none;margin-left:-20px">${tail}</li>`;
 
-  // «Пульт» — только Windows и только с отдельным входом (ключ панели так не
-  // раздаём). В список идут остальные вошедшие аккаунты, кроме текущего.
-  const canPult = kitOs === 'win' && $('#kit-fresh').checked;
+  // «Пульт» — только с отдельным входом (ключ панели так не раздаём): один архив
+  // на несколько аккаунтов, любая ОС. В список идут остальные вошедшие, кроме текущего.
+  const canPult = $('#kit-fresh').checked;
   $('#kit-more-box').hidden = !canPult;
   if (canPult) {
     const others = accs.filter(x => x.id !== a.id && accReady(x));

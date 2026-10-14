@@ -20,6 +20,7 @@
 """
 import asyncio
 import json
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -52,7 +53,7 @@ async def devices(client):
     return [device_of(a) for a in r.authorizations]
 
 
-async def new_login(client, proxy, out: Path):
+async def new_login(client, proxy, out: Path, password=""):
     """Новая авторизация и её tdata в папке out."""
     from telethon import TelegramClient
     from telethon.sessions import StringSession
@@ -60,6 +61,7 @@ async def new_login(client, proxy, out: Path):
     from telethon.tl.functions.auth import (ExportLoginTokenRequest,
                                             ImportLoginTokenRequest,
                                             AcceptLoginTokenRequest)
+    from telethon.errors import SessionPasswordNeededError
     from opentele.td import TDesktop
     from opentele.api import UseCurrentSession
 
@@ -70,20 +72,44 @@ async def new_login(client, proxy, out: Path):
                            app_version="5.7.3", connection_retries=5, timeout=30)
     await fresh.connect()
 
+    need_pass = False
     r = await fresh(ExportLoginTokenRequest(tglib.API_ID, tglib.API_HASH, []))
     if isinstance(r, t.auth.LoginTokenMigrateTo):
         await fresh._switch_dc(r.dc_id)
         r = await fresh(ImportLoginTokenRequest(r.token))
     if isinstance(r, t.auth.LoginToken):
-        await client(AcceptLoginTokenRequest(r.token))
+        try:
+            await client(AcceptLoginTokenRequest(r.token))
+        except SessionPasswordNeededError:
+            need_pass = True
         for _ in range(WAIT_STEPS):
+            if need_pass:
+                break
             await asyncio.sleep(WAIT_PAUSE)
-            r = await fresh(ExportLoginTokenRequest(tglib.API_ID, tglib.API_HASH, []))
-            if isinstance(r, t.auth.LoginTokenMigrateTo):
-                await fresh._switch_dc(r.dc_id)
-                r = await fresh(ImportLoginTokenRequest(r.token))
+            try:
+                r = await fresh(ExportLoginTokenRequest(tglib.API_ID, tglib.API_HASH, []))
+                if isinstance(r, t.auth.LoginTokenMigrateTo):
+                    await fresh._switch_dc(r.dc_id)
+                    r = await fresh(ImportLoginTokenRequest(r.token))
+            except SessionPasswordNeededError:
+                need_pass = True
+                break
             if isinstance(r, t.auth.LoginTokenSuccess):
                 break
+
+    # Облачный пароль (двухэтапная проверка). Новый вход Telegram не завершит,
+    # пока не проверит пароль. Он приходит из панели через окружение —
+    # не в аргументах командной строки и не в URL, чтобы нигде не светился.
+    if need_pass or not await fresh.is_user_authorized():
+        if not password:
+            await fresh.disconnect()
+            raise SystemExit("на аккаунте включён облачный пароль (2FA): впиши его в панели "
+                             "в окне «На ПК» (поле «Облачный пароль») и собери комплект заново")
+        try:
+            await fresh.sign_in(password=password)
+        except Exception as e:
+            await fresh.disconnect()
+            raise SystemExit(f"облачный пароль не подошёл ({type(e).__name__}) — проверь его в панели")
 
     if not await fresh.is_user_authorized():
         await fresh.disconnect()
@@ -99,9 +125,23 @@ async def new_login(client, proxy, out: Path):
     return len([p for p in out.rglob("*") if p.is_file()])
 
 
+def stored_cloud_pass(acc_id):
+    """Облачный пароль (2FA), сохранённый в панели для этого аккаунта (cloud.json
+    в папке профиля). Нужен, чтобы отдельный вход на аккаунтах с 2FA собирался
+    сам, без ручного ввода."""
+    try:
+        p = tglib.DIR / "cloud.json"
+        if p.exists():
+            return json.loads(p.read_text(encoding="utf-8")).get(acc_id, "")
+    except Exception:
+        pass
+    return ""
+
+
 async def main():
     acc = tglib.resolve(tglib.arg("account", ""))
     out = tglib.arg("out", "")
+    tdata_current = tglib.arg("tdata-current", "")
     want_list = tglib.flag("list")
     kill = str(tglib.arg("kill", "") or "")
     kill_others = tglib.flag("kill-others")
@@ -140,10 +180,29 @@ async def main():
             print(json.dumps(await devices(client), ensure_ascii=False))
             return
 
+        if tdata_current:
+            # tdata из УЖЕ существующей сессии панели (тот же ключ). Нужен, когда
+            # аккаунт залит как Telethon-сессия (.session), а не как tdata: нового
+            # входа не делаем, 2FA не трогаем — просто перекладываем ключ в формат
+            # Telegram Desktop. Выйти с таким ключом нельзя (общий с панелью).
+            from opentele.td import TDesktop
+            from opentele.api import UseCurrentSession
+            out_p = Path(tdata_current)
+            tdesk = await TDesktop.FromTelethon(client, flag=UseCurrentSession)
+            shutil.rmtree(out_p, ignore_errors=True)
+            out_p.parent.mkdir(parents=True, exist_ok=True)
+            tdesk.SaveTData(str(out_p))
+            n = len([p for p in out_p.rglob("*") if p.is_file()])
+            say(f"готово: tdata из ключа панели, файлов {n}")
+            return
+
         if not out:
-            raise SystemExit("нечего делать: нужен --out, --list или --kill")
+            raise SystemExit("нечего делать: нужен --out, --tdata-current, --list или --kill")
+        # Пароль: сначала переданный из панели (разовый), иначе сохранённый в
+        # cloud.json. Так на аккаунтах с 2FA вход собирается без ручного ввода.
+        pw = os.environ.get("TG_CLOUD_PASS", "") or stored_cloud_pass(acc.get("id", ""))
         say(f"{acc.get('title')}: создаю отдельный вход ({tglib.proxy_label(acc.get('proxy'))})…")
-        n = await new_login(client, tglib.parse_proxy(acc.get("proxy")), Path(out))
+        n = await new_login(client, tglib.parse_proxy(acc.get("proxy")), Path(out), password=pw)
         say(f"готово: вход создан, файлов в tdata {n}")
         say("в списке устройств аккаунта он виден как обычный Telegram Desktop — "
             "выгоняется из панели одной кнопкой")

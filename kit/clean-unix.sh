@@ -9,6 +9,10 @@ set -e
 cd "$(dirname "$0")"
 HERE="$PWD"
 
+# macOS «карантин» на скачанных файлах — чистим со всей папки, чтобы запуск
+# очистки не упирался в блокировку (подробнее — в ЧИТАЙ-МЕНЯ).
+[ "$(uname -s)" = "Darwin" ] && xattr -dr com.apple.quarantine "$PWD" 2>/dev/null || true
+
 TITLE="этот аккаунт"
 KID=""
 if command -v python3 >/dev/null 2>&1 && [ -f kit.json ]; then

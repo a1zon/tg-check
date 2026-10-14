@@ -220,30 +220,51 @@ export function buildKit(opts) {
  * accounts: [{ id, title, proxy, tdataDir }]  — tdataDir у каждого свой вход.
  * Пока только Windows: там все, кому это нужно.
  */
-export function buildPult({ accounts, kitDir }) {
-  const os = 'win';
+export function buildPult({ accounts, kitDir, os = 'win' }) {
   const root = `Пульт-${accounts.length}-акк`;
   let files = [];
-  const add = (name, data) => files.push({ name: `${root}/${name}`,
-    data: Buffer.isBuffer(data) ? data : Buffer.from(data, 'utf8'), exec: false });
+  const add = (name, data, exec = false) => files.push({ name: `${root}/${name}`,
+    data: Buffer.isBuffer(data) ? data : Buffer.from(data, 'utf8'), exec });
 
   const src = (f) => fs.readFileSync(path.join(kitDir, f));
   const crlf = (f) => Buffer.from(src(f).toString('utf8').replace(/\r?\n/g, '\r\n'), 'utf8');
   const bom = (f) => Buffer.concat([Buffer.from('﻿', 'utf8'), crlf(f)]);
 
-  add('Пульт.bat', crlf('pult-win.bat'));
-  add('pult-win.ps1', bom('pult-win.ps1'));
-
-  const head = [
-    'ПУЛЬТ — несколько аккаунтов в одном месте.', '',
-    'Запусти «Пульт.bat» — он покажет список. Введи номер — откроется аккаунт,',
-    'каждый в своём окне. Трёх аккаунтов на окно тут нет: у каждого своя папка.', '',
-    'Нужен другой IP — включи VPN ДО запуска.',
-    'Убрать аккаунт с компьютера: в меню набери У и его номер (например У2).', '',
-    'Нужен Telegram Desktop с desktop.telegram.org. Версия из Microsoft Store',
-    'не подходит — она не открывает чужую папку с аккаунтом.', '',
-  ].join('\r\n');
-  add('ЧИТАЙ-МЕНЯ.txt', Buffer.concat([Buffer.from('﻿', 'utf8'), Buffer.from(head, 'utf8')]));
+  if (os === 'win') {
+    add('Пульт.bat', crlf('pult-win.bat'));
+    add('pult-win.ps1', bom('pult-win.ps1'));
+    const head = [
+      'ПУЛЬТ — несколько аккаунтов в одном месте.', '',
+      'Запусти «Пульт.bat» — он покажет список. Введи номер — откроется аккаунт,',
+      'каждый в своём окне. Трёх аккаунтов на окно тут нет: у каждого своя папка.', '',
+      'Нужен другой IP — включи VPN ДО запуска.',
+      'Убрать аккаунт с компьютера: в меню набери У и его номер (например У2).', '',
+      'Нужен Telegram Desktop с desktop.telegram.org. Версия из Microsoft Store',
+      'не подходит — она не открывает чужую папку с аккаунтом.', '',
+    ].join('\r\n');
+    add('ЧИТАЙ-МЕНЯ.txt', Buffer.concat([Buffer.from('﻿', 'utf8'), Buffer.from(head, 'utf8')]));
+  } else {
+    // macOS/Linux: один скрипт открывает ВСЕ аккаунты сразу, каждый своим окном.
+    const launcher = os === 'mac' ? 'Открыть все.command' : 'открыть-все.sh';
+    add(launcher, src('pult-unix.sh'), true);
+    const head = [
+      'ПУЛЬТ — все аккаунты одним скриптом.', '',
+      os === 'mac'
+        ? 'Распакуй папку (не из архива!). ПЕРВЫЙ запуск «Открыть все.command» —'
+        : 'Распакуй папку. Запуск «открыть-все.sh»:',
+      ...(os === 'mac'
+        ? ['через Терминал: открой Терминал, напечатай  bash  (слово bash и пробел),',
+           'перетащи в окно «Открыть все.command», нажми Enter. Со следующего раза —',
+           'обычным двойным щелчком (блокировка снимется сама).']
+        : ['chmod +x «открыть-все.sh» и запусти его.']),
+      '',
+      'Откроются ВСЕ аккаунты сразу, каждый своим окном. Нужен другой IP —',
+      'включи VPN ДО запуска.', '',
+      'Нужен Telegram Desktop с desktop.telegram.org. Версия из App Store',
+      'не подходит — она не открывает чужую папку с аккаунтом.', '',
+    ].join('\n');
+    add('ЧИТАЙ-МЕНЯ.txt', Buffer.concat([Buffer.from('﻿', 'utf8'), Buffer.from(head, 'utf8')]));
+  }
 
   for (const a of accounts) {
     const sub = `${root}/akkaunty/tg-${a.id}-${os}`;

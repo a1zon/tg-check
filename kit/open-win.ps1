@@ -114,9 +114,21 @@ if (-not $cfg.proxy) {
   Write-Host "Открываю «$($cfg.title)»."
   Write-Host 'ИЗ АККАУНТА НЕ ВЫХОДИТЬ — выход отзовёт сессию и панель потеряет аккаунт.'
   Write-Host ''
-  Start-Process -FilePath $tg -ArgumentList @('-workdir', "`"$work`"") -Wait
+  # -many: открыть НОВЫМ окном, даже если какой-то Telegram уже запущен. Без него
+  # второй запуск просто передаёт фокус старому окну и тут же выходит — со стороны
+  # это выглядит как «терминал мигнул и ничего не открылось».
+  Start-Process -FilePath $tg -ArgumentList @('-many', '-workdir', "`"$work`"") | Out-Null
+  Start-Sleep -Seconds 3
+  if (Get-Process -Name Telegram -ErrorAction SilentlyContinue) {
+    Write-Host 'Telegram запущен — окно аккаунта должно появиться.' -ForegroundColor Green
+  } else {
+    Write-Host 'Telegram не удержался в памяти. Частые причины:' -ForegroundColor Yellow
+    Write-Host '  • установлена версия из Microsoft Store (она не открывает чужую папку) —'
+    Write-Host '    поставь обычную с desktop.telegram.org;'
+    Write-Host '  • этот же аккаунт уже открыт — закрой то окно и запусти снова.'
+  }
   Write-Host ''
-  Write-Host 'Telegram закрыт.'
+  Read-Host 'Enter — закрыть это окно (Telegram останется открыт)'
   exit 0
 }
 
@@ -174,7 +186,7 @@ try {
   # ничего не заключает в кавычки: комплект, распакованный в «Рабочий стол»
   # или любую папку с пробелом в имени, разъезжался на два аргумента, и
   # Telegram открывался СО СВОЕЙ обычной папкой — без нашего аккаунта.
-  $tgArgs = @('-workdir', "`"$work`"", '--', "tg://socks?server=127.0.0.1&port=$port")
+  $tgArgs = @('-many', '-workdir', "`"$work`"", '--', "tg://socks?server=127.0.0.1&port=$port")
 
   # Первый запуск — ПУСТОЙ Telegram. Ключ у Desktop и у панели один: если
   # Desktop выйдет в сеть с домашнего IP, а панель ходит через прокси, Telegram

@@ -2055,6 +2055,13 @@ function pythonCmd() {
   for (const p of cands) if (fs.existsSync(p)) return p;
   return win ? 'python' : 'python3';
 }
+/** Есть ли внутри zip готовая папка tdata (а не Telethon .session). */
+function zipHasTdata(zip) {
+  try {
+    const names = execFileSync('unzip', ['-Z1', zip], { encoding: 'utf8' });
+    return /(^|\/)tdata\//m.test(names) || /(^|\/)key_datas$/m.test(names);
+  } catch { return false; }
+}
 const BASEMETA = path.join(DIR, 'base.json');
 const UPLOADS = path.join(DIR, 'uploads');
 const BASE_EXT = /\.(xlsx|xlsm|csv|tsv|txt)$/i;
@@ -2664,6 +2671,7 @@ async function handler(req, res) {
     if (u.pathname === '/api/accounts/pult') {
       const ids = (u.searchParams.get('ids') || '').split(',').map((s) => s.trim()).filter(Boolean);
       if (!ids.length) return json(res, 200, { ok: false, reason: 'не выбрано ни одного аккаунта' });
+      const pultOs = ['mac', 'win', 'linux'].includes(u.searchParams.get('os')) ? u.searchParams.get('os') : 'win';
       const busy = ids.filter((id) => running.has(id) || accessBusy.has(id));
       if (busy.length) {
         return json(res, 200, { ok: false,
@@ -2698,7 +2706,7 @@ async function handler(req, res) {
         return json(res, 200, { ok: false, reason: 'ни один вход не создан — ' + failed.join(' | ') });
       }
       let pult;
-      try { pult = buildPult({ accounts: parts, kitDir: path.join(CODE, 'kit') }); }
+      try { pult = buildPult({ accounts: parts, kitDir: path.join(CODE, 'kit'), os: pultOs }); }
       catch (e) { for (const d of tmp) fs.rmSync(d, { recursive: true, force: true });
                   return json(res, 200, { ok: false, reason: 'не собрался пульт: ' + e.message }); }
       for (const d of tmp) fs.rmSync(d, { recursive: true, force: true });
@@ -2720,6 +2728,12 @@ async function handler(req, res) {
         ? u.searchParams.get('os') : 'mac';
       const acc = accounts.list().find((a) => a.id === id);
       if (!acc) return json(res, 404, { ok: false, reason: 'аккаунт не найден' });
+
+      // Облачный пароль (2FA) для отдельного входа приходит телом POST, а не в
+      // адресе — чтобы не попасть в логи/историю. Дальше отдаём его access.py
+      // через окружение, тоже мимо аргументов командной строки.
+      let cloudPass = '';
+      if (req.method === 'POST') { try { cloudPass = String((await body(req)).password || ''); } catch {} }
 
       // «Напрямую» — комплект без моста: аккаунт открывается сразу, а каким
       // адресом он выйдет, решает сам компьютер (обычно VPN у человека).
@@ -2760,7 +2774,8 @@ async function handler(req, res) {
         try {
           fs.mkdirSync(DESKTOP, { recursive: true });
           execFileSync(pythonCmd(), [path.join(CODE, 'access.py'), '--account', id, '--out', freshDir],
-            { cwd: CODE, env: { ...process.env, TG_PANEL_DIR: DIR }, encoding: 'utf8', timeout: 240_000 });
+            { cwd: CODE, env: { ...process.env, TG_PANEL_DIR: DIR, TG_CLOUD_PASS: cloudPass },
+              encoding: 'utf8', timeout: 240_000 });
         } catch (e) {
           fs.rmSync(freshDir, { recursive: true, force: true });
           const why = String(e.stdout || e.stderr || e.message || '').trim().split('\n').pop();
@@ -2770,17 +2785,43 @@ async function handler(req, res) {
         }
       }
 
+      // Ключ панели, а архив аккаунта залит как Telethon-сессия (.session), а не
+      // tdata — паковать в комплект нечего. Собираем tdata из живой сессии тем же
+      // ключом (без нового входа и без 2FA). Для отдельного входа это не нужно:
+      // там tdata берётся из свежесозданной авторизации (freshDir).
+      let keyDir = '';
+      if (!freshDir && !zipHasTdata(path.join(UPLOADS, src))) {
+        if (running.has(id) || accessBusy.has(id)) {
+          return json(res, 200, { ok: false, reason: 'аккаунт сейчас занят — подожди минуту' });
+        }
+        keyDir = path.join(DESKTOP, `key-${id}-${Date.now()}`);
+        accessBusy.add(id);
+        try {
+          fs.mkdirSync(DESKTOP, { recursive: true });
+          execFileSync(pythonCmd(), [path.join(CODE, 'access.py'), '--account', id, '--tdata-current', keyDir],
+            { cwd: CODE, env: { ...process.env, TG_PANEL_DIR: DIR }, encoding: 'utf8', timeout: 180_000 });
+        } catch (e) {
+          fs.rmSync(keyDir, { recursive: true, force: true });
+          const why = String(e.stdout || e.stderr || e.message || '').trim().split('\n').pop();
+          return json(res, 200, { ok: false, reason: why || 'не смог собрать tdata из ключа панели' });
+        } finally {
+          accessBusy.delete(id);
+        }
+      }
+
       let kit;
       try {
         fs.mkdirSync(DESKTOP, { recursive: true });
         kit = buildKit({ id, title: acc.name || acc.title, proxy, os, kitDir: path.join(CODE, 'kit'),
-                         uploadsZip: path.join(UPLOADS, src), tdataDir: freshDir || '', tmpRoot: DESKTOP });
+                         uploadsZip: path.join(UPLOADS, src), tdataDir: freshDir || keyDir || '', tmpRoot: DESKTOP });
       } catch (e) {
         fs.rmSync(freshDir, { recursive: true, force: true });
+        fs.rmSync(keyDir, { recursive: true, force: true });
         return json(res, 200, { ok: false, reason: 'не смог собрать комплект: ' + e.message });
       }
       // ключ уже внутри архива — на сервере ему делать нечего
       if (freshDir) fs.rmSync(freshDir, { recursive: true, force: true });
+      if (keyDir) fs.rmSync(keyDir, { recursive: true, force: true });
       push(`\n🖥 «${acc.title}»: собран комплект запуска на компьютере (${os})` +
            (freshDir ? ' — с отдельным входом, его видно в «Устройствах»' : ''));
       res.writeHead(200, {

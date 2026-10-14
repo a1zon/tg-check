@@ -53,7 +53,7 @@ def now_iso():
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
-def compose(tpl, row):
+def compose(tpl, row, extras=None, extra_cols=None):
     """
     Текст письма для конкретного человека.
 
@@ -61,6 +61,9 @@ def compose(tpl, row):
     чтобы письма не повторялись слово в слово. Потом подстановки: имя, дата
     звонка, @username, ссылка-зеркало. У людей из разбора чата даты звонка
     нет — подстановка {date} у них просто пустая.
+
+    extras/extra_cols — кастомные колонки из таблицы пользователя (extras.csv):
+    {brand}, {lpr} и любые другие. Нет значения у человека — подставляется пусто.
     """
     tpl = tglib.spin(tpl)
     first = (row.get("name") or "").split(" ")[0].strip()
@@ -70,9 +73,16 @@ def compose(tpl, row):
     link = tglib.current_link()
     # {chat} — где нашли человека (только у собранных из чатов)
     tpl = tpl.replace("{chat}", row.get("chat") or "")
-    return (tpl.replace("{name}", name).replace("{date}", date)
-               .replace("{username}", f"@{user}" if user else "")
-               .replace("{LINK}", link).replace("{link}", link))
+    out = (tpl.replace("{name}", name).replace("{date}", date)
+              .replace("{username}", f"@{user}" if user else "")
+              .replace("{LINK}", link).replace("{link}", link))
+    if extras and extra_cols:
+        key = (row.get("phone") or "").strip()
+        ex = (extras.get(key) or extras.get(key.lstrip("@"))
+              or extras.get("@" + user) or extras.get(user) or {})
+        for c in extra_cols:
+            out = out.replace("{" + c + "}", ex.get(c, ""))
+    return out
 
 
 async def find_member(client, key):
@@ -222,6 +232,10 @@ async def main():
         say("для собранных из чатов — отдельный текст (база из файла получает свой)")
     # название чата, где нашли человека, — для подстановки {chat}
     chat_of = tglib.chat_of_members() if "{chat}" in (tpl_chat or tpl) else {}
+    # кастомные поля из таблицы ({brand}, {lpr}…) — extras.csv рядом с данными
+    extras, extra_cols = tglib.extras_of()
+    if extra_cols:
+        say(f"кастомные поля для подстановки: {', '.join('{' + c + '}' for c in sorted(extra_cols))}")
 
     client = await tglib.connect(acc)
     say(f"сессия активна: {tglib.who(acc)}")
@@ -342,7 +356,7 @@ async def main():
                     say(f"[{i + 1}/{len(todo)}] {phone} — не знаю, в каком чате нашли; пропускаю")
                     record = False
                     continue
-                text = compose(use_tpl, row)
+                text = compose(use_tpl, row, extras, extra_cols)
 
                 if tglib.is_phone(phone) and digits(phone) not in saved:
                     # живой человек не пишет в ту же секунду, как занёс номер

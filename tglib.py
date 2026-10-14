@@ -48,6 +48,7 @@ WARM_LIST = DIR / "warm-list.json"           # куда прогрев их во
 WARM_LIST_DEFAULT = CODE / "warm-list.default.json"  # образец, приезжает с кодом
 MESSAGE = DIR / "message.txt"
 MESSAGE_CHAT = DIR / "message-chat.txt"  # отдельный текст для собранных из чатов
+EXTRAS = DIR / "extras.csv"   # кастомные поля под сообщение: ключ человека → колонки
 PARTS = DIR / "message-parts.json"   # сборный текст: приветствие + суть + призыв
 MIRROR = DIR / "mirror.json"         # текущий субдомен-зеркало для {LINK}
 VOICE = DIR / "voice.ogg"          # голосовое для рассылки (ogg/opus)
@@ -842,6 +843,26 @@ def chat_rank_fn():
 def chat_of_members():
     """Кого в каком чате нашли: ключ человека → название чата (из members.csv)."""
     return {r["key"]: chat_title(r.get("chat")) for r in read_csv(MEMBERS) if r.get("key")}
+
+
+def extras_of():
+    """Кастомные поля для подстановки в текст (extras.csv).
+
+    Ключ человека (колонка key/phone/username, с @ или без) → {колонка: значение}.
+    Колонки произвольные: Бренд→{brand}, ЛПР→{lpr} и т.п. — что положишь в
+    таблицу, то и можно подставлять. Возвращает (данные, набор колонок).
+    """
+    data, cols = {}, set()
+    for r in read_csv(EXTRAS):
+        k = (r.get("key") or r.get("phone") or r.get("username") or "").strip()
+        if not k:
+            continue
+        fields = {c: (v or "") for c, v in r.items()
+                  if c not in ("key", "phone", "username") and c}
+        cols |= set(fields)
+        for variant in {k, k.lstrip("@"), "@" + k.lstrip("@")}:
+            data.setdefault(variant, fields)
+    return data, cols
 
 
 def kept_waiting(acc_id):

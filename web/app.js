@@ -1307,6 +1307,8 @@ async function startAuto(set) {
     on: true, set, mode, send, voice, warm: $('#warmon').checked,
     funnel: set === 'chats' ? $('#cs-funnel').checked : $('#funnel').checked,
     serial: $('#serial').checked, rotate: $('#rotate').value.trim(),
+    // параллель (все сразу) — пока с вкладки чатов; на одном IP сервер предупредит
+    parallel: set === 'chats' ? !!($('#cs-parallel') && $('#cs-parallel').checked) : false,
     rotateWait: +$('#rotwait').value || 10,
     accounts: [...work].filter(id => accReady(accs.find(a => a.id === id) || {})),
     pause: (+$('#apause').value || 40) * 60,     // поле в минутах, серверу — секунды
@@ -1323,6 +1325,17 @@ async function startAuto(set) {
 $('#b-auto').onclick = () => startAuto('phones');
 // вкладка «по чатам»: тот же запуск, только список получателей свой
 if ($('#cs-auto')) $('#cs-auto').onclick = () => startAuto('chats');
+// «Как слать» (вкладка чатов): пауза между сообщениями — зеркало общих полей
+// («настройки общие на обе рассылки»), чтобы менять скорость прямо тут.
+const syncCsDelay = () => {
+  if ($('#cs-ddelay') && $('#ddelay')) $('#cs-ddelay').value = $('#ddelay').value || 180;
+  if ($('#cs-ddelaymax') && $('#ddelaymax')) $('#cs-ddelaymax').value = $('#ddelaymax').value || 350;
+};
+syncCsDelay();
+$('#ddelay')?.addEventListener('change', syncCsDelay);
+$('#ddelaymax')?.addEventListener('change', syncCsDelay);
+$('#cs-ddelay')?.addEventListener('change', () => { if ($('#ddelay')) $('#ddelay').value = $('#cs-ddelay').value; });
+$('#cs-ddelaymax')?.addEventListener('change', () => { if ($('#ddelaymax')) $('#ddelaymax').value = $('#cs-ddelaymax').value; });
 $('#amode').onchange = () => paintAuto();
 
 /**

@@ -1753,6 +1753,12 @@ function autoStart(o) {
   // раздаёт ограничения быстрее всего, и полагаться тут на внимательность
   // человека нельзя.
   const shared = !ownProxyEach();
+  // Общий адрес по умолчанию держит очередь (три акка с одного IP = риск бана).
+  // Но пользователь может ЯВНО включить параллель на одном IP (o.parallel) —
+  // тогда идём параллельно, под его ответственность, и честно предупреждаем.
+  if (shared && o.parallel && !o.serial && !rotate) {
+    push('⚠ параллельно на ОДНОМ IP — так просил; риск ограничений от Telegram выше. Для безопасной параллели нужны разные прокси.');
+  }
   // Настройки — свои у каждого режима: «по номерам» может идти с проверкой и
   // паузой в час, «по чатам» — только письмами и по сорок минут.
   auto.opts[set] = {
@@ -1779,7 +1785,7 @@ function autoStart(o) {
   // смена IP — общие. Если второй режим просит строже, берём строже.
   Object.assign(auto, {
     on: true,
-    serial: (auto.on && auto.serial) || !!o.serial || !!rotate || shared,
+    serial: (auto.on && auto.serial) || !!o.serial || !!rotate || (shared && !o.parallel),
     rotate: rotate || (auto.on ? auto.rotate : ''),
     rotateWait: num(o.rotateWait, warmup.rotateWait || 10, 3, 600),
     fresh: false, holdUntil: 0, rotateFails: 0,

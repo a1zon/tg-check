@@ -2,7 +2,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Telegram — панель</title>
-<link rel="stylesheet" href="/app.css?v=r65">
+<link rel="stylesheet" href="/app.css?v=r66">
 <div class="app">
 
   <!-- ЛЕВАЯ ПАНЕЛЬ РЕЖИМОВ -->
@@ -578,6 +578,22 @@
           Скорость, дневные потолки и прокси — общие на обе рассылки, меняются на вкладке
           <button class="linkbtn" data-goto="send">Рассылка по номерам</button>.
           Здесь — запуск по собранным из чатов и свой второй шаг.</p>
+        <div class="fieldset" style="margin:0 0 12px">
+          <div class="fh">Как слать</div>
+          <label class="bigopt" style="margin:0 0 10px">
+            <input type="checkbox" id="cs-parallel">
+            <span><b>⚡ Параллельно — все аккаунты сразу</b> (быстрее). Пусто — по очереди.
+              <b>Внимание:</b> если у аккаунтов ОДИН IP, параллельно — риск ограничений;
+              для безопасной параллели нужны разные прокси.</span>
+          </label>
+          <div class="frow" style="align-items:center;gap:8px;flex-wrap:wrap">
+            <span class="hint">Пауза между сообщениями, сек:</span>
+            <input id="cs-ddelay" type="number" min="3" style="width:76px">
+            <span class="hint">–</span>
+            <input id="cs-ddelaymax" type="number" min="3" style="width:76px">
+            <span class="hint">меньше — быстрее, но «человечнее» писать дольше</span>
+          </div>
+        </div>
         <label class="bigopt" style="margin:0 0 12px">
           <input type="checkbox" id="cs-funnel">
           <span><b>Второй шаг для чатов</b> — панель сама смотрит, кто ответил, и досылает
@@ -852,4 +868,4 @@
 
   </main>
 </div>
-<script src="/app.js?v=r65"></script>
+<script src="/app.js?v=r66"></script>

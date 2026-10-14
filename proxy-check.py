@@ -84,6 +84,17 @@ def explain(err: str, proxy):
 
 def main():
     acc = tglib.resolve(tglib.arg("account", ""))
+    if tglib.flag("ip"):
+        # Машинно-читаемо: только выходной IP через прокси аккаунта. Нужен, чтобы
+        # перед параллельным прогоном убедиться, что у аккаунтов РАЗНЫЕ адреса
+        # (разные строки прокси могут выходить с одного IP — тогда параллель = бан).
+        proxy = tglib.parse_proxy(acc.get("proxy"))
+        try:
+            ip = through_proxy(proxy, "api.ipify.org", 443, "/?format=json") if proxy else my_ip()
+            print(json.dumps({"id": acc["id"], "ip": ip}))
+        except Exception as e:
+            print(json.dumps({"id": acc["id"], "ip": "", "err": type(e).__name__}))
+        return
     say(f"аккаунт: {acc['title']}")
     say(f"прокси:  {tglib.proxy_label(acc.get('proxy'))}")
     proxy = tglib.parse_proxy(acc.get("proxy"))

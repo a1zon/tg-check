@@ -216,7 +216,9 @@ async def main():
         tglib.state(done=0, left=len(queue))
         return
     # сборный текст важнее одиночного: включили блоки — значит, письма должны
-    tpl = tglib.MESSAGE.read_text("utf-8").strip()
+    # общий текст может вовсе отсутствовать (кампания только «по чатам» — у неё
+    # свой message-chat.txt). Тогда tpl пустой, а собранным из чатов уйдёт их текст.
+    tpl = tglib.MESSAGE.read_text("utf-8").strip() if tglib.MESSAGE.exists() else ""
     n = tglib.spin_count(tpl)
     if n > 1:
         say(f"в тексте варианты: до {n} непохожих писем")

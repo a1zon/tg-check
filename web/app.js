@@ -1091,7 +1091,9 @@ function restoreForm(f) {
   const val = (id, v) => { if ($(id) && v !== undefined && v !== null && v !== '') $(id).value = v; };
   const chk = (id, v) => { if ($(id) && v !== undefined) $(id).checked = !!v; };
   val('#amode', f.mode);
-  chk('#sm-send', f.send); chk('#sm-draft', !f.send); sendModeChange();
+  // режим по умолчанию — ВСЕГДА «отправка»; черновик стал отладочным и не
+  // залипает между запусками (раньше восстанавливался draft и уходило вхолостую)
+  chk('#sm-send', true); chk('#sm-draft', false); sendModeChange();
   chk('#funnel', f.funnel); chk('#serial', f.serial); chk('#warmon', f.warm !== false);
   if (!$('#rotate').value.trim()) val('#rotate', f.rotate);
   val('#rotwait', f.rotateWait);

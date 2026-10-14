@@ -2,7 +2,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Telegram — панель</title>
-<link rel="stylesheet" href="/app.css?v=r64">
+<link rel="stylesheet" href="/app.css?v=r65">
 <div class="app">
 
   <!-- ЛЕВАЯ ПАНЕЛЬ РЕЖИМОВ -->
@@ -245,16 +245,19 @@
                   <option value="write">только написать тем, кого уже нашли</option>
                 </select>
               </div>
-              <label class="bigopt" id="opt-draft">
-                <input type="radio" name="sendmode" id="sm-draft" checked>
-                <span><b>Оставлять черновик</b> — текст ляжет в чат, но человеку
-                  <b>не уйдёт</b>. Отправишь сам, руками. Безопасно, можно проверять.</span>
-              </label>
               <label class="bigopt danger-opt" id="opt-send">
-                <input type="radio" name="sendmode" id="sm-send">
-                <span><b>Отправлять сразу</b> — сообщение <b>уйдёт человеку</b>
-                  по-настоящему. Отозвать нельзя.</span>
+                <input type="radio" name="sendmode" id="sm-send" checked>
+                <span><b>Отправлять сразу</b> — обычный режим: сообщение
+                  <b>уйдёт человеку</b> по-настоящему. Отозвать нельзя.</span>
               </label>
+              <details id="dbg-mode">
+                <summary class="hint" style="cursor:pointer;margin:6px 0 0">⚙ Отладка: не отправлять, только черновик</summary>
+                <label class="bigopt" id="opt-draft" style="margin-top:8px">
+                  <input type="radio" name="sendmode" id="sm-draft">
+                  <span><b>Оставлять черновик</b> — текст ляжет в чат, но человеку
+                    <b>не уйдёт</b>. Для проверки; при следующем запуске снова отправка.</span>
+                </label>
+              </details>
               <input type="checkbox" id="send" hidden>
               <div id="sendwarn" class="warn" hidden></div>
               <div id="autowarn" class="warn" hidden></div>
@@ -849,4 +852,4 @@
 
   </main>
 </div>
-<script src="/app.js?v=r64"></script>
+<script src="/app.js?v=r65"></script>

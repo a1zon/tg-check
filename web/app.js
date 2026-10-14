@@ -715,8 +715,10 @@ $('#msg-chat-save')?.addEventListener('click', async () => {
   const note = $('#msg-chat-note');
   if (!r.ok) { if (note) note.textContent = r.reason || 'не удалось сохранить'; return; }
   $('#msg-chat').value = r.text;
+  // «пусто — уйдёт общий текст» пишем ТОЛЬКО когда текст и правда пустой,
+  // иначе примечание вводило в заблуждение (текст есть, а написано «пусто»)
   if (note) note.textContent = 'сохранено в ' + new Date().toTimeString().slice(0, 5) +
-    ' · пусто — этой аудитории уйдёт общий текст';
+    ((r.text || '').trim() ? '' : ' · пусто — этой аудитории уйдёт общий текст');
 });
 $('#msg').oninput = msgPreview;
 

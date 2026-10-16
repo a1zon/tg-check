@@ -740,9 +740,18 @@ const msgPreview = () => {
   if (noPhone) out += `\n\nу человека из чата (без даты звонка):\n· ` + fill(raw, ', Сергей', '', '@sergey');
   $('#msg-prev').textContent = out;
 
+  // подстановки, которых рассылка не знает: с пробелом, пустые, непарные скобки.
+  // Такое письмо рассылка не отправит (draft-messages.py) — говорим сразу
+  const odd = [...raw.matchAll(/\{([^{}|]*)\}/g)].map((m) => m[1])
+    .filter((b) => !/^[\p{L}\w-]+$/u.test(b)).map((b) => `{${b}}`);
+  if ((raw.match(/\{/g) || []).length !== (raw.match(/\}/g) || []).length) odd.push('непарная скобка');
   const dateHurts = noPhone && raw.includes('{date}');
-  $('#msg-warn').hidden = !dateHurts;
-  if (dateHurts) {
+  $('#msg-warn').hidden = !dateHurts && !odd.length;
+  if (odd.length) {
+    $('#msg-warn').innerHTML = `Непонятная подстановка: <b>${esc(odd.join(', '))}</b>. ` +
+      'Имя пишется ровно <b>{name}</b> — без пробелов внутри скобок (при сохранении поправлю сам). ' +
+      'С непонятной подстановкой письмо не уйдёт.';
+  } else if (dateHurts) {
     $('#msg-warn').innerHTML = `В очереди <b>${noPhone}</b> человек без номера — они из чатов, ` +
       'и даты звонка у них нет. Подстановка <b>{date}</b> оставит у них пустое место. ' +
       'Убери <b>{date}</b> или заверни в вариант: <b>{ вы звонили {date}|здравствуйте}</b>.';

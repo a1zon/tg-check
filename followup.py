@@ -228,7 +228,13 @@ async def main():
 
     # Текст второго письма нужен, только чтобы ЕГО отправлять. Просто смотреть,
     # кто ответил (для статистики и ручной работы), можно и без него.
-    text2_raw = MESSAGE2.read_text("utf-8").strip() if MESSAGE2.exists() else ""
+    text2_raw = tglib.fix_placeholders(MESSAGE2.read_text("utf-8").strip()) if MESSAGE2.exists() else ""
+    # во втором письме подставляется только ссылка — остальное ушло бы со скобками
+    bad2 = tglib.bad_placeholders(text2_raw, ("LINK", "link"))
+    if send and bad2:
+        say(f"во втором письме непонятные подстановки: {', '.join(bad2)} — второе письмо "
+            "не шлю, только смотрю ответы (поправь текст в панели)")
+        send = False
     if send and not text2_raw:
         say("нет текста второго письма — напиши его в панели (шаг «Что напишем»)")
         raise SystemExit(1)

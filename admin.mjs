@@ -1673,7 +1673,8 @@ function autoAfter(id, code, st) {
     if (st.stop === 'flood') s.floodUntil = s.nextAt;
     s.note = st.stop === 'quota' ? 'квота на сегодня'
            : st.stop === 'flood' ? 'придержан Telegram за рассылку'
-           : st.stop === 'hold' ? 'отдых после ограничения' : 'сбои подряд';
+           : st.stop === 'hold' ? 'отдых после ограничения'
+           : st.stop === 'text' ? 'ошибка в тексте письма' : 'сбои подряд';
     s.fails = 0;
     push(`⏸ «${title(id)}» отдыхает до ${hhmm(s.nextAt)} — ${s.note}`);
     return;
@@ -2404,6 +2405,15 @@ const rawBody = (req, limit = 50 * 1024 * 1024) => new Promise((ok, no) => {
 });
 
 const WEB = path.join(CODE, 'web');
+// Подстановки пишут руками — «{ name}», «{Name}», «{имя}», а рассылка ищет ровно
+// {name}: письмо ушло бы с фигурными скобками (16.10 так ушло 123). Приводим при
+// сохранении; варианты {а|б} не трогаем. То же — fix_placeholders в tglib.py
+const PH_ALIAS = { name: 'name', 'имя': 'name', date: 'date', 'дата': 'date', username: 'username',
+  'ник': 'username', chat: 'chat', 'чат': 'chat', link: 'LINK', 'ссылка': 'LINK' };
+const fixPlaceholders = (t) => String(t).replace(/\{([^{}|]*)\}/g, (_, b) => {
+  const k = b.trim();
+  return '{' + (PH_ALIAS[k.toLowerCase()] || k) + '}';
+});
 const page = (res, file) => {
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8',
                        'cache-control': 'no-store' });
@@ -3207,7 +3217,7 @@ async function handler(req, res) {
         return json(res, 200, { text: fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '' });
       }
       const { text } = await body(req);
-      const clean = String(text ?? '').replace(/\r\n/g, '\n').trim();
+      const clean = fixPlaceholders(String(text ?? '').replace(/\r\n/g, '\n')).trim();
       // текст для чатов можно очистить — это значит «слать им общий текст»
       if (!clean && aud !== 'chat') return json(res, 200, { ok: false, reason: 'текст не может быть пустым' });
       // предел одного сообщения в Telegram — 4096 символов; с запасом на подстановки

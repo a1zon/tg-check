@@ -47,6 +47,7 @@ MAX_TRIES = 3                  # столько раз номер не далс�
 MAX_FAILS_IN_ROW = 3           # столько сбоев подряд — пачку пора прекращать
 COOLDOWN_FLOOD = 12 * 3600     # после PEER_FLOOD на рассылке — отдых подольше
 COOLDOWN_ERRORS = 15 * 60
+COOLDOWN_TEXT = 30 * 60        # ошибка в тексте письма: ждём, пока поправят в панели
 
 
 def now_iso():
@@ -234,6 +235,7 @@ async def main():
     # общий текст может вовсе отсутствовать (кампания только «по чатам» — у неё
     # свой message-chat.txt). Тогда tpl пустой, а собранным из чатов уйдёт их текст.
     tpl = tglib.MESSAGE.read_text("utf-8").strip() if tglib.MESSAGE.exists() else ""
+    tpl = tglib.fix_placeholders(tpl)
     n = tglib.spin_count(tpl)
     if n > 1:
         say(f"в тексте варианты: до {n} непохожих писем")
@@ -242,7 +244,7 @@ async def main():
     tpl_chat = ""
     try:
         if tglib.MESSAGE_CHAT.exists():
-            tpl_chat = tglib.MESSAGE_CHAT.read_text("utf-8").strip()
+            tpl_chat = tglib.fix_placeholders(tglib.MESSAGE_CHAT.read_text("utf-8").strip())
     except Exception:
         pass
     if tpl_chat:
@@ -253,6 +255,19 @@ async def main():
     extras, extra_cols = tglib.extras_of()
     if extra_cols:
         say(f"кастомные поля для подстановки: {', '.join('{' + c + '}' for c in sorted(extra_cols))}")
+
+    # Подстановку, которой рассылка не знает, человек получил бы как есть — с
+    # фигурными скобками. Такой текст не шлём вовсе: проверяем те шаблоны, что
+    # уйдут в этот заход, до подключения к Telegram
+    used = {tpl_chat if (tpl_chat and not tglib.is_phone(r["phone"])) else tpl for r in todo}
+    bad = sorted({b for t in used for b in tglib.bad_placeholders(t, tglib.PH_KNOWN + tuple(extra_cols or ()))})
+    if bad:
+        say("стоп: в тексте письма непонятные подстановки: " + ", ".join(bad) +
+            " — не отправляю. Поправь текст в панели: понимаю {name}, {date}, {username}, "
+            "{chat}, {LINK} и колонки таблицы")
+        tglib.state(done=0, left=len(queue), stop="text", cooldown=COOLDOWN_TEXT,
+                    note="ошибка в тексте письма")
+        return
 
     client = await tglib.connect(acc)
     say(f"сессия активна: {tglib.who(acc)}")
@@ -385,6 +400,17 @@ async def main():
                     record = False
                     continue
                 text = compose(use_tpl, row, extras, extra_cols)
+                # последний рубеж: скобки в готовом письме (странное значение в
+                # таблице и т.п.) — человеку такое не уходит
+                if "{" in text or "}" in text:
+                    say(f"[{i + 1}/{len(todo)}] {phone} — в готовом письме фигурные скобки, "
+                        f"не отправляю: «{' '.join(text.split())[:80]}»")
+                    record = False
+                    if imported:
+                        await client(functions.contacts.DeleteContactsRequest(id=[user.id]))
+                        imported = False
+                    stop, cooldown = "text", COOLDOWN_TEXT
+                    break
 
                 if tglib.is_phone(phone) and digits(phone) not in saved:
                     # живой человек не пишет в ту же секунду, как занёс номер

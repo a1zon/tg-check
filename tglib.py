@@ -648,6 +648,33 @@ def spin(text):
     return text.replace("\x00", "{").replace("\x01", "}")
 
 
+# Подстановки пишут руками — «{ name}», «{Name}», «{имя}», а рассылка ищет ровно
+# {name}: письмо ушло бы человеку с фигурными скобками («Добрый день{ name}!» —
+# 16.10 так ушло 123 письма). Тот же разбор — fixPlaceholders в admin.mjs.
+PH_ALIAS = {"name": "name", "имя": "name", "date": "date", "дата": "date",
+            "username": "username", "ник": "username", "chat": "chat", "чат": "chat",
+            "link": "LINK", "ссылка": "LINK"}
+PH_KNOWN = ("name", "date", "username", "chat", "LINK", "link")
+
+
+def fix_placeholders(text):
+    """Приводит подстановки к виду, который понимает рассылка; варианты {а|б} не трогает."""
+    def one(m):
+        body = m.group(1).strip()
+        return "{" + PH_ALIAS.get(body.lower(), body) + "}"
+    return re.sub(r"\{([^{}|]*)\}", one, text or "")
+
+
+def bad_placeholders(text, known=PH_KNOWN):
+    """Подстановки, которых рассылка не знает, и непарные скобки: человеку они ушли бы как есть."""
+    if not text:
+        return []
+    bad = ["{" + b + "}" for b in re.findall(r"\{([^{}|]*)\}", text) if b not in known]
+    if text.count("{") != text.count("}"):
+        bad.append("непарная фигурная скобка")
+    return bad
+
+
 def spin_count(text):
     """
     Сколько непохожих сообщений даёт текст со spintax. Для наглядности в панели:

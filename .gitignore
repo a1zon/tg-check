@@ -87,3 +87,6 @@ traffic.csv
 asocks-ports.json
 message-chat-plain.txt
 queue-first.txt
+
+# песочница: выдуманный профиль, пересобирается make_profile.py
+tests/sandbox/profile/

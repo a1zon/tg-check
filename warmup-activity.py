@@ -32,7 +32,11 @@ import tglib
 from tglib import say
 
 READ_MIN, READ_MAX = 5, 15        # сколько «читаем» пост, прежде чем реагировать
-HISTORY = 20                      # столько последних постов смотрим в канале
+# Трафик (прокси платный за ГБ): живой человек листает 5–10 последних постов,
+# а не 20, и в начале захода видит верх списка чатов, а не сотню диалогов.
+HISTORY = 8                       # столько последних постов смотрим в канале
+OWN_DIALOGS = 40                  # столько верхних диалогов смотрим, ища письма своих
+DM_DIALOGS = 100                  # и столько — для переписки (было 200, см. do_dm)
 
 # Возраст аккаунта в днях -> сколько ЧЕГО можно за сутки (вилка «от-до»).
 # Числа намеренно скромные: прогрев нужен, чтобы аккаунт дожил до работы,
@@ -420,7 +424,8 @@ async def read_own(client, acc):
     """
     own = {int(p["user_id"]) for p in dm_peers(acc) if p.get("user_id")}
     n = 0
-    for d in await client.get_dialogs(limit=100):
+    # свежее всегда наверху; глубже — дочитаем, когда будем отвечать (do_dm)
+    for d in await client.get_dialogs(limit=OWN_DIALOGS):
         if d.is_user and d.entity.id in own and d.unread_count:
             await asyncio.sleep(random.uniform(2, 6))
             await client.send_read_acknowledge(d.entity)
@@ -453,7 +458,7 @@ async def do_dm(client, acc, rows, data):
     focus = focus_ids(data)
 
     known, last_out, waiting = {}, {}, []
-    for d in await client.get_dialogs(limit=200):
+    for d in await client.get_dialogs(limit=DM_DIALOGS):
         if not d.is_user or d.entity.id not in by_id or not d.message:
             continue
         known[d.entity.id] = d.entity
@@ -493,6 +498,16 @@ async def do_dm(client, acc, rows, data):
             note(acc["id"], "dm", peer.get("title", ""), "ошибка")
             say(f"не нашёл {peer.get('title')} ни по нику, ни по номеру")
             return False
+        if int(peer.get("user_id") or 0) not in known and not drop:
+            # диалог мог уйти глубже верхних DM_DIALOGS (раньше смотрели 200):
+            # если последнее слово наше — второе подряд без ответа не шлём
+            try:
+                last = await client.get_messages(ent, limit=1)
+            except Exception:
+                last = []
+            if last and last[0].out:
+                say(f"{peer.get('title')}: последнее сообщение наше — ждём ответа")
+                return None
         text = pick(opens, None)
         verb = "написал"
 

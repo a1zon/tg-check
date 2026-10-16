@@ -27,13 +27,23 @@ import asyncio
 import json
 import random
 import re
+import time
+from datetime import datetime
 
 import llm
 import tglib
 from tglib import say
 
 DELAY_MIN, DELAY_MAX = 180, 350
-DIALOGS = 200                 # столько последних диалогов просматриваем
+DIALOGS = 200                 # столько последних диалогов просматриваем при полной проверке
+# Экономия трафика: 200 диалогов — это 30–40 КБ на каждый заход, а новые ответы
+# всегда наверху списка (Telegram сортирует диалоги по последнему сообщению).
+# Поэтому обычно берём 20 верхних; если все 20 новее прошлой проверки — значит,
+# сменилось больше, и дочитываем полный список. Полный проход — раз в сутки:
+# на нём дотягиваются старые тексты и переписки для «Результатов».
+QUICK_DIALOGS = 20
+FULL_EVERY = 24 * 3600
+CLOCK_MARGIN = 10 * 60        # запас на расхождение часов сервера и Telegram
 # text — сам ответ человека (для вкладки «Результаты»: видно, что за «да»)
 HEAD = ["key", "account", "sent", "at", "verdict", "msg", "text"]
 FILE = tglib.DIR / "followup.csv"
@@ -135,15 +145,45 @@ async def backfill_texts(client, acc_id, dialogs, by_key, by_id):
         say(f"восстановил тексты старых ответов: {got}")
 
 
-def mark_run(account, dialogs, answered, fresh):
+def load_runs():
     try:
         data = json.loads(RUNS.read_text("utf-8"))
-        if not isinstance(data, dict):
-            data = {}
+        return data if isinstance(data, dict) else {}
     except Exception:
-        data = {}
-    data[account] = {"at": tglib.now_iso(), "dialogs": dialogs, "answered": answered, "fresh": fresh}
+        return {}
+
+
+def mark_run(account, dialogs, answered, fresh, full=True):
+    data = load_runs()
+    prev = data.get(account) or {}
+    now = tglib.now_iso()
+    data[account] = {"at": now, "full_at": now if full else prev.get("full_at", ""),
+                     "dialogs": dialogs, "answered": answered, "fresh": fresh}
     RUNS.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", "utf-8")
+
+
+def _ts(iso):
+    try:
+        return datetime.fromisoformat(str(iso).replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return 0.0
+
+
+async def fetch_dialogs(client, prev):
+    """
+    Диалоги для проверки: (список, полный ли проход). Короткий список годится,
+    только если прошлая проверка была и полный проход был меньше суток назад, а
+    самый старый незакреплённый из 20 старше прошлой проверки — тогда всё, что
+    изменилось с тех пор, точно в нём (закреплённые стоят сверху вне порядка).
+    """
+    since, full_at = _ts(prev.get("at")), _ts(prev.get("full_at"))
+    if since and full_at and time.time() - full_at < FULL_EVERY:
+        quick = await client.get_dialogs(limit=QUICK_DIALOGS)
+        rest = [d for d in quick if not getattr(d, "pinned", False)]
+        if len(quick) < QUICK_DIALOGS or (rest and rest[-1].date.timestamp() < since - CLOCK_MARGIN):
+            return quick, False
+        say(f"с прошлой проверки сменилось больше {QUICK_DIALOGS} диалогов — смотрю все")
+    return await client.get_dialogs(limit=DIALOGS), True
 
 VERDICT_SYS = (
     "Риелтор из Екатеринбурга написал человеку первым: предложил помощь с покупкой "
@@ -314,7 +354,7 @@ async def main():
     replied = []
     talks, talk_reads, talks_new = load_talks(acc["id"]), 0, False
     try:
-        dialogs = await client.get_dialogs(limit=DIALOGS)
+        dialogs, full = await fetch_dialogs(client, load_runs().get(acc["id"]) or {})
         answered = 0
         for d in dialogs:
             if not d.is_user or d.entity.bot:
@@ -349,9 +389,10 @@ async def main():
 
         if talks_new:
             save_talks(acc["id"], talks)
-        mark_run(acc["id"], len(dialogs), answered, len(replied))
+        mark_run(acc["id"], len(dialogs), answered, len(replied), full)
         await backfill_texts(client, acc["id"], dialogs, by_key, by_id)
-        say(f"проверил ответы: диалогов {len(dialogs)}, ответили из базы {answered}, новых {len(replied)}")
+        say(f"проверил ответы: диалогов {len(dialogs)}{'' if full else ' (верхние, быстрая проверка)'}, "
+            f"ответили из базы {answered}, новых {len(replied)}")
         say(f"ответили и ещё не разобраны: {len(replied)}")
         if not replied:
             tglib.state(done=0, left=0)

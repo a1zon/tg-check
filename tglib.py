@@ -290,6 +290,13 @@ def make_client(acc, **kw):
             f"или, если он уже входил в браузере: "
             f"python import-account.py --account {acc['id']} --from-profile")
     opts = device_for(acc)
+    # Опыт на трафик: задачи панели короткие и событий Telegram не ждут (ответы
+    # SpamBot и людей читаются запросом), поэтому обновления, которые Telegram
+    # шлёт подключённому клиенту, им не нужны. По умолчанию ВЫКЛЮЧЕНО — включать
+    # флагом TG_NO_UPDATES=1 и сначала мерить на тестовом профиле: как это
+    # выглядит для антиспама Telegram, заранее неизвестно.
+    if os.environ.get("TG_NO_UPDATES") == "1":
+        opts["receive_updates"] = False
     opts.update(kw)
     return TelegramClient(str(path.with_suffix("")), API_ID, API_HASH,
                           proxy=parse_proxy(acc.get("proxy")),

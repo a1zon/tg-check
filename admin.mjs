@@ -131,14 +131,27 @@ const results = makeResults({ readRaw, tz: WORK_TZ, replyOf: (k) => events.reply
  * рассылки: кто уже писал людям — остаётся в рассылке, кто не писал ни разу —
  * только прогрев. Иначе свежие аккаунты молча попали бы в рассылку.
  */
-let wroteCache = { at: 0, ids: new Set() };
+let wroteCache = { at: 0, ids: new Set(), last: new Map() };
+function wroteRefresh() {
+  if (Date.now() - wroteCache.at <= 60_000) return;
+  const rows = [...readRaw('drafts.csv'), ...readRaw(path.join('chats', 'drafts.csv'))]
+    .filter((r) => r.sent === 'true' || r.ok === 'true');
+  const last = new Map();
+  for (const r of rows) {
+    const t = Date.parse(r.at) || 0;
+    if (t > (last.get(r.account) || 0)) last.set(r.account, t);
+  }
+  wroteCache = { at: Date.now(), ids: new Set(rows.map((r) => r.account)), last };
+}
 /** Кто из аккаунтов хоть раз писал людям (оба набора). Кэш на минуту: зовётся каждый тик. */
 function wroteAny() {
-  if (Date.now() - wroteCache.at > 60_000) {
-    wroteCache = { at: Date.now(), ids: new Set([...readRaw('drafts.csv'), ...readRaw(path.join('chats', 'drafts.csv'))]
-      .filter((r) => r.sent === 'true' || r.ok === 'true').map((r) => r.account)) };
-  }
+  wroteRefresh();
   return wroteCache.ids;
+}
+/** Когда аккаунт последний раз написал человеку (мс), 0 — ни разу. */
+function lastWroteAt(id) {
+  wroteRefresh();
+  return wroteCache.last.get(id) || 0;
 }
 for (const a of accounts.list()) {
   if (!a.role) accounts.setField(a.id, { role: wroteAny().has(a.id) ? 'send' : 'warm' });
@@ -1023,9 +1036,15 @@ const REST_AFTER_LIMIT = 3 * 3600 * 1000;   // после ограничения
 // сняли ограничение SpamBot — ещё столько без рассылки (догрев), потом письма
 // с 2 в сутки; то же число — REST_AFTER_RESTRICTION в tglib.py
 const REST_AFTER_RESTRICTION = 3 * 86400 * 1000;
-// как часто аккаунт смотрит ответы: раз в час. Чаще — при работе по очереди
-// через один прокси проверки съедали почти всё время, писать было некогда
-const FUNNEL_EVERY = 30 * 60_000;   // как часто аккаунт смотрит, ответили ли ему
+// Как часто аккаунт смотрит ответы. Раньше — раз в 30 минут, и это была
+// половина всего трафика прокси: каждый заход тянул 200 диалогов. Лиды
+// разбирают руками 2–4 раза в день, поэтому хватает раза в два часа днём;
+// надо срочно — кнопка «Проверить ответы сейчас» (/api/funnel/now).
+// Кто неделю никому не писал — раз в сутки: ответы на старые письма редки.
+const FUNNEL_EVERY = 2 * 3600_000;
+const FUNNEL_IDLE_EVERY = 24 * 3600_000;
+const FUNNEL_IDLE_AFTER = 7 * 864e5;
+const FUNNEL_FROM = 8, FUNNEL_TO = 23;     // часы по Екб, когда проверяем сами
 const MAX_TRIES = 3;             // столько же, сколько в check-batch.py и draft-messages.py
 
 const auto = {
@@ -1182,8 +1201,14 @@ function funnelJob(id) {
   // Проверку ответов делаем ВСЕГДА, даже без второго шага — иначе на наборе
   // без воронки не копилась бы статистика ответов и нечем было бы работать
   // руками. Второе письмо при этом не уходит (см. send при запуске задачи).
-  if (o.mode === 'check' || !isWorkTime()) return null;
+  if (o.mode === 'check') return null;
   const s = auto.per.get(id);
+  // «проверить сейчас» из панели — без окна по часам; сами — только днём
+  if (!s.funnelNow) {
+    const h = workHour();
+    if (!isWorkTime() || h < FUNNEL_FROM || h >= FUNNEL_TO) return null;
+  }
+  const every = Date.now() - lastWroteAt(id) > FUNNEL_IDLE_AFTER ? FUNNEL_IDLE_EVERY : FUNNEL_EVERY;
   // первый раз после запуска панели — от последней настоящей проверки этого
   // аккаунта (её пишет followup.py в followup-runs.json). Раньше бралось
   // случайное время до часа, и частые перезапуски откладывали проверку ответов
@@ -1192,10 +1217,11 @@ function funnelJob(id) {
   if (!s.funnelAt) {
     let last = 0;
     try { last = Date.parse(JSON.parse(fs.readFileSync(path.join(DIR, 'followup-runs.json'), 'utf8'))?.[id]?.at) || 0; } catch {}
-    s.funnelAt = Math.max(last + FUNNEL_EVERY, Date.now() + Math.random() * 5 * 60_000);
+    s.funnelAt = Math.max(last + every, Date.now() + Math.random() * 5 * 60_000);
   }
   if (Date.now() < s.funnelAt) return null;
-  s.funnelAt = Date.now() + FUNNEL_EVERY;
+  s.funnelAt = Date.now() + every;
+  s.funnelNow = false;
   return { name: 'follow', limit: 2, delay: o.write.delay, delayMax: o.write.delayMax };
 }
 
@@ -3554,6 +3580,25 @@ async function handler(req, res) {
         hasText: fs.existsSync(file) && !!fs.readFileSync(file, 'utf8').trim(),
         on: auto.funnel,
       });
+    }
+
+    // «Проверить ответы сейчас»: сами проверяем раз в 2 часа днём, а когда
+    // человек сел разбирать лидов — всем, кто писал людям, ставим проверку
+    // немедленно. Идут по очереди тем же прогоном, через свои прокси.
+    if (u.pathname === '/api/funnel/now' && req.method === 'POST') {
+      if (!auto.on) {
+        return json(res, 200, { ok: false, reason: 'прогон рассылки не запущен — ответы смотрит он. ' +
+          'Без прогона: «Проверить, кто ответил» на вкладке рассылки' });
+      }
+      let n = 0;
+      for (const [id, s] of auto.per) {
+        if (!wroteAny().has(id) || accounts.fullRestLeft(accounts.list().find((a) => a.id === id))) continue;
+        s.funnelAt = 1;            // в прошлом: возьмётся первым же тиком
+        s.funnelNow = true;        // и без окна по часам
+        n++;
+      }
+      push(`\n🔎 проверка ответов сейчас: ${n} акк. по очереди`);
+      return json(res, 200, { ok: true, n });
     }
 
     if (u.pathname === '/api/found') {

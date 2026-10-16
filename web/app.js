@@ -2457,6 +2457,14 @@ async function traffic() {
     : '<div class="hint">появится со следующим снимком Asocks (раз в 30 мин)</div>';
   set('#tr-paid', w.total ? `Через платный прокси за 7 дней — ${fmtBytes(w.paid)} из ${fmtBytes(w.total)}; ` +
     'туннель на сервере бесплатный. Telegram на ПК из комплекта сюда не попадает, но тоже идёт через прокси.' : '');
+  // сколько насчитал Asocks сверх того, что измерили сами задачи: проверки
+  // прокси сторожем, рукопожатия, задачи других профилей — видно, куда уходит
+  const dMeasured = (((t.tasks || {}).day || {}).paid || 0) + (((t.main || {}).day || {}).paid || 0);
+  set('#tr-overhead', a.on && !a.empty && a.day && a.day.bytes > 0
+    ? `За сутки Asocks насчитал ${fmtBytes(a.day.bytes)}, задачи ${t.main ? 'прода и этого профиля' : 'этого профиля'} ` +
+      `измерили ${fmtBytes(dMeasured)} (${Math.round(100 * Math.min(1, dMeasured / a.day.bytes))}%). ` +
+      'Остальное — проверки прокси, рукопожатия соединений и задачи других профилей.'
+    : '');
 }
 // РАЗГОН РАССЫЛКИ по дню рассылки (не по возрасту прогрева): день 0 = первый день
 // реальных сообщений. Аккаунт, который ещё не начинал слать, стартует с 2/день.
@@ -2526,3 +2534,12 @@ setInterval(paintDash, 1200); paintDash();
 
 /* ═══════════ СКАЧИВАНИЕ СПИСКОВ (по запросу, не вживую) ═══════════ */
 $('#b-found-csv')?.addEventListener('click', () => { location.href = '/api/found/csv'; });
+// проверка ответов сейчас — сами аккаунты смотрят раз в 2 часа днём
+$('#b-funnel-now')?.addEventListener('click', async () => {
+  const msg = $('#funnel-now-msg');
+  try {
+    const r = await post('/api/funnel/now');
+    msg.textContent = r.ok ? `поставил в очередь: ${r.n} акк., результаты появятся через несколько минут`
+                           : (r.reason || 'не вышло');
+  } catch (e) { msg.textContent = e.message; }
+});

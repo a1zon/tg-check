@@ -2,7 +2,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Telegram — панель</title>
-<link rel="stylesheet" href="/app.css?v=r91">
+<link rel="stylesheet" href="/app.css?v=r92">
 <div class="app">
 
   <!-- ЛЕВАЯ ПАНЕЛЬ РЕЖИМОВ -->
@@ -86,6 +86,7 @@
           <div><div class="trf-h">Этот профиль: кто больше всех, 7 дней</div><div id="tr-accs"></div></div>
         </div>
         <p class="hint" id="tr-paid"></p>
+        <p class="hint" id="tr-overhead"></p>
       </div>
     </section>
 
@@ -530,6 +531,8 @@
           <option value="chats">по чатам — люди из разбора чатов</option>
         </select>
         <span class="hint">всё время · дни — по Екатеринбургу</span>
+        <button class="ghost" id="b-funnel-now" title="Сами аккаунты смотрят ответы раз в 2 часа днём. Кнопка — проверить всех, кто писал людям, прямо сейчас (по очереди)">Проверить ответы сейчас</button>
+        <span class="hint" id="funnel-now-msg"></span>
       </div>
       <div class="tiles">
         <div class="tile"><span class="tk">Проверено номеров</span><b id="rs-checked">—</b><i id="rs-checked-sub">—</i></div>
@@ -655,4 +658,4 @@
 
   </main>
 </div>
-<script src="/app.js?v=r91"></script>
+<script src="/app.js?v=r92"></script>

@@ -17,11 +17,16 @@
  */
 import { spawn } from 'node:child_process';
 
-const EVERY_OK = 60_000;       // прокси жив — проверяем раз в минуту
+// Трафик: прокси платный за гигабайт. Проверка раз в минуту по https стоила
+// ~9 КБ (рукопожатие TLS) × 1440 в сутки ≈ 13 МБ на КАЖДЫЙ прокси — четверть
+// всего счёта прода, а при своём прокси у каждого аккаунта вышла бы главной
+// статьёй. Теперь — простой http-запрос (~0.8 КБ) и раз в 10 минут: живость
+// между проверками ловит сама работа — упавшая задача тут же зовёт check().
+const EVERY_OK = 10 * 60_000;  // прокси жив — проверяем раз в 10 минут
 const EVERY_DOWN = 30_000;     // лежит — чаще, чтобы не прозевать подъём
 const DOWN_AFTER = 2;          // столько неудач подряд — значит лежит, а не моргнул
 const REVIVE_EVERY = 5 * 60_000;
-const PROBE_URL = 'https://api.ipify.org';
+const PROBE_URL = 'http://api.ipify.org';
 const PROBE_TIMEOUT = 15;
 
 /** Что значит ответ шлюза — словами, которые помогают понять, куда смотреть. */
@@ -51,7 +56,9 @@ export function makeProxyGuard({ parseProxy, label, proxies, rotateLink, rotateI
     const cred = p.username
       ? `${encodeURIComponent(p.username)}:${encodeURIComponent(p.password || '')}@` : '';
     const url = p.server.replace('://', `://${cred}`);
-    const env = { ...process.env, https_proxy: url, HTTPS_PROXY: url, ALL_PROXY: url };
+    // curl берёт для http:// только строчную http_proxy (заглавную — нет, из
+    // соображений безопасности); ALL_PROXY — запасной путь для socks
+    const env = { ...process.env, http_proxy: url, https_proxy: url, HTTPS_PROXY: url, ALL_PROXY: url };
     return new Promise((done) => {
       const c = spawn('curl', ['-s', '--max-time', String(PROBE_TIMEOUT),
         '-w', '\n%{http_code} %{http_connect}', PROBE_URL], { env });
@@ -63,7 +70,8 @@ export function makeProxyGuard({ parseProxy, label, proxies, rotateLink, rotateI
         const [code, connect] = (lines.pop() || '').split(' ');
         const ip = lines.join('').trim();
         if (exit === 0 && code === '200' && /^[\d.:a-f]+$/i.test(ip)) return done({ ok: true, ip });
-        done({ ok: false, reason: why(connect, exit) });
+        // по http ошибку шлюза (502/407) прокси отдаёт кодом ответа, а не CONNECT
+        done({ ok: false, reason: why(connect && connect !== '000' ? connect : code, exit) });
       });
     });
   }

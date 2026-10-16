@@ -36,11 +36,14 @@
 ~10 000 участников. Больше не даст никакой клиент — это не наш предел.
 """
 import asyncio
+import atexit
+import contextlib
 import csv
 import json
 import random
 import re
 
+import claims
 import tglib
 from tglib import say
 
@@ -108,6 +111,39 @@ def cap_of(*vals):
     return min(live) if live else 0
 
 
+@contextlib.contextmanager
+def locked(path):
+    """
+    Прочитать-дополнить-записать файл под замком. Разбор идёт в несколько
+    аккаунтов сразу: без замка двое читают один и тот же members.csv, а
+    записывает каждый свой вариант — и люди, добавленные первым, пропадают.
+    """
+    try:
+        import fcntl
+    except ImportError:          # Windows: там разбор идёт одним аккаунтом
+        yield
+        return
+    with open(str(path) + ".lock", "a") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+def share_key(item, kind):
+    """Имя чата в общей броне — одинаковое у всех аккаунтов этого профиля."""
+    if kind == "folder":
+        k = getattr(item, "channel_id", None) or getattr(item, "chat_id", None) or item
+    else:
+        try:
+            ref, invite = chat_ref(item)
+            k = invite or str(ref).lower()
+        except SystemExit:
+            k = str(item).lower()
+    return f"chat:{tglib.DIR}:{k}"
+
+
 def load_done():
     """Разобранные чаты: id -> когда и сколько взяли."""
     try:
@@ -118,9 +154,12 @@ def load_done():
 
 
 def _save_chat(chat_id, rec):
-    data = load_done()
-    data[str(chat_id)] = rec
-    DONE.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", "utf-8")
+    with locked(DONE):
+        data = load_done()
+        data[str(chat_id)] = rec
+        tmp = DONE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", "utf-8")
+        tmp.replace(DONE)
 
 
 def mark_done(chat_id, title, n):
@@ -143,6 +182,11 @@ def save_members(rows):
     панели и открыть в Excel. Файл переписываем целиком, чтобы люди из разных
     чатов не задваивались: ключ у человека один.
     """
+    with locked(tglib.MEMBERS):
+        return _save_members(rows)
+
+
+def _save_members(rows):
     old = {r.get("key"): r for r in tglib.read_csv(tglib.MEMBERS) if r.get("key")}
     fresh = 0
     for r in rows:
@@ -365,6 +409,11 @@ async def main():
     join = tglib.flag("join")
     again = tglib.flag("again")
     only_user = tglib.flag("only-username")
+    # «i/N» — разбор идёт в N аккаунтов сразу, этот — i-й (панель, «все свободные»)
+    part, parts = 0, 1
+    share = str(tglib.arg("share", "") or "").strip()
+    if re.fullmatch(r"\d+/\d+", share):
+        part, parts = (int(x) for x in share.split("/"))
 
     if not folder and not chat and not list_file:
         raise SystemExit("укажи, откуда брать людей: --chat <ссылка>, --list <файл> или --folder <папка>")
@@ -382,6 +431,8 @@ async def main():
     total_added = total_people = total_solo = 0
     chats_done = 0
     left_chats = 0
+    why = ""           # почему остановился раньше конца списка — словами для ленты
+    others = 0          # чаты, которые взяли другие аккаунты
     wait = 0            # сколько Telegram просит отдыхать, 0 — не просил
     try:
         # ---- собираем источники в единую очередь ----
@@ -399,6 +450,16 @@ async def main():
             items = [chat]
             kind = "links"
 
+        if parts > 1 and items:
+            # Несколько аккаунтов делят один список: каждый начинает со своего
+            # места и берёт чат, только если его ещё не взял другой (бронь в
+            # claims.json; снимаем на выходе). Так чаты расходятся пачками сами,
+            # и никто не ждёт: освободился — взял следующий свободный.
+            k = len(items) * part // parts
+            items = items[k:] + items[:k]
+            atexit.register(lambda: claims.release_all(acc["id"], "parse"))
+            say(f"разбор параллельно, аккаунтов: {parts} — этот начинает с {k + 1}-го источника "
+                "и берёт те, что ещё никто не взял")
         done = {} if again else load_done()
         say(f"источников: {len(items)}"
             + (f", уже разобрано раньше {sum(1 for _ in done)}" if done else ""))
@@ -408,8 +469,14 @@ async def main():
         for i, item in enumerate(items):
             if limit and total_added >= limit:      # считаем НОВЫХ, а не сырой сбор с дублями
                 left_chats = len(items) - i
-                say(f"\nпредел за заход выбран — осталось источников: {left_chats}")
+                why = f"упёрся в предел «человек за заход» — {limit}"
+                say(f"\nпредел за заход выбран ({limit} человек) — осталось источников: {left_chats}")
                 break
+
+            # чужой чат (его уже взял другой аккаунт) — пропускаем молча
+            if parts > 1 and not claims.take(acc["id"], "parse", [share_key(item, kind)], 1):
+                others += 1
+                continue
 
             # получить сущность чата: из пира (папка) или из ссылки (список)
             try:
@@ -429,7 +496,8 @@ async def main():
                 say(f"\n▸ {item} — пропускаю: {str(e).splitlines()[0][:100] or type(e).__name__}")
                 continue
 
-            entry = done.get(str(entity.id))
+            # в несколько аккаунтов чат мог только что дочитать сосед — смотрим свежий файл
+            entry = (load_done() if parts > 1 and not again else done).get(str(entity.id))
             if entry and entry.get("done", True):     # старые записи без флага = дочитаны
                 say(f"\n▸ {tglib.cell(getattr(entity, 'title', None) or entity.id)} — уже разобран раньше, "
                     "пропускаю (галочка «Заново по разобранным» — пройти снова)")
@@ -475,9 +543,17 @@ async def main():
 
     say(f"\nитого: чатов разобрано {chats_done} · участников {total_people} · "
         f"в очередь на рассылку добавлено {total_added}")
-    if left_chats:
-        say(f"осталось чатов: {left_chats} — запусти разбор ещё раз, "
-            "панель продолжит с неразобранных")
+    if others:
+        say(f"чатов, которые взяли другие аккаунты: {others}")
+    if wait and not why:
+        why = f"Telegram попросил паузу {max(1, wait // 60)} мин"
+    if left_chats and parts > 1:
+        # число тут ничего не скажет: часть «оставшихся» уже разбирают соседи
+        say(f"разбор остановлен ({why or 'не дошёл до конца'}) — остальные чаты разберут "
+            "другие аккаунты, что не успеют — следующий запуск")
+    elif left_chats:
+        say(f"осталось чатов: {left_chats} ({why or 'не дошёл до конца'}) — запусти разбор "
+            "ещё раз, панель продолжит с неразобранных")
     if total_added:
         say("им можно писать сразу — проверять номера тут нечего")
     if total_solo:

@@ -1817,19 +1817,24 @@ const members = async () => {
 };
 
 /**
- * Разбор делает ОДИН аккаунт: делить тут нечего, а два подряд соберут одних
- * и тех же людей и зря потратят лимиты Telegram.
+ * Один чат по ссылке разбирает ОДИН аккаунт. Папку и список панель делит
+ * между всеми свободными аккаунтами (по одному на прокси) — см. startParseAll.
  */
 const parser = () => accs.find(a => (work ? work.has(a.id) : false) && accReady(a) && !a.busy)
                   || accs.find(a => accReady(a) && !a.busy);
 
 const startParse = async (opts) => {
-  const who = parser();
-  if (!who) { alert('Отметь хотя бы один вошедший и свободный аккаунт'); return; }
+  // папка и список — всеми свободными аккаунтами сразу, чаты делятся между ними
+  const all = !!(opts.folder || opts.list);
+  const who = all ? null : parser();
+  if (!all && !who) { alert('Отметь хотя бы один вошедший и свободный аккаунт'); return; }
   const r = await post('/api/start',
-    {name: 'parse', account: who.id, limit: $('#mlimit').value,
+    {name: 'parse', ...(all ? {all: true} : {account: who.id}), limit: $('#mlimit').value,
      onlyUser: $('#monly').checked, ...opts});
   if (!r.ok && r.reason) alert(r.reason);
+  else if (all && r.started > 1 && $('#list-note')) {
+    $('#list-note').textContent = `разбор пошёл параллельно — аккаунтов: ${r.started} (${(r.names || []).join(', ')})`;
+  }
   state();
 };
 
@@ -1843,7 +1848,7 @@ $('#b-list').onclick = () => {
   if (!list) { alert('Вставь ссылки на чаты — по одной в строке'); return; }
   const n = list.split('\n').filter(x => x.trim()).length;
   if ($('#mjoin').checked &&
-      !confirm(`Аккаунт вступит в закрытые чаты по приглашениям, если ещё не в них.\n\nСписок: ${n} ссылок. Продолжить?`)) return;
+      !confirm(`Свободные аккаунты (по одному на прокси) поделят список и вступят в закрытые чаты по приглашениям, если ещё не в них.\n\nСписок: ${n} ссылок. Продолжить?`)) return;
   $('#list-note').textContent = `${n} ссылок ушло в разбор — ход по каждому чату в «Что происходит» внизу`;
   startParse({list, join: $('#mjoin').checked, again: $('#magain').checked});
 };

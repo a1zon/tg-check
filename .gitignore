@@ -68,6 +68,10 @@ followup-runs.json
 followup-texts.json
 sent-ids.csv
 talks/
+*.csv.lock
+chats.json.lock
+*.json.tmp
+*.csv.tmp
 base-set.json
 leads.json
 leads-log.csv

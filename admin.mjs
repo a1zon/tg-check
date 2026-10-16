@@ -550,6 +550,8 @@ function start(name, opts, onDone) {
     if (join) args.push('--join');
     if (again) args.push('--again');
     if (onlyUser) args.push('--only-username');
+    // разбор в несколько аккаунтов: этот — i-й из N, чаты делят бронью (startParseAll)
+    if (opts.shards > 1) args.push('--share', `${opts.shard}/${opts.shards}`);
   }
   if (t.phone) args.push('--phone', String(phone).replace(/[\s()-]/g, ''));
   if (t.voice && voice) args.push('--voice');
@@ -2236,6 +2238,53 @@ function autoView() {
  * Занятый чем-то другим или невошедший аккаунт просто пропускаем и говорим,
  * кого именно.
  */
+/**
+ * Разбор чатов всеми свободными аккаунтами сразу. Чаты делятся между ними:
+ * каждый идёт по списку со своего места и берёт следующий чат, который ещё
+ * никто не взял (parse-chat.py --share, бронь в claims.json). Предел «человек
+ * за заход» делится поровну.
+ *
+ * На один прокси — не больше одного аккаунта: два аккаунта с одного адреса
+ * сразу — ровно то, от чего бережёт вся панель. Прокси общий — пойдёт один,
+ * как раньше; у каждого свой — все свободные разом.
+ */
+function parseCrew() {
+  const busyProxy = new Set([...running.keys()].map((id) => proxyOf(id) || 'direct'));
+  const byProxy = new Map();
+  for (const a of accounts.list()) {
+    if (!accounts.hasSession(a) || !accounts.isAuthed(a)) continue;
+    if (running.has(a.id) || accessBusy.has(a.id)) continue;
+    if (accounts.fullRestLeft(a)) continue;                       // полный отдых: к Telegram ни ногой
+    if (a.spamOk === false && a.spamKind === 'frozen') continue;  // замороженный ничего не прочтёт
+    if (warm(a).resting) continue;                                // первые сутки аккаунт не трогаем
+    const key = a.proxy || 'direct';
+    if (busyProxy.has(key) || proxyGuard.down(a.proxy) || byProxy.has(key)) continue;
+    byProxy.set(key, a);
+  }
+  return [...byProxy.values()];
+}
+
+function startParseAll(opts) {
+  const crew = parseCrew();
+  if (!crew.length) {
+    return { ok: false, reason: 'свободных аккаунтов нет: все заняты, на отдыхе или их прокси сейчас работает' };
+  }
+  const n = crew.length;
+  const limit = Number(opts.limit) > 0 ? Math.ceil(Number(opts.limit) / n) : 0;
+  let started = 0;
+  const skipped = [];
+  crew.forEach((a, i) => {
+    const r = start('parse', { ...opts, account: a.id, limit, shard: i, shards: n });
+    if (r.ok) started++; else skipped.push(`${a.title}: ${r.reason}`);
+  });
+  if (!started) return { ok: false, reason: skipped[0] || 'разбор не запустился' };
+  if (n > 1) {
+    events.note('🔎', `разбор чатов параллельно — аккаунтов: ${started}, каждый со своего прокси` +
+      (limit ? ` · по ${limit} человек на аккаунт` : ''));
+  }
+  return { ok: true, started, skipped, names: crew.map((a) => a.name || a.title) };
+}
+
 function startMany(name, ids, opts) {
   let started = 0;
   const skipped = [];
@@ -2532,7 +2581,7 @@ async function handler(req, res) {
 
     if (u.pathname === '/api/accounts') {
       const drafted = readAll('drafts.csv');
-      const held = claims.active();
+      const held = claims.active().filter((h) => h.task !== 'parse');   // брони чатов разбора — не номера
       // числа по каждому аккаунту — одним проходом по истории. Раньше тут
       // было три перебора всей истории НА КАЖДЫЙ аккаунт, а запрос этот
       // панель шлёт каждые две секунды
@@ -3365,7 +3414,7 @@ async function handler(req, res) {
         bySet: Object.fromEntries(SETS.map((s) =>
           [s, { base: readCsv('numbers.csv', s).length, ...countsOf[s]() }])),
         wiping: running.has('_wipe'),
-        claims: claims.active(),
+        claims: claims.active().filter((h) => h.task !== 'parse'),
         proxy: proxyGuard.summary(),
         auto: autoView(),
         warmup: warmup.on,
@@ -3659,9 +3708,12 @@ async function handler(req, res) {
 
     if (u.pathname === '/api/start' && req.method === 'POST') {
       const { name, account, accounts: many, limit, delay, delayMax, hold, holdMax,
-              send, voice, warm: w, chat, folder, again, onlyUser, join, phone, list, days } = await body(req);
+              send, voice, warm: w, chat, folder, again, onlyUser, join, phone, list, days,
+              all } = await body(req);
       const opts = { limit, delay, delayMax, hold, holdMax, send, voice, warm: w,
                      chat, folder, again, onlyUser, join, phone, list, days };
+      // разбор папки или списка — всеми свободными аккаунтами сразу (startParseAll)
+      if (name === 'parse' && all && (folder || list)) return json(res, 200, startParseAll(opts));
       // список аккаунтов -> запускаем задачу на каждом СРАЗУ: они делят базу
       // бронями и идут параллельно. Одиночный account — как раньше.
       if (Array.isArray(many) && many.length) return json(res, 200, startMany(name, many, opts));

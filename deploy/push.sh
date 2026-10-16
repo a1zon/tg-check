@@ -78,7 +78,7 @@ tar --no-xattrs --version >/dev/null 2>&1 && TAR_EXTRA+=(--no-xattrs)
 # заведёт из него сама, если его ещё нет.
 # ─────────────────────────────────────────────────────────────────────────────
 EXCLUDES=(
-  './venv' './venv-tg' './node_modules' './.git' './__pycache__' '*.pyc'
+  './venv' './venv-tg' './node_modules' './.git' './.claude' './__pycache__' '*.pyc'
   './sessions' './accounts' './desktop' './qr' './uploads' './tg-profile'
   './accounts.json' './auth.json' './claims.json' './claims.lock' './cloud.json'
   './numbers.csv' './results.csv' './drafts.csv' './members.csv'

@@ -162,6 +162,19 @@ async def main():
     hold_max = float(tglib.arg("hold-max", max(hold, HOLD_MAX)))
     send = tglib.flag("send")
     voice = tglib.flag("voice")
+    # панель ставит, когда аккаунты пишут параллельно с одного IP: тогда письма
+    # разных аккаунтов разводим по времени (tglib.wait_send_gap)
+    send_gap = tglib.flag("send-gap")
+
+    # отдых после заморозки — людям не пишем вовсе, даже если роль в панели
+    # переключили обратно в рассылку. Ни подключения, ни брони адресатов
+    # (не `hold` — это пауза «завёл контакт → написал» из --hold выше)
+    rest = tglib.send_hold_left(acc)
+    if rest > 0:
+        say(f"«{acc['title']}» на отдыхе после заморозки ещё "
+            f"{rest // 3600} ч {rest % 3600 // 60} мин — людям не пишет")
+        tglib.state(done=0, left=0, stop="hold", cooldown=rest, note="отдых после заморозки")
+        return
 
     from telethon import functions
     from telethon.tl.types import InputPhoneContact, DocumentAttributeAudio
@@ -177,6 +190,8 @@ async def main():
     mode = "ГОЛОСОВОЕ" if voice else "РЕЖИМ ОТПРАВКИ" if send else "только черновики"
     say(f"аккаунт: {acc['title']}  |  {mode}"
         f"  |  {tglib.proxy_label(acc.get('proxy'))}  |  Telethon")
+    if send_gap and (send or voice):
+        say("параллель на общем IP — письма разных аккаунтов развожу по времени")
 
     moved = tglib.migrate_drafts_log()
     if moved:
@@ -245,7 +260,7 @@ async def main():
     # Спрашиваем @SpamBot ДО первого сообщения. Ограничение видно только так:
     # Telegram не отвечает ошибкой на отправку, он просто перестаёт доносить
     # сообщения — аккаунт пишет в пустоту, а панель считает это успехом.
-    ok, note = await tglib.spam_check(client, acc)
+    ok, note = await tglib.spam_check(client, acc, force=True)
     if ok is None:
         say(f"@SpamBot не ответил ({note}) — иду по прошлому вердикту")
     elif not ok:
@@ -257,6 +272,16 @@ async def main():
         return
     else:
         say(f"@SpamBot: {note}")
+        # бот только что сказал «свободен» после ограничения — spam_check
+        # поставил отдых без рассылки, в этот заход тоже не пишем
+        rest = tglib.send_hold_left(acc)
+        if rest > 0:
+            say(f"ограничение сняли, но сразу писать не иду: ещё {rest // 3600} ч "
+                f"{rest % 3600 // 60} мин без рассылки, потом разгон с 2 писем в день")
+            await tglib.aclose(client)
+            tglib.state(done=0, left=len(queue), stop="hold", cooldown=rest,
+                        note="отдых после ограничения")
+            return
 
     # кого проверка оставила в контактах этого аккаунта и кому ещё не писали
     keep = tglib.kept_waiting(acc["id"])
@@ -368,6 +393,15 @@ async def main():
                         f"жду {wait:.0f} с перед сообщением")
                     await asyncio.sleep(wait)
 
+                if send_gap and (send or voice):
+                    # параллель на общем IP: не писать впритык к соседнему
+                    # аккаунту. Разнос — четверть-половина своей паузы
+                    waited = await tglib.wait_send_gap(
+                        acc, max(30.0, delay * 0.25), max(45.0, delay * 0.5))
+                    if waited >= 1:
+                        say(f"[{i + 1}/{len(todo)}] {phone} — с этого IP только что "
+                            f"писал другой аккаунт, подождал {waited:.0f} с")
+
                 if voice:
                     # голосовая заметка — «кружок» с микрофоном, а не файл-аудио:
                     # это даёт voice=True в атрибутах; длительность берём из панели,
@@ -424,6 +458,19 @@ async def main():
                 break
             except Exception as e:
                 msg = str(e).splitlines()[0][:120] if str(e) else type(e).__name__
+                # Заморозка (блокировка по жалобам/ToS) всплывает как RPC-ошибка с
+                # FROZEN_* — это не временный сбой, дальше писать нечем. Снимаем акк
+                # сразу: помечаем frozen и уходим в карантин, чтобы панель не слала
+                # в пустоту и показала заморозку, а не ждала следующего опроса SpamBot.
+                if tglib.is_frozen_error(e):
+                    say("\nстоп: аккаунт заморожен Telegram (блокировка по жалобам/ToS).")
+                    say("  Писать с него нельзя — нужен разбан через @SpamBot/поддержку.")
+                    tglib.set_field(acc["id"], spamKind="frozen", spamOk=False,
+                                    spamUntil="", spamAt=now_iso(),
+                                    spam=tglib.cell("заморожен — блокировка по жалобам (ToS), "
+                                                    "снимается только разбаном через @SpamBot/поддержку"))
+                    stop, cooldown = "quarantine", 0
+                    break
                 say(f"[{i + 1}/{len(todo)}] {phone} — {msg}")
                 fails_row += 1
             finally:

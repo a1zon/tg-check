@@ -112,6 +112,11 @@ export function kitProxy(parsed) {
 
 const LISTEN = 18080;   // локальный порт моста — он виден только этому компьютеру
 
+/** Прокси на самой машине панели (127.x, localhost, ::1) — с чужого компьютера недоступен. */
+export const isLoopbackProxy = (p) =>
+  /^(?:[a-z0-9]+:\/\/)?(?:[^@/]*@)?(?:127(?:\.\d{1,3}){3}|localhost|\[?::1\]?)(?::|\/|$)/i
+    .test(String(p || '').trim());
+
 /**
  * Собирает архив комплекта.
  *
@@ -123,6 +128,11 @@ const LISTEN = 18080;   // локальный порт моста — он ви�
 // чтобы тем же набором можно было собрать и «Пульт» на несколько аккаунтов
 // (каждый ложится в свою подпапку, но файлы те же самые и проверенные).
 export function kitEntries({ id, title, proxy, os, uploadsZip, tdataDir, kitDir, tmpRoot }, root) {
+  // Туннель на самом сервере (socks5://127.0.0.1:…) с компьютера человека не
+  // достать: его 127.0.0.1 — это он сам, мост вёл бы в пустоту, и Telegram не
+  // подключался, пока прокси не выключат руками. Такой прокси в комплект не
+  // пишем — Telegram на ПК идёт своей сетью (или VPN этого компьютера).
+  if (isLoopbackProxy(proxy)) proxy = '';
   const files = [];
   const add = (name, data, exec) => files.push({ name: `${root}/${name}`,
     data: Buffer.isBuffer(data) ? data : Buffer.from(data, 'utf8'), exec: !!exec });

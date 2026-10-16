@@ -52,6 +52,10 @@ FLOOD_MAX = 600           # флуд-паузу дольше этой не пе�
 # которой заход всё равно встанет — только уже не на секунды.
 PAUSE_PER_100 = (2, 3)
 CHAT_PAUSE = 3            # между чатами: пауза заметнее, запросов там много
+# Список участников скрыт настройкой чата — Telegram отдаёт только админов.
+# Тогда берём авторов сообщений: столько последних сообщений просматриваем
+# (100 за запрос, полторы секунды между запросами; ~0.5 КБ трафика на сообщение)
+HISTORY = 3000
 
 DONE = tglib.DIR / "chats.json"    # какие чаты уже разобраны
 
@@ -244,8 +248,8 @@ async def pull(client, entity, limit, only_user=False, start_offset=0):
     Возвращает (люди, пауза): пауза больше нуля — Telegram попросил столько
     подождать, чат не дособран, и столько же отдыхает аккаунт.
     """
-    from telethon.tl.functions.channels import GetParticipantsRequest
-    from telethon.tl.types import Channel, ChannelParticipantsSearch
+    from telethon.tl.functions.channels import GetParticipantsRequest, GetFullChannelRequest
+    from telethon.tl.types import Channel, ChannelParticipantsSearch, User
     from telethon.errors import FloodWaitError
 
     me = await client.get_me()
@@ -266,6 +270,28 @@ async def pull(client, entity, limit, only_user=False, start_offset=0):
                 if limit and len(out) >= limit:
                     return out, 0, 0, False        # обрезали пределом — не дочитан
         return out, 0, 0, True                     # маленькая группа прочитана целиком
+
+    # скрытый список: участники не видны, видны только те, кто пишет в чат
+    hidden = False
+    try:
+        full = await client(GetFullChannelRequest(entity))
+        hidden = bool(getattr(full.full_chat, "participants_hidden", False))
+    except Exception:
+        pass
+    if hidden:
+        history = int(tglib.arg("history", 0) or 0) or HISTORY
+        say(f"  участники скрыты — читаю последние {history} сообщений, беру авторов…")
+        seen_msgs = 0
+        async for m in client.iter_messages(entity, limit=history, wait_time=1.5):
+            seen_msgs += 1
+            u = m.sender
+            if isinstance(u, User) and keep(u):
+                out.append(u)
+                if limit and len(out) >= limit:
+                    break
+        say(f"  участники скрыты — взял авторов сообщений: {len(out)} "
+            f"(просмотрено {seen_msgs} сообщений)")
+        return out, 0, 0, True
 
     offset = int(start_offset or 0)
     finished = False
@@ -405,6 +431,8 @@ async def main():
 
             entry = done.get(str(entity.id))
             if entry and entry.get("done", True):     # старые записи без флага = дочитаны
+                say(f"\n▸ {tglib.cell(getattr(entity, 'title', None) or entity.id)} — уже разобран раньше, "
+                    "пропускаю (галочка «Заново по разобранным» — пройти снова)")
                 continue
             start_offset = int(entry.get("offset", 0)) if entry else 0
 

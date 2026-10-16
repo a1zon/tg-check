@@ -2,7 +2,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Telegram — панель</title>
-<link rel="stylesheet" href="/app.css?v=r66">
+<link rel="stylesheet" href="/app.css?v=r85">
 <div class="app">
 
   <!-- ЛЕВАЯ ПАНЕЛЬ РЕЖИМОВ -->
@@ -18,8 +18,6 @@
       <a class="nav-i" data-view="chatsend"><span class="ni step">4</span> Рассылка по чатам</a>
       <a class="nav-i" data-view="results"><span class="ni">▦</span> Результаты</a>
       <div class="nav-sep">Отдельно</div>
-      <a class="nav-i" data-view="leads"><span class="ni">🔥</span> Горячие лиды</a>
-      <a class="nav-i" data-view="egrul"><span class="ni">🏛</span> ЕГРЮЛ</a>
       <a class="nav-i" data-view="tools"><span class="ni">⚙</span> Обслуживание</a>
     </nav>
     <div class="side-foot">
@@ -42,22 +40,15 @@
         <div class="tile"><span class="tk">Аккаунты</span><b id="ov-accs">—</b><i id="ov-accs-sub">вошло —</i></div>
         <div class="tile"><span class="tk">На прогреве</span><b id="ov-warm">—</b><i id="ov-warm-sub">готовы к работе —</i></div>
         <div class="tile"><span class="tk">Сообщений сегодня</span><b id="ov-today">—</b><i id="ov-today-sub">потолок дня —</i></div>
-        <div class="tile"><span class="tk">Горячие лиды</span><b id="ov-hot">—</b><i id="ov-hot-sub">автоскан —</i></div>
       </div>
 
       <div class="card ov-flow">
         <div class="cardtitle">С чего начать</div>
         <ol class="flow">
-          <li><b>Аккаунты</b> — добавь сессии, задай прокси, аватар и описание.
-            <button class="linkbtn" data-goto="accounts">открыть →</button></li>
-          <li><b>Прогрев</b> — включи и оставь: свежие аккаунты сутки отлёживаются,
-            потом сами наращивают объём. Работа начинается только после прогрева.
-            <button class="linkbtn" data-goto="warmup">открыть →</button></li>
-          <li><b>Рассылка</b> — загрузи базу, напиши текст, запусти. Панель проверит
-            и напишет сама. <button class="linkbtn" data-goto="send">открыть →</button></li>
+          <li><b>Аккаунты</b> — сессии и прокси. <button class="linkbtn" data-goto="accounts">открыть →</button></li>
+          <li><b>Прогрев</b> — включить и оставить. <button class="linkbtn" data-goto="warmup">открыть →</button></li>
+          <li><b>Рассылка</b> — база, текст, запуск. <button class="linkbtn" data-goto="send">открыть →</button></li>
         </ol>
-        <p class="hint">Отдельно, без очереди: <button class="linkbtn" data-goto="parse">Парсинг чатов</button>
-          и <button class="linkbtn" data-goto="leads">Горячие лиды</button> (ищутся сами по таймеру).</p>
       </div>
 
       <div class="card">
@@ -71,6 +62,31 @@
         </div>
         <div id="alltime" hidden></div>
       </div>
+
+      <div class="card" id="traffic-card" hidden>
+        <div class="cardtitle">Трафик и прокси</div>
+        <p class="hint" id="tr-asocks">—</p>
+        <div class="nums">
+          <div><b id="tr-day">—</b><span>за сутки</span></div>
+          <div><b id="tr-week">—</b><span>за 7 дней</span></div>
+          <div><b id="tr-month">—</b><span>за 30 дней</span></div>
+          <div><b id="tr-balance">—</b><span>баланс Asocks</span></div>
+          <div><b id="tr-runway">—</b><span>хватит на</span></div>
+        </div>
+        <div class="trf-grid">
+          <div><div class="trf-h">По портам Asocks, этот месяц</div><div id="tr-ports"></div></div>
+          <div></div>
+        </div>
+        <div class="trf-grid" id="tr-main-box" hidden>
+          <div><div class="trf-h">Прод (основной профиль): за что, 7 дней</div><div id="tr-main-tasks"></div></div>
+          <div><div class="trf-h">Прод: кто больше всех, 7 дней</div><div id="tr-main-accs"></div></div>
+        </div>
+        <div class="trf-grid">
+          <div><div class="trf-h">Этот профиль: за что, 7 дней</div><div id="tr-tasks"></div></div>
+          <div><div class="trf-h">Этот профиль: кто больше всех, 7 дней</div><div id="tr-accs"></div></div>
+        </div>
+        <p class="hint" id="tr-paid"></p>
+      </div>
     </section>
 
     <!-- ═══════════ 1. АККАУНТЫ ═══════════ -->
@@ -80,97 +96,71 @@
           <div class="n">1</div>
           <div class="body">
             <h3>Аккаунты</h3>
-            <p>Здесь их видно и настраивают: имя, @ник, аватарка, прокси, роль.
-               <b>Кого пустить в работу, выбирают вкладки рассылки</b> — по номерам
-               и по чатам свой состав, и один аккаунт работает в одном режиме.</p>
             <div id="accs"></div>
             <div id="selcount" class="selline"></div>
             <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
               <button class="primary" id="b-add" data-busy>+ Добавить аккаунт</button>
-              <button class="ghost" id="b-bulk" data-busy>Залить пачку сессий</button>
-              <button class="ghost" id="b-pack" data-busy>Открыть пачку в Desktop</button>
-              <button class="ghost" data-t="login" id="b-login">Войти заново</button>
-              <button class="ghost" id="b-prxall" data-busy
-                      title="Один прокси на все аккаунты — для мобильного с ротацией">Прокси всем</button>
-              <button class="ghost" id="b-bioall" data-busy
-                      title="Одно описание «о себе» всем вошедшим аккаунтам">Описание всем</button>
-              <button class="ghost" id="b-picall" data-busy
-                      title="Одну аватарку всем вошедшим аккаунтам">Аватар всем</button>
+              <button class="ghost" id="b-prxall" data-busy title="Один прокси на все аккаунты">Прокси всем</button>
+              <details class="accmenu"><summary class="ghost">Ещё ▾</summary>
+                <span class="accmenu-list">
+                  <button class="ghost mini" id="b-bulk" data-busy>Залить пачку сессий</button>
+                  <button class="ghost mini" id="b-pack" data-busy>Открыть пачку в Desktop</button>
+                  <button class="ghost mini" data-t="login" id="b-login">Войти заново</button>
+                  <button class="ghost mini" id="b-bioall" data-busy>Описание всем</button>
+                  <button class="ghost mini" id="b-picall" data-busy>Аватар всем</button>
+                </span>
+              </details>
             </div>
           </div>
         </div>
       </div>
 
       <div id="notready" class="warn" hidden>
-        Ни один отмеченный аккаунт <b>не вошёл</b> — запуск заблокирован.
-        Войди по QR или залей готовую сессию в шаге 1.
+        Ни один аккаунт не вошёл — войди по QR или залей сессию.
       </div>
     </section>
 
     <!-- ═══════════ 2. ПРОГРЕВ ═══════════ -->
     <section class="view" data-view="warmup">
       <div class="card">
-        <div class="cardtitle">Прогрев поведением</div>
-        <p style="margin:0 0 12px;color:var(--mut);font-size:13px">
-          Свежий аккаунт, который сразу пошёл писать незнакомым, живёт недолго.
-          Живой человек сначала на что-то подписан, что-то читает, где-то ставит
-          реакции и с кем-то переписывается. Панель водит аккаунты по этим обычным
-          делам сама: <b>одно действие за раз</b>, пауза 2–4 минуты, после двух-трёх
-          действий сон на 2–4 часа. Первые сутки аккаунт не трогается вовсе.</p>
-        <p style="margin:-6px 0 12px;color:var(--mut);font-size:13px">
-          Куда водит — список в файле <b>warm-list.json</b> рядом с панелью, правь
-          смело. Раз в сутки аккаунт спрашивает у <b>@SpamBot</b>, нет ли на нём
-          ограничений, и ответ виден ниже.</p>
-        <p style="margin:-6px 0 12px;color:var(--ink);font-size:13px">
-          Работает <b>сам, по всем вошедшим аккаунтам</b> — галочки «кто работает»
-          наверху для него не нужны. Нажми «Включить» и оставь: первое действие
-          будет через пару минут, дальше по расписанию. Отдельно ничего запускать
-          не надо, окно можно закрыть.</p>
+        <div class="cardtitle">Прогрев</div>
+        <p class="hint" style="margin:0 0 12px">
+          Аккаунты сами читают каналы, ставят реакции и переписываются друг с другом.
+          Новый первые сутки отлёживается. Включи и оставь — работает по всем вошедшим.</p>
         <div class="runbar" id="runbar-w"></div>
         <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
           <button class="primary" id="b-warm">Включить прогрев</button>
           <span id="warm-state" style="color:var(--mut);font-size:13px"></span>
         </div>
+        <div class="frow" style="margin-top:10px;align-items:center;gap:8px;flex-wrap:wrap">
+          <span id="warm-between" style="font-size:13px"></span>
+          <button class="ghost mini" id="warm-between-btn" hidden></button>
+        </div>
         <div class="fieldset" style="margin-top:12px">
-          <div class="fh">⏱ За сколько дней прогревать</div>
-          <p class="hint" style="margin:0 0 10px">
-            Сколько суток аккаунт идёт от нуля до полного объёма. Первые сутки —
-            отлёжка, она не сокращается ни при каком сроке. Чем короче срок, тем
-            быстрее аккаунт выходит на объём и тем выше риск, что Telegram его
-            придержит: семь дней — проверенная середина, два-три дня — спешка.
-            Срок считается от даты добавления, так что меняется и для тех,
-            кто уже греется.</p>
+          <div class="fh" title="Сутки отлёжки не сокращаются. Короче срок — выше риск.">⏱ Дней до полного объёма</div>
           <div class="frow">
             <input id="warmdays" type="number" min="2" max="21" value="7" style="max-width:90px">
-            <span>дней до полного объёма</span>
+            <span>дней (7 — норма)</span>
             <button class="ghost" id="warmdays-save">Сохранить</button>
             <span id="warmdays-note" class="hint"></span>
           </div>
         </div>
         <div class="fieldset" style="margin-top:12px">
-          <div class="fh">✉️ Сколько сообщений в день — расписание разгона</div>
-          <p class="hint" style="margin:0 0 10px">
-            Свежий аккаунт наращивает объём сам, по дням — разгон трогать не надо.
-            Сам максимум задаётся в «Рассылке» → «Скорость и лимиты».
-            Отдельному аккаунту — свой лимит по плашке «сегодня…» в его строке.</p>
+          <div class="fh">✉️ Писем в день по дням разгона</div>
+          <p class="hint" style="margin:0 0 10px">Максимум — в «Рассылке по номерам», свой предел аккаунту — в его меню «⋯».</p>
           <div id="cap-plan" class="cap-plan"></div>
         </div>
-        <div class="fieldset" style="margin-top:12px" id="warm-rot-box">
-          <div class="fh">Смена IP на прогреве — если прокси один на всех</div>
-          <p style="margin:0 0 10px;color:var(--mut);font-size:13px">
-            Аккаунты греются по очереди. Чтобы они не грелись все с одного адреса,
-            вставь сюда ссылку смены IP от мобильного прокси — панель дёрнет её
-            перед каждым следующим аккаунтом. <b>Один прокси на всех без этой ссылки —
-            значит один IP на всех.</b> Свой прокси у каждого — поле можно оставить пустым.</p>
+        <details class="fieldset" style="margin-top:12px" id="warm-rot-box">
+          <summary class="fh" style="cursor:pointer">Смена IP по ссылке — если прокси один и IP сам не меняет</summary>
           <div class="frow">
             <input id="warm-rotate" type="text" class="ftext"
                    placeholder="ссылка смены IP из кабинета прокси">
             <button class="ghost" id="warm-rot-save">Сохранить</button>
           </div>
           <div class="frow"><input id="warm-rotwait" type="number" value="10" min="3">
-            <span>секунд ждать после смены адреса, прежде чем работать дальше</span></div>
+            <span>сек ждать после смены</span></div>
           <div id="warm-rot-note" class="peek"></div>
-        </div>
+        </details>
         <div id="warm-list" style="margin-top:12px"></div>
       </div>
     </section>
@@ -179,18 +169,15 @@
     <section class="view" data-view="send">
       <!-- калькулятор мощности -->
       <div class="card calc">
-        <div class="cardtitle">Мощность рассылки — прогноз</div>
-        <p class="hint" style="margin:0 0 12px">
-          Считается по вошедшим аккаунтам и их дневным потолкам. Свежие ещё в разгоне,
-          поэтому «сейчас» и «на плато» отличаются — на максимум выходят не сразу.</p>
+        <div class="cardtitle">Сколько можно написать</div>
         <div class="calc-grid" id="calc-grid">
-          <div class="calc-cell"><span>Аккаунтов в работе</span><b id="calc-accs">—</b></div>
-          <div class="calc-cell"><span>Потолок в день (сейчас)</span><b id="calc-day-now">—</b></div>
-          <div class="calc-cell"><span>Потолок в день (на плато)</span><b id="calc-day-max">—</b></div>
-          <div class="calc-cell"><span>За неделю (с разгоном)</span><b id="calc-week">—</b></div>
+          <div class="calc-cell"><span>Аккаунтов</span><b id="calc-accs">—</b></div>
+          <div class="calc-cell"><span>В день сейчас</span><b id="calc-day-now">—</b></div>
+          <div class="calc-cell"><span>В день на максимуме</span><b id="calc-day-max">—</b></div>
+          <div class="calc-cell"><span>За неделю</span><b id="calc-week">—</b></div>
         </div>
         <div class="frow" style="margin-top:12px;align-items:center">
-          <span class="hint">Прикинуть «а если бы аккаунтов было»:</span>
+          <span class="hint">А если аккаунтов:</span>
           <input id="calc-what-accs" type="number" min="0" placeholder="кол-во" style="max-width:90px">
           <span class="hint">по</span>
           <input id="calc-what-cap" type="number" min="0" placeholder="сообщ/день" style="max-width:110px">
@@ -202,15 +189,9 @@
         <div class="step" id="s5">
           <div class="n">▶</div>
           <div class="body">
-            <h3>Запуск — панель делает всё сама</h3>
-            <p>Одна кнопка — дальше сама. Аккаунты делят базу на части, каждый
-               проверяет свою (у кого есть Telegram), и <b>пишет всем найденным
-               из своей части</b>. Потом берут следующую часть — и так до конца базы.
-               Нажимать больше ничего не нужно.</p>
-            <p style="margin-top:-6px">Сначала идёт проверка, сообщения начинаются
-               чуть позже — писать можно только тем, кто уже проверен.</p>
-            <p style="margin-top:-6px">Пишет людям только с 6:00 до 24:00 по Екатеринбургу —
-               ночью идёт одна проверка номеров, письма ждут утра.</p>
+            <h3>Запуск по номерам</h3>
+            <p>Аккаунты делят базу, проверяют, у кого есть Telegram, и пишут найденным.
+               Письма — с 6:00 до 24:00 по Екб.</p>
 
             <div class="runbar" id="runbar-p"></div>
             <div class="accrun" id="accrun-p"></div>
@@ -221,12 +202,12 @@
               <div class="basenow" id="basenow"><span style="color:var(--mut)">загружаю…</span></div>
               <div class="drop" id="drop">
                 <b>Перетащи сюда файл</b>
-                Excel или CSV. Колонку с номерами панель найдёт сама.
+                Excel или CSV
               </div>
               <input type="file" id="file" accept=".xlsx,.xlsm,.csv,.tsv,.txt" hidden>
               <div class="peek" id="peek"></div>
               <details style="margin-top:10px">
-                <summary>файл уже лежит на этом компьютере — указать путь</summary>
+                <summary>указать путь к файлу</summary>
                 <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
                   <input id="basepath" type="text" placeholder="/Users/.../base.xlsx"
                          style="flex:1;min-width:240px;padding:9px 10px;border:1px solid var(--line);
@@ -240,22 +221,20 @@
               <div class="fh"><span class="fn">2</span> Что делать</div>
               <div class="frow">
                 <select id="amode">
-                  <option value="full">проверить базу и написать найденным</option>
-                  <option value="check">только проверить базу (никому не писать)</option>
-                  <option value="write">только написать тем, кого уже нашли</option>
+                  <option value="full">проверить и написать</option>
+                  <option value="check">только проверить</option>
+                  <option value="write">только написать найденным</option>
                 </select>
               </div>
               <label class="bigopt danger-opt" id="opt-send">
                 <input type="radio" name="sendmode" id="sm-send" checked>
-                <span><b>Отправлять сразу</b> — обычный режим: сообщение
-                  <b>уйдёт человеку</b> по-настоящему. Отозвать нельзя.</span>
+                <span><b>Отправлять</b> — письмо уйдёт человеку, отозвать нельзя</span>
               </label>
               <details id="dbg-mode">
-                <summary class="hint" style="cursor:pointer;margin:6px 0 0">⚙ Отладка: не отправлять, только черновик</summary>
+                <summary class="hint" style="cursor:pointer;margin:6px 0 0">⚙ Отладка: только черновик</summary>
                 <label class="bigopt" id="opt-draft" style="margin-top:8px">
                   <input type="radio" name="sendmode" id="sm-draft">
-                  <span><b>Оставлять черновик</b> — текст ляжет в чат, но человеку
-                    <b>не уйдёт</b>. Для проверки; при следующем запуске снова отправка.</span>
+                  <span><b>Черновик</b> — ляжет в чат, человеку не уйдёт</span>
                 </label>
               </details>
               <input type="checkbox" id="send" hidden>
@@ -264,76 +243,59 @@
             </div>
 
             <div class="fieldset">
-              <div class="fh"><span class="fn">3</span> Скорость и лимиты</div>
+              <div class="fh"><span class="fn">3</span> Как слать</div>
+              <label class="bigopt" style="margin:0 0 10px">
+                <input type="checkbox" id="p-parallel">
+                <span><b>⚡ Параллельно</b> — все аккаунты сразу. На одном IP письма разводятся по времени.
+                  Свежим аккаунтам лучше по очереди.</span>
+              </label>
+              <label class="bigopt" style="margin:0 0 10px">
+                <input type="checkbox" id="p-between">
+                <span><b>🌱 Живой день</b> — с 8 до 23 аккаунты читают каналы, ставят реакции и переписываются
+                  между собой. Общая настройка с вкладкой чатов, нужен включённый прогрев.
+                  <span id="p-between-note" class="hint"></span></span>
+              </label>
               <div class="frow"><input id="ddelay" type="number" value="180" min="3">
                 <input id="ddelaymax" type="number" value="350" min="3">
-                <span><b>секунд между двумя сообщениями</b> — от и до, пауза берётся
-                  случайная из этой вилки. Ровный интервал виден по секундомеру не
-                  хуже, чем полное его отсутствие. Меньше 180 — рискованно.</span></div>
+                <span><b>сек между письмами</b>, от–до (меньше 180 — риск)</span></div>
               <div class="frow"><input id="dhold" type="number" value="60" min="5">
                 <input id="dholdmax" type="number" value="120" min="5">
-                <span><b>секунд между «завёл контакт» и «написал»</b> — от и до.
-                  Живой человек не пишет в ту же секунду, как занёс номер в книжку.
-                  Это самая важная пауза во всей рассылке по номерам.</span></div>
+                <span><b>сек от «добавил контакт» до «написал»</b>, от–до</span></div>
               <div class="frow"><input id="daycap" type="number" value="15" min="1">
-                <span><b>максимум сообщений в день с одного аккаунта.</b> Это единственный
-                  дневной предел. До него аккаунт дорастает сам по графику разгона
-                  (2 → 5 → … в первые дни рассылки, см. «Прогрев»), дальше держится на нём.
-                  Набрал на сегодня — отдыхает до завтра, остальные продолжают.
-                  Меняется сразу, даже на ходу. <span id="daycap-note" class="hint"></span></span></div>
-              <div class="frow"><input id="checkcap" type="number" value="50" min="1">
-                <span><b>потолок проверок номеров в день с одного аккаунта.</b> Обычно
-                  проверок столько же, сколько писем: проверка — это «добавить номер
-                  в контакты», с этого же начинается и письмо, и лимит у Telegram на них
-                  общий. Это поле только опускает планку ниже дневного предела писем;
-                  поднять выше него оно не может. <span id="checkcap-note" class="hint"></span></span></div>
-              <div class="frow"><input id="delay" type="number" value="15" min="5">
-                <span><b>секунд между номерами при проверке базы.</b>
-                  Проверка тоже тратит лимит Telegram, спешить нельзя.</span></div>
+                <span><b>писем в день с аккаунта</b> — максимум, новые дорастают сами
+                  <span id="daycap-note" class="hint"></span></span></div>
               <label class="bigopt" style="margin-top:12px">
                 <input type="checkbox" id="warmon" checked>
-                <span><b>Беречь новые аккаунты (прогрев)</b> — свежий аккаунт сутки
-                  отлёживается, потом пишет 2 в день, через пару дней 5, дальше больше,
-                  до 15. Так они не «отлетают» в первый же день. Выключать не советую.</span>
+                <span><b>Беречь новые аккаунты</b> — разгон 2 → 5 → … до максимума</span>
               </label>
-              <label class="bigopt" style="margin-top:12px">
-                <input type="checkbox" id="serial">
-                <span><b>Работать по очереди, а не всем сразу</b> — в каждый момент
-                  работает ровно один аккаунт, остальные ждут. Базу они делят так же,
-                  просто идут друг за другом. Нужно, когда прокси один на всех.</span>
-              </label>
+              <!-- «по очереди» = не «параллельно»: держим для старых форм и автопрогона -->
+              <input type="checkbox" id="serial" hidden>
 
-              <div class="fieldset" id="rotbox" style="margin-top:12px">
-                <div class="fh">Мобильный прокси со сменой IP</div>
-                <p style="margin:0 0 10px;color:var(--mut);font-size:13px">
-                  Если у тебя один мобильный прокси с ротацией, вставь сюда ссылку
-                  смены IP из личного кабинета. Панель будет дёргать её <b>перед
-                  каждым аккаунтом</b>: один поработал — новый адрес — пошёл следующий.
-                  Включает режим «по очереди» сам: параллельно все сидели бы на одном
-                  адресе, и менять его было бы незачем.</p>
+              <details class="fieldset" id="rotbox" style="margin-top:12px">
+                <summary class="fh" style="cursor:pointer">Смена IP по ссылке — если прокси один и IP сам не меняет</summary>
+                <p class="hint" style="margin:8px 0 10px">Панель дёрнет ссылку перед каждым аккаунтом и включит «по очереди».</p>
                 <div class="frow">
                   <input id="rotate" type="text" class="ftext"
                          placeholder="https://mobileproxy.space/api.html?command=reboot&amp;proxy_id=…">
                   <button class="ghost" id="b-rotate">Проверить</button>
                 </div>
                 <div class="frow"><input id="rotwait" type="number" value="10" min="3">
-                  <span><b>секунд ждать после смены адреса.</b> Оператору нужно время
-                    физически поднять соединение заново; начнёшь раньше — пойдёшь
-                    со старого IP. Меньше 5 обычно мало.</span></div>
+                  <span>сек ждать после смены</span></div>
                 <div id="rotnote" class="peek"></div>
-              </div>
+              </details>
 
               <details style="margin-top:10px">
-                <summary>тонкие настройки — можно не трогать</summary>
-                <div class="frow" style="margin-top:10px"><input id="limit" type="number" value="20" min="1">
-                  <span>номеров за один заход проверки (на аккаунт)</span></div>
+                <summary>тонкие настройки</summary>
+                <div class="frow" style="margin-top:10px"><input id="checkcap" type="number" value="50" min="1">
+                  <span>проверок номеров в день с аккаунта <span id="checkcap-note" class="hint"></span></span></div>
+                <div class="frow"><input id="delay" type="number" value="15" min="5">
+                  <span>сек между номерами при проверке</span></div>
+                <div class="frow"><input id="limit" type="number" value="20" min="1">
+                  <span>номеров за заход проверки</span></div>
                 <div class="frow"><input id="dlimit" type="number" value="2" min="1">
-                  <span>сообщений за один заход рассылки (на аккаунт). После захода
-                    аккаунт уходит из работы «вглубь» — см. следующее поле</span></div>
+                  <span>писем за заход</span></div>
                 <div class="frow"><input id="apause" type="number" value="40" min="1">
-                  <span><b>минут отдыха после захода.</b> Аккаунт полностью исключается
-                    из работы на это время (панель берёт случайно от указанного до
-                    полутора от него: 40 превращаются в 40–60)</span></div>
+                  <span>мин отдыха после захода (берётся 40–60)</span></div>
               </details>
             </div>
 
@@ -349,54 +311,43 @@
           <div class="n">✎</div>
           <div class="body">
             <h3>Что напишем</h3>
-            <p>Пиши <b>одно</b> сообщение. Где хочешь сказать по-разному — заключи
-               варианты в фигурные скобки через чёрточку: <b>{Здравствуйте|Добрый день}</b>.
-               На каждого человека панель выберет свой вариант, поэтому письма не
-               повторяются слово в слово. Пустой вариант — просто пропуск:
-               <b>Привет{|{name}}</b> → «Привет» или «Привет, Иван».</p>
-            <div class="aud-tag">👥 Кому: <b>база из файла</b> — номера из xlsx/CSV</div>
+            <p>Варианты в скобках — каждому свой: <b>{Здравствуйте|Добрый день}</b>.</p>
+            <div class="aud-tag">👥 Кому: <b>база из файла</b></div>
             <textarea id="msg" spellcheck="true"
               placeholder="{Здравствуйте|Добрый день}{|{name}}! {Подбираю|Помогу подобрать} квартиру в Екатеринбурге. {Актуально?|Ещё интересно?}"></textarea>
             <div class="msgbar">
               <button class="ghost mini" id="msg-save">Сохранить текст</button>
-              <span id="msg-note">варианты: <b>{а|б|в}</b> · подстановки: <b>{name}</b>, <b>{date}</b>, <b>{username}</b>, <b>{chat}</b> (где нашли — у собранных из чатов), <b>{LINK}</b></span>
+              <span id="msg-note">подстановки: <b>{name}</b> <b>{date}</b> <b>{username}</b> <b>{chat}</b> <b>{LINK}</b></span>
             </div>
             <div id="msg-warn" class="warn" hidden style="margin:10px 0 0"></div>
             <div class="peek" id="msg-prev"></div>
 
 
-            <div class="fieldset" style="margin-top:12px">
-              <div class="fh">Ссылка-зеркало {LINK} — свежий субдомен на каждую пачку</div>
-              <p style="margin:0 0 10px;color:var(--mut);font-size:13px">
-                Одна и та же ссылка в тысяче писем — примета рассылки. Пиши в тексте
-                <b>{LINK}</b>, и панель заменит его на живой субдомен
-                <b><span id="mir-base-lbl">boldo-agency.ru</span></b>, меняя адрес каждые
-                30–50 писем. Все ведут на твой лендинг.</p>
+            <details class="fieldset" style="margin-top:12px">
+              <summary class="fh" style="cursor:pointer">Ссылка {LINK} — новый субдомен каждые 30–50 писем</summary>
+              <p class="hint" style="margin:8px 0 10px">{LINK} в тексте станет адресом на
+                <b><span id="mir-base-lbl">boldo-agency.ru</span></b>.</p>
               <label class="bigopt"><input type="checkbox" id="mir-on">
-                <span><b>Включить зеркала</b> — подставлять живой субдомен вместо {LINK}.
-                  Пока выключено, {LINK} станет просто <span id="mir-base-lbl2">boldo-agency.ru</span>.</span></label>
+                <span><b>Включить</b> — без галочки {LINK} = <span id="mir-base-lbl2">boldo-agency.ru</span></span></label>
               <div class="frow" style="margin-top:10px">
                 <select id="mir-mode" style="flex:0 0 auto">
-                  <option value="wildcard">wildcard — любой субдомен сразу (проще)</option>
-                  <option value="api">api — регистрировать каждый через Vercel</option>
+                  <option value="wildcard">wildcard — любой субдомен сразу</option>
+                  <option value="api">api — каждый через Vercel</option>
                 </select>
-                <span>wildcard: на проекте один раз заведён <b>*.boldo-agency.ru</b>, и панель
-                  просто придумывает имена — без задержек и лимитов. api: как в ТЗ, каждый
-                  субдомен создаётся запросом (медленнее, есть предел на проект).</span>
               </div>
               <div class="frow"><input id="mir-base" type="text" class="ftext" value="boldo-agency.ru"
-                       placeholder="базовый домен"><span>базовый домен на Vercel</span></div>
+                       placeholder="базовый домен"><span>домен</span></div>
               <div class="frow"><input id="mir-lo" type="number" value="30" min="1">
                 <input id="mir-hi" type="number" value="50" min="1">
-                <span>менять адрес через столько писем (от и до)</span></div>
+                <span>писем на один адрес, от–до</span></div>
               <details style="margin-top:8px" id="mir-api-box">
-                <summary>доступ к Vercel (нужно только для режима api)</summary>
+                <summary>доступ к Vercel (для api)</summary>
                 <div class="frow" style="margin-top:10px"><input id="mir-token" type="password" class="ftext"
-                         placeholder="VERCEL_AUTH_TOKEN"><span>токен (наружу панель его не отдаёт)</span></div>
+                         placeholder="VERCEL_AUTH_TOKEN"><span>токен</span></div>
                 <div class="frow"><input id="mir-proj" type="text" class="ftext"
                          placeholder="ID проекта (prj_…)"><span>VERCEL_PROJECT_ID</span></div>
                 <div class="frow"><input id="mir-team" type="text" class="ftext"
-                         placeholder="ID команды (team_…), если проект в команде"><span>teamId — можно пусто</span></div>
+                         placeholder="ID команды (team_…), если есть"><span>teamId</span></div>
                 <button class="ghost mini" id="mir-test">Проверить доступ к Vercel</button>
               </details>
               <div class="msgbar">
@@ -404,19 +355,12 @@
                 <button class="ghost mini" id="mir-new">Сменить адрес сейчас</button>
                 <span id="mir-note"></span>
               </div>
-            </div>
+            </details>
 
             <div class="fieldset" style="margin-top:14px">
-              <div class="fh">Второе письмо — со ссылкой</div>
-              <p style="margin:0 0 10px;color:var(--mut);font-size:13px">
-                Ссылку в первом же сообщении незнакомому человеку Telegram не любит,
-                да и человек тоже. Поэтому первое письмо — вопрос без ссылки, а это,
-                второе, уходит <b>только тем, кто ответил</b>. Кто промолчал, второго
-                не получит.</p>
+              <div class="fh">Второе письмо — только ответившим</div>
               <label class="bigopt"><input type="checkbox" id="funnel">
-                <span><b>Включить второй шаг</b> — панель будет сама проверять, кто
-                  ответил, и досылать им это письмо. Работает только в режиме
-                  отправки: черновиком ссылку не оставишь.</span></label>
+                <span><b>Включить</b> — панель сама досылает его тем, кто ответил</span></label>
               <textarea id="msg2" spellcheck="true" style="margin-top:10px"
                         placeholder="Вот ссылка, о которой писал: …"></textarea>
               <div class="msgbar">
@@ -435,8 +379,7 @@
               <audio id="voice-play" controls hidden preload="none"></audio>
               <label class="vopt"><input type="checkbox" id="voicemode">
                 отправлять <b>голосовым</b>, а не текстом</label>
-              <div class="vnote">Голосовое нельзя оставить черновиком — оно уходит человеку
-                сразу, даже в режиме «черновик». Любой аудиофайл подойдёт.</div>
+              <div class="vnote">Уходит сразу, черновиком не бывает.</div>
             </div>
           </div>
         </div>
@@ -444,13 +387,9 @@
 
       <div class="card">
         <div class="cardtitle">Результаты рассылки</div>
-        <p class="hint" style="margin:0 0 10px">
-          Полный список найденных (тысячи строк) в панели не выводим — это её тормозило.
-          Счётчики видно в «Обзоре», а весь список забирай файлом.</p>
         <div class="maint">
-          <button class="ghost" data-t="stats" id="b-stats">Проверить, кто ответил</button>
+          <button class="ghost" data-t="stats" id="b-stats" title="Заглянет в чаты отмеченных аккаунтов">Проверить, кто ответил</button>
           <button class="ghost" id="b-found-csv">⬇ Скачать найденных (CSV)</button>
-          <span style="color:var(--mut);font-size:12px">«Проверить» заглянет в чаты отмеченных аккаунтов</span>
         </div>
         <div id="replies"></div>
       </div>
@@ -462,10 +401,7 @@
     <section class="view" data-view="chatsend">
       <div class="card">
         <div class="cardtitle">Кому пишем здесь</div>
-        <p style="color:var(--mut);font-size:13px;margin:0 0 10px">
-          Это отдельный список от базы с номерами. Люди сюда попадают из групп и каналов —
-          они <b>уже в Telegram</b>, поэтому проверять их не нужно и квота на добавление
-          контактов не тратится. Пишем им по @нику.</p>
+        <p class="hint" style="margin:0 0 10px">Люди из групп и каналов — пишем по @нику, проверять не нужно.</p>
         <div class="runbar" id="runbar-c"></div>
         <div class="accrun" id="accrun-c"></div>
         <p class="setnow" id="setnow-c"></p>
@@ -475,39 +411,25 @@
         <div class="step" id="s2">
           <div class="n">@</div>
           <div class="body">
-            <h3>Получатели из чатов — если номеров нет</h3>
-            <p>Людей можно взять прямо из групп и каналов: панель соберёт участников
-               и положит их в <b>ту же очередь</b>, что и проверенные номера. Проверять
-               их не нужно — они уже в Telegram, писать им можно сразу.</p>
-            <p style="margin-top:-6px">Собирает <b>первый отмеченный аккаунт</b>, и он
-               должен состоять в этих чатах. Участников видно не везде: в некоторых
-               группах список закрыт настройками — такие панель пропустит и скажет об этом.</p>
+            <h3>Собрать людей из чатов</h3>
+            <p>Собирает первый отмеченный аккаунт — он должен состоять в чатах.
+               Чаты с закрытым списком участников пропускаются.</p>
 
             <div class="fieldset">
-              <div class="fh"><span class="fn">1</span> Папка Telegram — сразу много чатов</div>
-              <p style="margin:0 0 10px;color:var(--mut);font-size:13px">
-                Вступи в чаты руками и сложи их в Telegram в папку (Настройки → Папки).
-                Панель пройдёт по ней сама, чат за чатом, пока они не кончатся или пока
-                не упрётся в предел за заход. Где остановилась — <b>помнит</b>: следующий
-                заход начнётся с неразобранных.</p>
+              <div class="fh"><span class="fn">1</span> Из папки Telegram</div>
+              <p class="hint" style="margin:0 0 10px">Сложи чаты в папку (Настройки → Папки). Где остановилась — панель помнит.</p>
               <div class="frow">
                 <input id="mfolder" type="text" class="ftext" value="chats"
                        placeholder="название папки в Telegram">
                 <button class="primary" id="b-folder">Собрать из папки</button>
               </div>
               <label class="bigopt"><input type="checkbox" id="magain">
-                <span><b>Пройти заново по уже разобранным чатам.</b> Обычно не нужно:
-                  панель и так пропускает пройденное. Включай, если в чаты пришли новые
-                  люди и их надо добрать.</span></label>
+                <span><b>Заново по разобранным</b> — если в чатах появились новые люди</span></label>
             </div>
 
             <div class="fieldset">
-              <div class="fh"><span class="fn">2</span> Или список ссылок — пачкой</div>
-              <p style="margin:0 0 10px;color:var(--mut);font-size:13px">
-                Вставь ссылки на чаты — по одной в строке. Панель пройдёт по ним
-                подряд, как по папке: с паузами, с памятью о пройденном, до предела
-                за заход. Годятся <b>t.me/имя</b>, <b>@имя</b> и приглашения
-                <b>t.me/+код</b>.</p>
+              <div class="fh"><span class="fn">2</span> Или списком ссылок</div>
+              <p class="hint" style="margin:0 0 10px">По одной в строке: t.me/имя, @имя, t.me/+код.</p>
               <textarea id="chatlist" spellcheck="false" style="min-height:90px"
                         placeholder="t.me/chat_one&#10;t.me/chat_two&#10;https://t.me/+AbCdEf"></textarea>
               <div class="msgbar">
@@ -517,31 +439,21 @@
             </div>
 
             <div class="fieldset">
-              <div class="fh"><span class="fn">3</span> Или один чат — по ссылке</div>
+              <div class="fh"><span class="fn">3</span> Или один чат</div>
               <div class="frow">
                 <input id="chat" type="text" class="ftext"
                        placeholder="https://t.me/имя_чата, @имя_чата или ссылка-приглашение">
                 <button class="ghost" id="b-parse">Собрать участников</button>
               </div>
               <label class="bigopt"><input type="checkbox" id="mjoin">
-                <span><b>Вступить в чат, если аккаунт в нём не состоит.</b> Нужно для
-                  закрытых чатов по ссылке-приглашению — изнутри список видно, снаружи нет.
-                  Открытый чат читается и без вступления.</span></label>
+                <span><b>Вступить, если не состоит</b> — для закрытых чатов</span></label>
             </div>
 
             <label class="bigopt"><input type="checkbox" id="monly">
-              <span><b>Брать только тех, у кого есть @username.</b> Их потом напишет
-                <b>любой</b> аккаунт панели, и рассылка делится между всеми. У кого ника
-                нет — того видит только аккаунт-сборщик, и писать им придётся ему одному,
-                упираясь в его дневной предел. Без галочки панель берёт всех и показывает,
-                сколько кому досталось.</span></label>
+              <span><b>Только с @username</b> — таким может писать любой аккаунт, без ника — только сборщик</span></label>
 
             <div class="frow"><input id="mlimit" type="number" value="3000" min="0">
-              <span><b>сколько человек брать за один заход.</b> Общий предел на весь
-                обход папки: набрали столько — панель останавливается и продолжит
-                в следующий раз. <b>0</b> — без предела, пока чаты не кончатся.
-                У больших чатов Telegram и так отдаёт первые ~10 000 — это его предел,
-                не панели.</span></div>
+              <span><b>человек за заход</b> (0 — без предела)</span></div>
             <div class="basenow" id="memnow" style="margin-top:12px">
               <span style="color:var(--mut)">загружаю…</span></div>
             <div class="peek" id="mempeek"></div>
@@ -555,14 +467,9 @@
       <div class="card" style="margin-top:14px">
         <div class="cardtitle">Что напишем этим людям</div>
             <div class="fieldset" style="margin-top:12px" id="msg-chat-box">
-              <div class="fh">✍️ Отдельный текст — для собранных из чатов</div>
-              <p style="margin:0 0 10px;color:var(--mut);font-size:13px">
-                Люди из <b>парсинга чатов</b> (у них ник или id, а не номер) — другая
-                аудитория: им уместно написать иначе. Впиши текст здесь, и он уйдёт
-                <b>только им</b>, а база из файла получит текст выше. <b>Оставишь пустым</b> —
-                собранным из чатов уйдёт общий текст. Те же варианты <b>{а|б}</b> и
-                подстановки <b>{name}</b>, <b>{username}</b>, <b>{LINK}</b> работают.</p>
-              <div class="aud-tag chat">💬 Кому: <b>собранные из чатов</b> — ник/id из парсинга</div>
+              <div class="fh">✍️ Текст для людей из чатов</div>
+              <p class="hint" style="margin:0 0 10px">Варианты {а|б}, подстановки {name} {username} {chat} {LINK}.</p>
+              <div class="aud-tag chat">💬 Кому: <b>собранные из чатов</b></div>
               <textarea id="msg-chat" spellcheck="true"
                 placeholder="{Здравствуйте|Привет}! Увидел вас в чате — {подбираю|помогу подобрать} квартиру в Екатеринбурге. {Актуально?|Интересно?}"></textarea>
               <div class="msgbar">
@@ -574,32 +481,30 @@
 
       <div class="card" style="margin-top:14px">
         <div class="cardtitle">Запуск по чатам</div>
-        <p style="color:var(--mut);font-size:13px;margin:0 0 12px">
-          Скорость, дневные потолки и прокси — общие на обе рассылки, меняются на вкладке
-          <button class="linkbtn" data-goto="send">Рассылка по номерам</button>.
-          Здесь — запуск по собранным из чатов и свой второй шаг.</p>
+        <p class="hint" style="margin:0 0 12px">Лимиты в день — общие, на вкладке
+          <button class="linkbtn" data-goto="send">Рассылка по номерам</button>.</p>
         <div class="fieldset" style="margin:0 0 12px">
           <div class="fh">Как слать</div>
           <label class="bigopt" style="margin:0 0 10px">
             <input type="checkbox" id="cs-parallel">
-            <span><b>⚡ Параллельно — все аккаунты сразу</b> (быстрее). Пусто — по очереди.
-              <b>Внимание:</b> если у аккаунтов ОДИН IP, параллельно — риск ограничений;
-              для безопасной параллели нужны разные прокси.</span>
+            <span><b>⚡ Параллельно</b> — все аккаунты сразу. На одном IP письма разводятся по времени.
+              Свежим аккаунтам лучше по очереди.</span>
+          </label>
+          <label class="bigopt" style="margin:0 0 10px">
+            <input type="checkbox" id="cs-between">
+            <span><b>🌱 Живой день</b> — с 8 до 23 аккаунты читают каналы, ставят реакции и переписываются
+              между собой. Нужен включённый прогрев. <span id="cs-between-note" class="hint"></span></span>
           </label>
           <div class="frow" style="align-items:center;gap:8px;flex-wrap:wrap">
-            <span class="hint">Пауза между сообщениями, сек:</span>
+            <span class="hint">Сек между письмами:</span>
             <input id="cs-ddelay" type="number" min="3" style="width:76px">
             <span class="hint">–</span>
             <input id="cs-ddelaymax" type="number" min="3" style="width:76px">
-            <span class="hint">меньше — быстрее, но «человечнее» писать дольше</span>
           </div>
         </div>
         <label class="bigopt" style="margin:0 0 12px">
           <input type="checkbox" id="cs-funnel">
-          <span><b>Второй шаг для чатов</b> — панель сама смотрит, кто ответил, и досылает
-            им второе письмо. Галочка своя: по номерам второй шаг может быть включён,
-            а здесь выключен, и наоборот. Текст второго письма общий, он на вкладке
-            «Рассылка по номерам».</span></label>
+          <span><b>Второй шаг</b> — досылать второе письмо ответившим (текст — на вкладке номеров)</span></label>
         <div class="frow">
           <button class="primary big" id="cs-auto">Запустить по чатам</button>
           <span class="hint" id="cs-note"></span>
@@ -628,135 +533,22 @@
         <div class="tblwrap"><table id="rs-days"></table></div>
       </div>
       <div class="card" style="margin-top:14px">
-        <div class="cardtitle">Ответы «да» и «непонятно» — что именно написали</div>
+        <div class="cardtitle">Ответы «да» и «непонятно»</div>
         <div class="tblwrap"><table id="rs-answers"></table></div>
       </div>
       <div class="card" style="margin-top:14px">
         <div class="cardtitle">По аккаунтам</div>
         <div class="tblwrap"><table id="rs-accs"></table></div>
       </div>
-      <p class="hint" style="margin-top:12px">Переходы на сайт и заявки считает Google-таблица,
-        куда шлёт форма сайта: в письмах ссылка с меткой <b>src=tg-followup</b>.</p>
+      <p class="hint" style="margin-top:12px">Переходы и заявки — в Google-таблице (метка src=tg-followup).</p>
     </section>
 
-
-    <!-- ═══════════ ГОРЯЧИЕ ЛИДЫ ═══════════ -->
-    <section class="view" data-view="leads">
-      <div class="card lead-card">
-        <div class="lead-title">🔥 Горячие лиды из чатов</div>
-        <p class="lead-intro">
-          Панель читает переписку в подключённых чатах и находит тех, кто <b>прямо сейчас
-          ищет квартиру</b> — по запросу, бюджету, срокам, ипотеке. На каждого заводит
-          карточку и готовит тёплое первое сообщение со ссылкой на чат, где нашли.
-          Как только появляется горячий — <b>подсвечивает, оповещает и кладёт его прямо
-          в таблицу лидов сайта</b>, чтобы вы успели написать первым.</p>
-
-        <div class="autoscan" id="autoscan">
-          <div class="as-dot"></div>
-          <div class="as-body">
-            <b id="as-title">Автопоиск…</b>
-            <span id="as-line">каждые 15 минут · загружаю список чатов…</span>
-          </div>
-          <button class="softbtn" id="as-switch" hidden>…</button>
-          <button class="linkbtn" id="as-toggle">по каким чатам</button>
-          <div id="as-chats" class="as-chats" hidden></div>
-        </div>
-
-        <div id="lead-alert" class="lead-alert" hidden></div>
-
-        <div class="lead-actions">
-          <button class="primary big" id="b-leads" data-busy>🔎 Найти горячих лидов сейчас</button>
-          <button class="softbtn" id="b-lead-notify" title="Показывать всплывающее уведомление, когда найдётся горячий лид">🔔 Оповещения: выкл</button>
-          <button class="softbtn" id="b-leads-csv" title="Скачать все карточки лидов таблицей">⬇ Скачать все лиды (CSV)</button>
-        </div>
-
-        <details class="lead-adv">
-          <summary>Настройки поиска и шаблон письма</summary>
-          <div class="lead-adv-in">
-            <div class="frow">
-              <input id="lead-folder" type="text" class="ftext" value="chats"
-                     placeholder="папка Telegram с чатами">
-              <span class="hint">откуда читать — папка со всеми чатами</span>
-            </div>
-            <div class="frow" style="margin-top:8px">
-              <input id="lead-chat" type="text" class="ftext"
-                     placeholder="или один чат: t.me/имя, @имя, ссылка">
-              <button class="softbtn" id="b-leads-one" data-busy>Искать в одном чате</button>
-            </div>
-            <div class="frow" style="margin-top:8px">
-              <input id="lead-limit" type="number" value="300" min="50" style="max-width:110px">
-              <span class="hint">сообщений на чат ·
-                <input id="lead-days" type="number" value="21" min="1" style="max-width:64px"> дней назад</span>
-            </div>
-
-            <div class="fieldset" style="margin-top:14px">
-              <div class="fh">✍️ Шаблон первого письма</div>
-              <p class="hint" style="margin:0 0 8px">
-                Подставляется в каждую карточку. Плейсхолдеры:
-                <b>{чат}</b> — где нашли, <b>{запрос}</b> — что ищет,
-                <b>{бюджет}</b>, <b>{срок}</b>, <b>{имя}</b>, <b>{LINK}</b> — ссылка на квиз.
-                Варианты <b>{так|или так}</b> — на каждого свой. В карточке текст можно поправить.</p>
-              <textarea id="lead-tpl" spellcheck="false" style="min-height:96px;width:100%"></textarea>
-              <div class="msgbar" style="margin-top:8px">
-                <button class="softbtn" id="b-lead-tpl">Сохранить шаблон</button>
-                <span id="lead-tpl-note" class="hint"></span>
-              </div>
-              <div id="lead-tpl-prev" class="lead-prev"></div>
-            </div>
-          </div>
-        </details>
-
-        <div id="lead-sum" class="lead-sum"></div>
-        <div id="leads-list" style="margin-top:8px"></div>
-      </div>
-    </section>
-
-
-    <!-- ═══════════ ЕГРЮЛ ═══════════ -->
-    <section class="view" data-view="egrul">
-      <div class="card">
-        <div class="cardtitle">🏛 Кто стоит за компанией</div>
-        <p style="color:var(--mut);font-size:13px;margin:0 0 14px">
-          Загружаешь таблицу с ИНН — панель спрашивает про каждую компанию у
-          <b>@egrul_bot</b> и достаёт <b>живого человека</b>: кто директор, его личный ИНН,
-          чем компания занимается и жива ли она. Если у человека в реестре записан телефон
-          или почта — забирает и их, а телефон кладёт в базу номеров, к обычной проверке
-          и рассылке.</p>
-
-        <div class="drop" id="eg-drop">
-          <b>Перетащи сюда таблицу</b>
-          <span>.xlsx, .xlsm, .csv — колонку с ИНН панель найдёт сама</span>
-          <input type="file" id="eg-file" accept=".xlsx,.xlsm,.csv,.tsv,.txt" hidden>
-        </div>
-
-        <div class="frow" style="margin-top:14px">
-          <select id="eg-acc" style="min-width:220px"></select>
-          <button class="primary" id="eg-run" data-busy>Собрать сейчас</button>
-          <button class="softbtn" id="eg-auto">🤖 Сам: выкл</button>
-          <button class="softbtn" id="eg-csv">⬇ Скачать результат</button>
-        </div>
-        <p class="hint" style="margin:10px 0 0">
-          Один аккаунт-сборщик, по одному запросу за раз: пауза 15–25 секунд между
-          запросами, после каждых 20 компаний — отдых 30–40 минут, не больше 110
-          запросов в сутки. Пока он собирает, рассылка и прогрев его не трогают.</p>
-
-        <div class="runbar" id="runbar-eg" style="margin-top:14px"></div>
-        <div id="eg-sum" class="lead-sum" style="margin-top:10px"></div>
-      </div>
-
-      <div class="card" style="margin-top:14px">
-        <div class="cardtitle">Что собрали</div>
-        <div class="tblwrap"><table id="eg-table"></table></div>
-      </div>
-    </section>
 
     <!-- ═══════════ ОБСЛУЖИВАНИЕ ═══════════ -->
     <section class="view" data-view="tools">
       <div class="card">
         <div class="cardtitle">Вручную, по шагам</div>
-        <p style="color:var(--mut);font-size:13px;margin:0 0 10px">
-          Один заход и стоп — вместо непрерывного автопрогона. Аккаунты и все
-          настройки берутся те же, что в «Рассылке».</p>
+        <p class="hint" style="margin:0 0 10px">Один заход и стоп, настройки — из «Рассылки».</p>
         <div class="maint">
           <button class="ghost" data-t="check" id="b-check">Проверить базу — один заход</button>
           <button class="ghost" data-t="drafts" id="b-drafts">Написать — один заход</button>
@@ -769,16 +561,8 @@
           <button class="ghost" data-t="clean" id="b-clean">Почистить контакты</button>
           <button class="danger" id="b-reset" style="margin-left:auto">Выйти из всех аккаунтов и очистить</button>
         </div>
-        <p style="color:var(--mut);font-size:12px;margin:10px 0 0">
-          «Почистить» убирает служебные контакты выбранного аккаунта, если что-то
-          осталось после сбоя.<br>
-          «Выйти из всех аккаунтов и очистить» — панель становится как новая:
-          каждый аккаунт <b>выходит из Telegram по-настоящему</b> (сессия
-          отзывается, в «Устройствах» её больше нет) и пропадает из списка.
-          База, результаты, история сообщений и файлы сессий уезжают в бэкап-папку
-          рядом с панелью — оттуда их можно вернуть. Вход в панель и текст
-          сообщения остаются. <b>Сводка за всё время не пропадает</b>: числа
-          складываются в кеш панели и продолжают считаться дальше.</p>
+        <p class="hint" style="margin:10px 0 0">«Почистить» — убрать служебные контакты после сбоя.
+          «Выйти из всех» — каждый аккаунт выходит из Telegram, данные уезжают в бэкап.</p>
       </div>
     </section>
 
@@ -821,25 +605,18 @@
 
       <label class="bigopt" style="margin:10px 0">
         <input type="checkbox" id="kit-fresh" checked>
-        <span><b>Отдельный вход</b> — панель заведёт аккаунту второе устройство и положит
-          в комплект его, а не свой ключ. Такой доступ видно ниже и можно отозвать одной
-          кнопкой; человек при этом может спокойно выходить из аккаунта у себя.
-          Без галочки поедет ключ панели — выйти будет нельзя.</span></label>
+        <span><b>Отдельный вход</b> — своё устройство для ПК, можно выгнать одной кнопкой.
+          Без галочки — ключ панели, выходить из аккаунта нельзя.</span></label>
 
       <div class="fieldset" id="kit-more-box" style="margin-top:12px" hidden>
         <div class="fh">Один пульт на несколько аккаунтов</div>
-        <p class="hint" style="margin:0 0 8px">Отметь ещё аккаунты — соберётся один
-          архив «Пульт»: один файл открывает все аккаунты, каждый своим окном
-          (Windows — меню с выбором). Ограничения в три аккаунта нет.
-          У каждого — свой отдельный вход.</p>
+        <p class="hint" style="margin:0 0 8px">Отметь ещё — один архив откроет все.</p>
         <div id="kit-more" class="accrun"></div>
       </div>
 
       <label class="bigopt" style="margin:10px 0">
         <input type="checkbox" id="kit-direct">
-        <span><b>Без прокси — у человека свой VPN.</b> Аккаунт откроется сразу,
-          без моста и без настройки прокси в Telegram. Каким адресом он выйдет,
-          решает его компьютер: включил VPN — через VPN, нет — своим домашним.</span>
+        <span><b>Без прокси</b> — у человека свой VPN</span>
       </label>
 
       <input id="kit-proxy" type="text" class="ftext" spellcheck="false"
@@ -862,10 +639,9 @@
       </div>
 
       <ol class="kit-steps" id="kit-steps"></ol>
-      <p class="hint kit-warn">Ключ у этого Telegram и у панели <b>один</b>. Из аккаунта
-        не выходить и прокси не отключать — иначе панель потеряет сессию.</p>
+      <p class="hint kit-warn">С ключом панели: из аккаунта не выходить, прокси не отключать.</p>
     </dialog>
 
   </main>
 </div>
-<script src="/app.js?v=r66"></script>
+<script src="/app.js?v=r85"></script>

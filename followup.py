@@ -180,6 +180,18 @@ async def main():
     delay_max = float(tglib.arg("delay-max", max(delay, DELAY_MAX)))
     send = tglib.flag("send")
 
+    # полный отдых после заморозки — даже не читаем диалоги (это тоже подключение)
+    rest = tglib.full_rest_left(acc)
+    if rest > 0:
+        say(f"«{acc['title']}» на полном отдыхе после заморозки ещё "
+            f"{rest // 3600} ч {rest % 3600 // 60} мин — ответы не смотрю")
+        tglib.state(done=0, left=0)
+        return
+    # «без рассылки» — ответы смотреть можно, а второе письмо людям не шлём
+    if send and tglib.send_hold_left(acc) > 0:
+        say("аккаунт без рассылки после заморозки — только смотрю ответы, второе письмо не шлю")
+        send = False
+
     # Текст второго письма нужен, только чтобы ЕГО отправлять. Просто смотреть,
     # кто ответил (для статистики и ручной работы), можно и без него.
     text2_raw = MESSAGE2.read_text("utf-8").strip() if MESSAGE2.exists() else ""

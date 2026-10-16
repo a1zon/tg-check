@@ -1,0 +1,193 @@
+<title>Читатели и писатели</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: одна колонка ~70 знаков, схема и таблицы шире текста; роли кодируются цветом (читатель — синий, писатель — охра) */
+:root {
+  --bg: #f6f7f9;
+  --surface: #ffffff;
+  --fg: #1c2230;
+  --muted: #5b6475;
+  --line: #dde1e8;
+  --reader: #2f6fb0;
+  --reader-bg: #e8f0f9;
+  --writer: #a5661a;
+  --writer-bg: #f8efe2;
+  --warn-bg: #fff6e0;
+  --warn-line: #e9c46a;
+  --code-bg: #eef1f5;
+  --f-body: "Golos Text", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --f-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #12161d; --surface: #1a1f28; --fg: #e4e8ef; --muted: #9aa3b2; --line: #2c3340;
+    --reader: #7fb2e8; --reader-bg: #1c2a3b; --writer: #e0a85c; --writer-bg: #33281a;
+    --warn-bg: #2e2716; --warn-line: #8a7230; --code-bg: #232a35; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #12161d; --surface: #1a1f28; --fg: #e4e8ef; --muted: #9aa3b2; --line: #2c3340;
+  --reader: #7fb2e8; --reader-bg: #1c2a3b; --writer: #e0a85c; --writer-bg: #33281a;
+  --warn-bg: #2e2716; --warn-line: #8a7230; --code-bg: #232a35; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--fg); font-family: var(--f-body);
+  font-size: 16px; line-height: 1.6; padding-inline: 16px; padding-block: 40px 64px;
+}
+main { max-width: 760px; margin: 0 auto; display: flex; flex-direction: column; gap: 36px; }
+header { display: flex; flex-direction: column; gap: 10px; }
+.eyebrow { font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+h1 { font-size: 36px; line-height: 1.15; margin: 0; font-weight: 700; text-wrap: balance; }
+h2 { font-size: 21px; margin: 0 0 12px; font-weight: 600; text-wrap: balance; }
+p { margin: 0; max-width: 68ch; }
+section { display: flex; flex-direction: column; }
+section > * + * { margin-top: 12px; }
+ul, ol { margin: 0; padding-left: 22px; display: flex; flex-direction: column; gap: 6px; max-width: 68ch; }
+code { font-family: var(--f-mono); font-size: .88em; background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
+.lead { font-size: 18px; color: var(--fg); }
+.tag { display: inline-block; font-size: 12px; font-weight: 600; padding: 1px 8px; border-radius: 999px; letter-spacing: .02em; vertical-align: 1px; }
+.tag.r { color: var(--reader); background: var(--reader-bg); }
+.tag.w { color: var(--writer); background: var(--writer-bg); }
+.roles { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
+.role { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 18px 20px; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.role.r { border-top: 3px solid var(--reader); }
+.role.w { border-top: 3px solid var(--writer); }
+.role h3 { margin: 0; font-size: 17px; }
+.role ul { padding-left: 18px; font-size: 15px; }
+.diagram { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 16px; overflow-x: auto; }
+.steps { counter-reset: s; list-style: none; padding: 0; gap: 12px; }
+.steps li { counter-increment: s; display: grid; grid-template-columns: 34px 1fr; gap: 12px; align-items: start; }
+.steps li::before { content: counter(s); font-family: var(--f-mono); font-weight: 500; font-size: 14px; width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; background: var(--code-bg); color: var(--muted); margin-top: 1px; }
+.steps li > div { min-width: 0; }
+.steps b { font-weight: 600; }
+.st { font-family: var(--f-mono); font-size: 12.5px; color: var(--muted); }
+.tbl { overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; font-size: 14.5px; min-width: 560px; }
+th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 600; }
+tr:last-child td { border-bottom: 0; }
+td.mono { font-family: var(--f-mono); font-size: 13px; }
+.note { background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 10px; padding: 16px 20px; display: flex; flex-direction: column; gap: 8px; }
+.note h2 { margin: 0; font-size: 18px; }
+.nums { font-variant-numeric: tabular-nums; }
+footer { color: var(--muted); font-size: 13px; }
+</style>
+
+<main>
+  <header>
+    <div class="eyebrow">tg-check · техническая схема</div>
+    <h1>Читатели и писатели</h1>
+    <p class="lead">Аккаунты делим на два пула. <span class="tag r">читатели</span> вступают в чаты, выкачивают историю и складывают её в БД. <span class="tag w">писатели</span> пишут лидам в личку и оставляют комментарии в чатах. Читатель никому не пишет, писатель не выкачивает чаты.</p>
+  </header>
+
+  <section>
+    <h2>Зачем делить</h2>
+    <ul>
+      <li>Жалобы и заморозки прилетают только писателям. База и найденные лиды не теряются вместе с ними.</li>
+      <li>Трафик почти весь у читателей: история чатов. Писателю хватает 1–2 МБ в день.</li>
+      <li>У действий разные лимиты Telegram: на выкачку истории флуд-паузы, на письма спам-ограничения. Не смешиваем их на одном аккаунте.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Поток данных</h2>
+    <div class="diagram">
+<pre class="mermaid">
+flowchart LR
+  Q["Очередь чатов"] --> R["Читатель: вступил, выкачал 90 дней"]
+  R --> M[("messages")]
+  M --> A["LLM: разбор по каждому автору"]
+  A --> L[("leads")]
+  L --> D["Писатель: личка"]
+  L --> C["Писатель: комментарий в чате"]
+  D --> J[("actions")]
+  C --> J
+</pre>
+    </div>
+  </section>
+
+  <section>
+    <h2>Шаги по одному чату</h2>
+    <ol class="steps">
+      <li><div><b>Чат в очереди.</b> Ссылка или @username, приоритет. <span class="st">new</span></div></li>
+      <li><div><b>Читатель берёт чат</b> (бронь, один чат на аккаунт) и вступает, если без этого историю не отдают. <span class="st">joined</span></div></li>
+      <li><div><b>Выкачивает 90 дней</b> пачками по 100 и пишет каждое сообщение в <code>messages</code>. <span class="st">downloaded</span></div></li>
+      <li><div><b>LLM-разбор.</b> Идём по авторам по одному. Для автора берём все его сообщения и по 10 сообщений до и после каждого, включая чужие. Ответ: хочет квартиру или нет, плюс заметка в свободной форме. Если в окне другой человек тоже показал интерес, он становится отдельным лидом. <span class="st">analyzed</span></div></li>
+      <li><div><b>Чистка.</b> Сырые сообщения чата удаляем, оставляем лидов и окна их сообщений. Читатель выходит из чата. <span class="st">done</span></div></li>
+      <li><div><b>Писатели берут лидов:</b> личка через текущую рассылку панели, комментарии в чатах, где писатель состоит.</div></li>
+    </ol>
+  </section>
+
+  <section>
+    <h2>Таблицы</h2>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>Таблица</th><th>Поля</th><th>Живёт</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">chats</td><td>id, username, title, status, reader, priority, done_at</td><td>всегда</td></tr>
+          <tr><td class="mono">messages</td><td>chat_id, msg_id, date, user_id, username, text, reply_to</td><td>до разбора чата</td></tr>
+          <tr><td class="mono">leads</td><td>user_id, username, chat_id, msg_id, note, found_at, writer, status</td><td>всегда</td></tr>
+          <tr><td class="mono">actions</td><td>account, kind (dm / comment), target, chat_id, text, at, result</td><td>всегда</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>Хватит SQLite на сервере панели. Postgres нужен, только если читателей разнесём по нескольким серверам.</p>
+  </section>
+
+  <section>
+    <h2>Правила для ролей</h2>
+    <div class="roles">
+      <div class="role r">
+        <h3><span class="tag r">читатель</span></h3>
+        <ul>
+          <li>Один чат за раз. <code>getHistory</code> по 100, пауза 1–3 с между запросами.</li>
+          <li>FloodWait: спим сколько просит Telegram, чат возвращаем в очередь.</li>
+          <li>Вступлений до ~20 в сутки. После <code>done</code> выходим из чата: у аккаунта потолок 500 чатов.</li>
+          <li>Не пишет, не комментирует, не ставит реакции. Прогрев не нужен.</li>
+          <li>Подойдут старые и дешёвые аккаунты.</li>
+        </ul>
+      </div>
+      <div class="role w">
+        <h3><span class="tag w">писатель</span></h3>
+        <ul>
+          <li>Личка через текущую рассылку: разгон 2→15 в день, 3–6 мин между письмами, сон 40–60 мин между порциями, @SpamBot перед порцией, детект заморозки.</li>
+          <li>Комментарии только в чатах, где состоит. Свой дневной лимит, не в ту же минуту, что письма.</li>
+          <li>Один лид — один писатель (брони <code>claims.py</code>). Одному человеку пишем один раз.</li>
+          <li>Прогретые аккаунты постарше.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section class="note">
+    <h2>Люди без @username</h2>
+    <p>По @username писатель напишет с любого аккаунта. Человека без @username видит только аккаунт, который встречал его сообщение: у каждого аккаунта свой <code>access_hash</code>. Поэтому у лида храним <code>chat_id</code> и <code>msg_id</code>. Писатель вступает в тот же чат, получает это сообщение и пишет уже со своим доступом.</p>
+    <p>Прежний <code>send-lead.py</code> писал аккаунтом, который нашёл человека (<code>profile.by</code>). При разделении ролей это надо делать иначе.</p>
+  </section>
+
+  <section>
+    <h2>Что уже есть в репозитории</h2>
+    <ul>
+      <li><code>parse-chat.py</code> — обход чатов из папки Telegram, сбор участников, помнит, где остановился (<code>chats.json</code>).</li>
+      <li><code>scan-leads.py</code> + <code>leadscan.py</code> и <code>send-lead.py</code> — прежний поиск горячих лидов (правила, 300 сообщений за 21 день) и первое письмо лиду. Убраны из панели 16.10, достаются из истории git.</li>
+      <li><code>draft-messages.py</code> и автопрогон в <code>admin.mjs</code> — рассылка с паузами, лимитами и детектом заморозки.</li>
+      <li><code>claims.py</code> — брони, чтобы два аккаунта не взяли одно и то же.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Трафик (Asocks, $3 за ГБ)</h2>
+    <ul class="nums">
+      <li>Одно сообщение истории — 0.3–0.6 КБ (замерено на чатах Екатеринбурга).</li>
+      <li>Чат за 3 месяца — около 3 МБ, очень бойкий — 10–15 МБ.</li>
+      <li>900 чатов в месяц — около 3.5 ГБ, примерно $11.</li>
+      <li>Писатель — 1–2 МБ в день.</li>
+      <li>Telegram на ПК через платный прокси не пускать: картинки и видео съедят больше всей системы.</li>
+    </ul>
+  </section>
+
+  <footer>Цифры трафика сняты 15.10.2026 через мобильный прокси Казахстана; лимиты рассылки — текущие настройки панели.</footer>
+</main>

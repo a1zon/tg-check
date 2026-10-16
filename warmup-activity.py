@@ -56,6 +56,25 @@ PLAN_DAYS = PLAN[-1][0]          # на сколько дней расписан
 # своими — самое человеческое. Подписок и групп тут уже не нужно.
 TOP_UP = {"sub": (0, 0), "chat": (0, 0), "react": (1, 1), "dm": (0, 1), "bot": (0, 0)}
 
+# ДОГРЕВ МЕЖДУ ПАЧКАМИ — для тех, кто сейчас в рассылке (панель зовёт с --between).
+#
+# TOP_UP выбирается к обеду, а вечером, пока аккаунт пишет людям, между
+# порциями писем он по полчаса молчит — со стороны это «только холодные
+# письма, больше ничего». Панель зовёт этот режим в глубоком сне между
+# порциями: одно лёгкое действие на промежуток. Потолок суточный и включает
+# утренний догрев (done_today считает всё за день), поэтому утро остаётся
+# прежним, а вечером остаётся запас на два-три действия.
+BETWEEN = {"sub": (0, 0), "chat": (0, 0), "react": (3, 4), "dm": (1, 2), "bot": (0, 0)}
+BETWEEN_KINDS = ("react", "dm")     # подписки, группы и боты посреди рассылки ни к чему
+
+# ДОГРЕВ ПОСЛЕ ЗАМОРОЗКИ — аккаунт «без рассылки» (sendHoldUntil): людям не
+# пишет, а живёт как обычный человек — читает каналы и ставит реакции,
+# переписывается со своими. Больше, чем TOP_UP (там 1–2 действия в сутки):
+# ему надо заново набрать историю, но без новых подписок, групп и ботов —
+# всё, что похоже на «накрутку» сразу после блокировки, ни к чему.
+REWARM = {"sub": (0, 0), "chat": (0, 0), "react": (3, 5), "dm": (2, 3), "bot": (0, 0)}
+REWARM_KINDS = ("react", "dm")
+
 
 def warm_days():
     """
@@ -141,14 +160,18 @@ def age_days(acc):
     return max(0, int((datetime.now(timezone.utc) - started).total_seconds() // 86400))
 
 
-def caps(acc_id, day):
+def caps(acc_id, day, between=False, rewarm=False, lively=False):
     """
     Предел на сегодня по каждому виду действий. Из вилки выбираем одно число
     на сутки — но так, чтобы оно не менялось между запусками: иначе аккаунт
     то «уже всё сделал», то «ещё может», и лимит перестаёт быть лимитом.
     """
-    if day >= warm_days():
-        step = TOP_UP            # прогрев пройден, остаётся догрев
+    if rewarm:
+        step = REWARM            # после заморозки — свой режим, при любом возрасте
+    elif day >= warm_days():
+        # прогрев пройден, остаётся догрев; аккаунт в рассылке («живой день» или
+        # между пачками) — потолок побольше: живёт весь день, а не 1–2 действия
+        step = BETWEEN if (between or lively) else TOP_UP
     else:
         step = {}
         for since, plan in plan_for(warm_days()):
@@ -312,6 +335,7 @@ async def do_react(client, acc, rows, data):
 
 FOCUS_DM = 8        # сколько переписки в сутки у аккаунта в фокусе
 FOCUS_WEIGHT = 10   # и насколько чаще он выбирает переписку среди действий
+FOCUS_PEER_DM = 3   # переписка в сутки у его собеседников (если она им вообще положена)
 
 
 def focus_ids(data):
@@ -330,8 +354,11 @@ def focus_ids(data):
 def dm_peers(acc):
     """Свои аккаунты, с которыми можно переписываться: найти их можно по id,
     @username или номеру — хоть по чему-то одному."""
+    # замороженному писать бессмысленно (не ответит) и вредно: переписка с ним
+    # связывает живой аккаунт с замороженным. Временно ограниченные — остаются
     return [a for a in tglib.load_accounts()
-            if a.get("id") != acc["id"] and (a.get("user_id") or a.get("username") or a.get("phone"))]
+            if a.get("id") != acc["id"] and a.get("spamKind") != "frozen"
+            and (a.get("user_id") or a.get("username") or a.get("phone"))]
 
 
 def talk_lines(data):
@@ -415,10 +442,12 @@ async def do_dm(client, acc, rows, data):
     from telethon import functions
     from telethon.errors import FloodWaitError
 
+    # None — «отправлять было нечего» (никто не ждёт ответа, писать первым
+    # некому), False — попытались и не вышло. Вызывающий различает их
     peers = dm_peers(acc)
     if not peers:
         say("писать некому: в панели нет других аккаунтов")
-        return False
+        return None
     by_id = {int(p["user_id"]): p for p in peers if p.get("user_id")}
     opens, replies = talk_lines(data)
     focus = focus_ids(data)
@@ -448,7 +477,7 @@ async def do_dm(client, acc, rows, data):
         free = [p for p in peers if int(p.get("user_id") or 0) not in last_out]
         if not free:
             say("все свои молчат в ответ на наши сообщения — новых не шлём, ждём ответов")
-            return False
+            return None
         # аккаунт в фокусе — первым; потом те, с кем ещё ни разу не говорили
         hot = [p for p in free if p["id"] in focus]
         fresh = [p for p in free if int(p.get("user_id") or 0) not in known]
@@ -471,7 +500,14 @@ async def do_dm(client, acc, rows, data):
     try:
         await asyncio.sleep(random.uniform(READ_MIN, READ_MAX))   # «печатает»
         await client.send_message(ent, text, link_preview=False)
-        await client.send_read_acknowledge(ent)
+        # отметка «прочитано» — мелочь: если не встала, письмо-то уже ушло и
+        # должно записаться как ok, а не «ошибка»
+        try:
+            await client.send_read_acknowledge(ent)
+        except FloodWaitError:
+            raise
+        except Exception:
+            pass
     except FloodWaitError:
         raise
     except Exception as e:
@@ -549,12 +585,27 @@ async def ask_spam_bot(client, acc, data):
 async def main():
     acc = tglib.resolve(tglib.arg("account", ""))
     want = tglib.arg("what", "")
+    between = tglib.flag("between")     # догрев между пачками рассылки
+    lively = tglib.flag("lively")       # «живой день»: аккаунт из рассылки греется весь день
+
+    # полный отдых после заморозки — ни одного действия, даже SpamBot
+    rest = tglib.full_rest_left(acc)
+    if rest > 0:
+        say(f"«{acc['title']}» на полном отдыхе после заморозки ещё "
+            f"{rest // 3600} ч {rest % 3600 // 60} мин — прогрев не трогает")
+        tglib.state(done=0, left=0, note="отдых после заморозки")
+        return
+    # «без рассылки» после заморозки — догрев: реакции, каналы, переписка со своими
+    rewarm = tglib.send_hold_left(acc) > 0
+
     data = load_list()
     day = age_days(acc)
 
     done = day >= warm_days()
-    say(f"аккаунт: {acc['title']}  |  "
-        f"{'догрев (прогрев пройден)' if done else f'прогрев, день {day} из {warm_days()}'}  |  "
+    mode = ("догрев после заморозки (людям не пишет)" if rewarm
+            else "догрев (прогрев пройден)" if done else f"прогрев, день {day} из {warm_days()}")
+    say(f"аккаунт: {acc['title']}  |  {mode}"
+        f"{'  |  между пачками рассылки' if between else ''}  |  "
         f"{tglib.proxy_label(acc.get('proxy'))}")
 
     if day < 1:
@@ -563,17 +614,23 @@ async def main():
         return
 
     rows = history(acc["id"])
-    cap = caps(acc["id"], day)
-    focused = acc["id"] in focus_ids(data)
+    cap = caps(acc["id"], day, between, rewarm, lively)
+    focus = focus_ids(data)
+    focused = acc["id"] in focus
     if focused:
         cap["dm"] = max(cap.get("dm", 0), FOCUS_DM)
         say(f"в фокусе переписки: до {FOCUS_DM} сообщений своим сегодня")
+    elif focus and cap.get("dm", 0) > 0:
+        # собеседники того, кто в фокусе: им и отвечать ему в первую очередь —
+        # при 1–2 переписках в сутки разговора бы не вышло
+        cap["dm"] = max(cap["dm"], FOCUS_PEER_DM)
     left = {k: cap.get(k, 0) - done_today(rows, k) for k in KINDS}
     say("на сегодня осталось: " + ", ".join(
         f"{k} {max(0, v)}/{cap.get(k, 0)}" for k, v in left.items()))
 
-    # раз в сутки спрашиваем у SpamBot, всё ли в порядке
-    if want in ("", "spam") and not tried_today(rows, "spam"):
+    # раз в сутки спрашиваем у SpamBot, всё ли в порядке. Между пачками не
+    # спрашиваем: рассылка сама спрашивает его перед каждой порцией
+    if want in ("", "spam") and not between and not tried_today(rows, "spam"):
         tglib.state(act=DOING["spam"], phase="doing")
         client = await tglib.connect(acc)
         try:
@@ -582,6 +639,12 @@ async def main():
             await tglib.aclose(client)
         tglib.state(done=1, left=sum(max(0, v) for v in left.values()),
                     act=DONE["spam"], phase="done")
+        return
+    if want == "spam":
+        # панель просила только SpamBot (замороженный аккаунт), а сегодня уже
+        # спрашивали — других действий ему не положено
+        say("SpamBot сегодня уже спрашивали")
+        tglib.state(done=0, left=0, note="дневной предел прогрева")
         return
 
     kinds = [k for k, v in left.items() if v > 0] if not want else [want]
@@ -595,6 +658,10 @@ async def main():
         # сжечь заход
         if not dm_peers(acc):
             kinds = [k for k in kinds if k != "dm"]
+    if between:
+        kinds = [k for k in kinds if k in BETWEEN_KINDS]
+    if rewarm:
+        kinds = [k for k in kinds if k in REWARM_KINDS]
     if not kinds:
         say("на сегодня всё — аккаунт своё отработал")
         tglib.state(done=0, left=0, note="дневной предел прогрева")
@@ -607,7 +674,9 @@ async def main():
     # у аккаунта минуты, и разбрасываться ими незачем
     subbed = any(r.get("action") in ("sub", "chat") and r.get("note") == "ok" for r in rows)
     if kind == "react" and not subbed:
-        kind = "sub" if left.get("sub", 0) > 0 else ("dm" if left.get("dm", 0) > 0 else kind)
+        # между пачками не подписываемся — лучше напишем своим
+        kind = ("sub" if left.get("sub", 0) > 0 and not between
+                else "dm" if left.get("dm", 0) > 0 else kind)
     # сообщаем панели, что аккаунт делает прямо сейчас — до долгой части
     tglib.state(act=DOING.get(kind, "работает"), phase="doing")
     client = await tglib.connect(acc)
@@ -622,6 +691,15 @@ async def main():
             ok = await do_react(client, acc, rows, data)
         elif kind == "dm":
             ok = await do_dm(client, acc, rows, data)
+            # Писать было некому (свои ещё не ответили — второе подряд без ответа
+            # не шлём) — заход не пропадает: почитаем ленту и поставим реакцию.
+            # Только в новых режимах («живой день», между пачками, фокус): у
+            # остальных — как было. И только при None («нечего слать»), не после
+            # ошибки отправки: после сигнала Telegram продолжать не надо.
+            if ok is None and (lively or between or focus) and left.get("react", 0) > 0:
+                kind = "react"
+                tglib.state(act=DOING["react"], phase="doing")
+                ok = await do_react(client, acc, rows, data)
         elif kind == "bot":
             ok = await do_bot(client, acc, rows, data)
         else:

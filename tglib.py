@@ -41,8 +41,6 @@ CHAT_NUMBERS = CHATS_DIR / "numbers.csv"
 CHAT_RESULTS = CHATS_DIR / "results.csv"
 ALL_DRAFTS = (DIR / "drafts.csv", CHATS_DIR / "drafts.csv")   # история отправок аккаунта — общая
 MEMBERS = DIR / "members.csv"    # участники чатов, собранные разбором
-LEADS = DIR / "leads.json"       # карточки горячих лидов (поиск по сообщениям)
-LEADS_LOG = DIR / "leads-log.csv"  # лог классификации сообщений (аудит)
 WARMUP = DIR / "warmup.csv"      # что аккаунты делали на прогреве
 WARM_LIST = DIR / "warm-list.json"           # куда прогрев их водит (правит хозяин)
 WARM_LIST_DEFAULT = CODE / "warm-list.default.json"  # образец, приезжает с кодом
@@ -318,13 +316,67 @@ NO_NET = ("не достучаться до Telegram по MTProto.\n"
           "через который проходит Telegram (проверить: python proxy-check.py --account %s).")
 
 
+TRAFFIC = DIR / "traffic.csv"     # сколько трафика съела каждая задача (через какой прокси)
+TRAFFIC_HEAD = ["at", "account", "task", "proxy", "up", "down"]
+
+
+def _sock_bytes(peer=""):
+    """
+    Сколько байт прошло через TCP-сокеты этого процесса (ss -ti): (отправлено,
+    получено). peer — «host:port» прокси: тогда считаем только соединения с ним,
+    чтобы запросы мимо прокси (например, к LLM) не попадали в его трафик.
+    """
+    import subprocess
+    pid = f"pid={os.getpid()},"
+    try:
+        lines = subprocess.run(["ss", "-tinpH"], capture_output=True, text=True, timeout=5).stdout.splitlines()
+    except Exception:
+        return 0, 0
+    up = down = 0
+    for i, ln in enumerate(lines):
+        if pid not in ln or (peer and f"{peer} " not in ln and f"{peer}\t" not in ln):
+            continue
+        info = lines[i + 1] if i + 1 < len(lines) else ""
+        s = re.search(r"bytes_sent:(\d+)", info) or re.search(r"bytes_acked:(\d+)", info)
+        r = re.search(r"bytes_received:(\d+)", info)
+        up += int(s.group(1)) if s else 0
+        down += int(r.group(1)) if r else 0
+    return up, down
+
+
+def _log_traffic(client):
+    """
+    Записать, сколько трафика съела задача. Прокси платный за гигабайт —
+    без этой строки не видно, на что он уходит: Asocks знает только общий итог.
+    Считаем по сокетам процесса перед отключением; прокси — адрес без логина.
+    """
+    acc = getattr(client, "_tg_acc", None)
+    if not acc:
+        return
+    p = parse_proxy(acc.get("proxy"))
+    proxy = f"{p[1]}:{p[2]}" if p else "direct"
+    up, down = _sock_bytes(proxy if p else "")
+    if not (up or down):
+        return
+    task = Path(sys.argv[0]).stem
+    try:
+        append_row(TRAFFIC, [now_iso(), acc.get("id", ""), task, proxy, up, down], TRAFFIC_HEAD)
+    except Exception:
+        pass    # учёт — вспомогательное, задачу из-за него не роняем
+
+
 async def aclose(client):
     """
     Отключение, глотающее ошибки уборки. На Python 3.13 Telethon 1.44 иногда
     падает на disconnect() («attempt to write a readonly database» при
     сохранении состояния) — это шаг уборки уже ПОСЛЕ вердикта, и он не должен
     ни ронять задачу, ни маскировать настоящую причину трейсбеком.
+    Перед отключением записываем трафик задачи (traffic.csv).
     """
+    try:
+        _log_traffic(client)
+    except Exception:
+        pass
     try:
         await client.disconnect()
     except Exception:
@@ -341,8 +393,18 @@ async def connect(acc, **kw):
     """
     from telethon.errors.common import AuthKeyNotFound
 
+    # ПОЛНЫЙ отдых после заморозки (fullRestUntil): никакая задача не
+    # подключает аккаунт к Telegram вовсе — ни письма, ни прогрев, ни чтение
+    # ответов, ни SpamBot. Здесь последний рубеж для всех задач сразу.
+    # («Без рассылки», sendHoldUntil, сюда не относится: прогрев подключается.)
+    rest = full_rest_left(acc)
+    if rest > 0:
+        raise SystemExit(f"«{acc.get('title', acc['id'])}» на полном отдыхе после заморозки ещё "
+                         f"{rest // 3600} ч {rest % 3600 // 60} мин — к Telegram не подключаю")
+
     quiet_telethon()
     client = make_client(acc, **kw)
+    client._tg_acc = acc          # для учёта трафика при отключении (aclose)
     try:
         await client.connect()
     except AuthKeyNotFound:
@@ -668,6 +730,22 @@ SPAM_LIMITED = (
     "я боюсь",
 )
 
+# Заморозка — это НЕ временный лимит. Telegram блокирует аккаунт по жалобам
+# получателей после ручной модерации; сам срок не снимается, нужен разбан.
+# SpamBot отвечает так даже замороженному аккаунту, поэтому ловим именно текст.
+SPAM_BLOCK = (
+    "your account was blocked",
+    "account has been blocked",
+    "violations of the telegram terms of service",
+    "confirmed by our moderators",
+    "account was frozen",
+    "ваш аккаунт заблокирован",
+    "аккаунт был заблокирован",
+    "аккаунт заморожен",
+    "ваш аккаунт заморожен",
+    "нарушение условий использования",
+)
+
 # «Ограничения будут автоматически сняты 29 Sep 2026, 08:32 UTC» /
 # «will be automatically released on 29 Sep 2026, 08:32 UTC» — дата снятия
 _SPAM_UNTIL = re.compile(r"(\d{1,2}) ([A-Za-z]{3})[a-z]* (\d{4}),? (\d{1,2}):(\d{2}) UTC")
@@ -711,6 +789,9 @@ def spam_verdict(text):
     low = t.lower()
     if not low:
         return False, "бот не ответил"
+    # Заморозку проверяем ПЕРВОЙ: это жёсткая блокировка, важнее любого лимита.
+    if spam_blocked(t):
+        return False, t[:200]
     if any(w in low for w in SPAM_FREE):
         return True, t[:200]
     if any(w in low for w in SPAM_LIMITED):
@@ -718,10 +799,144 @@ def spam_verdict(text):
     return False, "не понял ответ бота: " + t[:160]
 
 
+def spam_blocked(text) -> bool:
+    """Заморожен ли аккаунт — жёсткая блокировка по жалобам (ToS), не временный лимит."""
+    low = " ".join(str(text or "").replace("’", "'").split()).lower()
+    return any(w in low for w in SPAM_BLOCK)
+
+
+def is_frozen_error(e) -> bool:
+    """
+    Ошибка Telegram именно о ЗАМОРОЗКЕ аккаунта (FROZEN_METHOD_INVALID и родня),
+    а не случайная строка со словом frozen (frozenset, frozen dataclass и т.п.).
+    Замороженному аккаунту Telegram валит FROZEN_* почти на любой метод отправки.
+    """
+    s = (str(e) + " " + type(e).__name__).upper()
+    return "FROZEN_" in s or "FROZENMETHOD" in s
+
+
+def _until_left(acc, key) -> int:
+    """Сколько секунд осталось до отметки времени acc[key] (ISO), 0 — прошла или нет её."""
+    v = acc.get(key)
+    if not v:
+        return 0
+    try:
+        until = datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+        # вписали руками без пояса («2026-10-20») — считаем UTC, как Date.parse в панели
+        if until.tzinfo is None:
+            until = until.replace(tzinfo=timezone.utc)
+        return max(0, int((until - datetime.now(timezone.utc)).total_seconds()))
+    except Exception:
+        return 0
+
+
+def full_rest_left(acc) -> int:
+    """
+    ПОЛНЫЙ отдых после заморозки (fullRestUntil): аккаунт не подключается к
+    Telegram вовсе — ни писем, ни прогрева, ни ответов. Секунд до конца, 0 — нет.
+    """
+    return _until_left(acc, "fullRestUntil")
+
+
+def send_hold_left(acc) -> int:
+    """
+    Сколько секунд аккаунту ещё нельзя писать людям, 0 — можно.
+
+    sendHoldUntil — «без рассылки»: холодных писем нет, а прогреваться можно
+    (реакции, каналы, переписка со своими). Полный отдых — тем более без писем.
+    Запрет стоит на уровне самой задачи: роль в панели можно случайно
+    переключить одним «ОК» при запуске, а отметку — только руками.
+    """
+    return max(_until_left(acc, "sendHoldUntil"), full_rest_left(acc))
+
+
+# когда с какого прокси последний раз уходило письмо — общий на профиль
+SEND_GAP = DIR / ".send-gap.json"
+SEND_GAP_LOCK = DIR / ".send-gap.lock"
+SEND_GAP_GIVE_UP = 15 * 60     # дольше ждать соседей незачем — что-то не так, пишем
+
+
+async def wait_send_gap(acc, gap_min, gap_max):
+    """
+    Не дать двум аккаунтам написать с одного IP почти одновременно.
+
+    По очереди такого не бывает: пишет кто-то один. В параллели аккаунты на
+    общем прокси стартуют в один тик и уходят залпом — два-три письма с одного
+    адреса в одну секунду (14.10: a3 и a2 в 18:10:57–58, a1 через 5 с после a2,
+    и a1 заморозили). Для Telegram это прямой признак фермы.
+
+    Перед каждым письмом смотрим, когда с ЭТОГО ЖЕ прокси последний раз уходило
+    письмо любым аккаунтом профиля, и если раньше паузы — ждём и смотрим снова.
+    Свою паузу между своими письмами аккаунт держит как раньше, тут только
+    разводим разных между собой. Возвращает, сколько прождали, сек.
+
+    Сломаться тут ничто не должно: человек к этому моменту уже найден (а по
+    номерам — заведён в контакты), и упавший разнос сжёг бы попытку. Если
+    замок или файл недоступны (права, битый JSON) — выдерживаем паузу вслепую.
+    """
+    import random
+    try:
+        return await _wait_send_gap(acc, gap_min, gap_max)
+    except Exception as e:
+        say(f"разнос писем: {type(e).__name__} — выдерживаю паузу вслепую")
+        w = random.uniform(gap_min, max(gap_min, gap_max))
+        await asyncio.sleep(w)
+        return w
+
+
+async def _wait_send_gap(acc, gap_min, gap_max):
+    import fcntl
+    import random
+    import time
+    key = str(acc.get("proxy") or "").strip() or "direct"
+    gap = random.uniform(gap_min, max(gap_min, gap_max))
+    waited = 0.0
+    while True:
+        with open(SEND_GAP_LOCK, "a+") as lk:
+            fcntl.flock(lk, fcntl.LOCK_EX)
+            try:
+                seen = json.loads(SEND_GAP.read_text("utf-8")) if SEND_GAP.exists() else {}
+                seen = seen if isinstance(seen, dict) else {}
+                last = float(seen.get(key, 0) or 0)
+            except Exception:
+                seen, last = {}, 0.0
+            now = time.time()
+            # метка из будущего (перевели часы, битый файл) — не повод ждать вечно
+            last = min(last, now)
+            left = last + gap - now
+            if left <= 0 or waited >= SEND_GAP_GIVE_UP:
+                seen[key] = now
+                SEND_GAP.write_text(json.dumps(seen), "utf-8")
+                return waited
+        # замок на время сна отпускаем — иначе соседи ждали бы не своей очереди
+        step = min(left, 30.0) + random.uniform(0.5, 3.0)
+        await asyncio.sleep(step)
+        waited += step
+
+
 SPAM_FRESH = 30 * 60          # столько держим прошлый ЧИСТЫЙ вердикт
 
+# Сняли ограничение — сразу писать незнакомым не идём: первое холодное письмо
+# после снятия — самый короткий путь к новому, более долгому ограничению.
+# Сначала столько «без рассылки» (sendHoldUntil: людям не пишет, прогрев идёт),
+# потом письма заново разгоняются с 2 в сутки — день рассылки панель считает
+# от конца этого отдыха (server/warmup.mjs). То же число — в admin.mjs.
+REST_AFTER_RESTRICTION = 3 * 86400
 
-async def spam_check(client, acc):
+
+def hold_after_restriction(acc_id):
+    """
+    Поля отдыха после снятого ограничения — или {}, если отдых уже стоит
+    (его поставила панель по дате снятия или хозяин руками после заморозки).
+    """
+    cur = next((a for a in load_accounts() if a.get("id") == acc_id), {})
+    if _until_left(cur, "sendHoldUntil") > 0:
+        return {}
+    until = datetime.now(timezone.utc) + timedelta(seconds=REST_AFTER_RESTRICTION)
+    return {"sendHoldUntil": until.isoformat(timespec="milliseconds").replace("+00:00", "Z")}
+
+
+async def spam_check(client, acc, force=False):
     """
     Спросить бота и записать вердикт в реестр аккаунтов.
 
@@ -734,7 +949,10 @@ async def spam_check(client, acc):
     через прокси и пять секунд ожидания на ровном месте. Запрет не кешируем
     никогда: ограничение надо увидеть сразу.
     """
-    if acc.get("spamOk") is True and acc.get("spamAt"):
+    # force=True — не доверять кэшу: перед реальной отправкой холодным нужен
+    # свежий ответ бота, иначе заморозка в пределах получаса после чистого
+    # вердикта не видна на старте прогона (кэш вернёт «свободен»).
+    if not force and acc.get("spamOk") is True and acc.get("spamAt"):
         try:
             age = (datetime.now(timezone.utc) - datetime.fromisoformat(
                 str(acc["spamAt"]).replace("Z", "+00:00"))).total_seconds()
@@ -748,22 +966,41 @@ async def spam_check(client, acc):
         msgs = await client.get_messages(SPAM_BOT, limit=1)
         text = (msgs[0].message if msgs else "") or ""
     except Exception as e:
+        # Замороженный аккаунт валится FROZEN_* уже на обращении к боту —
+        # это не «не дозвонились», а приговор: помечаем и уводим в карантин,
+        # иначе main пойдёт «по прошлому вердикту» и пустит его в отправку.
+        if is_frozen_error(e):
+            set_field(acc["id"], spamOk=False, spamUntil="", spamKind="frozen",
+                      spamAt=now_iso(), spam=cell(
+                          "заморожен — блокировка по жалобам (ToS), "
+                          "снимается только разбаном через @SpamBot/поддержку"))
+            return False, "заморожен — блокировка по жалобам (ToS)"
         # не дозвонились до бота — это не приговор аккаунту, прошлый вердикт
         # остаётся в силе
         return None, f"{type(e).__name__}: {str(e).splitlines()[0][:80]}"
     ok, note = spam_verdict(text)
-    until = "" if ok else spam_until(text)
-    # временно (есть дата снятия) или бессрочно — это главное, что надо знать
-    kind = "" if ok else ("temp" if until else "perm")
-    if not ok and not note.startswith("не понял"):
+    frozen = spam_blocked(text)
+    # у заморозки нет срока снятия — until не ставим, даже если в тексте мелькнёт
+    # дата, иначе карантин по дате сам отпустит бессрочно замороженный акк
+    until = "" if (ok or frozen) else spam_until(text)
+    # заморозка (жалобы+модерация) / временно (есть дата снятия) / бессрочно
+    kind = "" if ok else ("frozen" if frozen else "temp" if until else "perm")
+    if frozen:
+        note = "заморожен — блокировка по жалобам (ToS), снимается только разбаном через @SpamBot/поддержку"
+    elif not ok and not note.startswith("не понял"):
         when = ""
         if until:
             local = datetime.fromisoformat(until.replace("Z", "+00:00")).astimezone(
                 timezone(timedelta(hours=5)))
             when = f"временно, до {local:%d.%m %H:%M} по Екб"
         note = f"{when or 'бессрочно'} — {spam_reason(text)}"
-    set_field(acc["id"], spam=cell(note), spamAt=now_iso(), spamOk=ok,
-              spamUntil=until, spamKind=kind)
+    fields = dict(spam=cell(note), spamAt=now_iso(), spamOk=ok,
+                  spamUntil=until, spamKind=kind)
+    # бот сказал «свободен» после ограничения или заморозки — отдых без рассылки
+    if ok and acc.get("spamOk") is False:
+        fields.update(hold_after_restriction(acc["id"]))
+    set_field(acc["id"], **fields)
+    acc.update(fields)   # задача дальше смотрит на свежий вердикт и отдых
     return ok, note
 
 
@@ -824,7 +1061,8 @@ def chat_title(title):
 def chat_rank_fn():
     """
     Уровень чата для очереди: 0 — самые близкие к теме, дальше по порядку,
-    последним — всё, что не подошло. Уровни и слова — в chat-priority.txt.
+    последним — всё, что не подошло. Уровни и слова — в chat-priority.txt;
+    слово с «=» впереди — точное название чата, а не кусок.
     """
     levels = []
     try:
@@ -834,9 +1072,13 @@ def chat_rank_fn():
                 levels.append([w.strip().lower() for w in line.split(":", 1)[1].split(",") if w.strip()])
     except Exception:
         pass
+    # «=название» — только этот чат целиком: короткое «чат екатеринбург» иначе
+    # цепляло бы и «Бизнес чат Екатеринбург»
+    def hit(w, low):
+        return w[1:].strip() == low if w.startswith("=") else w in low
     def rank(title):
         low = str(title or "").lower()
-        return next((i for i, words in enumerate(levels) if any(w in low for w in words)), len(levels))
+        return next((i for i, words in enumerate(levels) if any(hit(w, low) for w in words)), len(levels))
     return rank
 
 

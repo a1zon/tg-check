@@ -17,10 +17,8 @@
  *   1338  БАЗА ПОЛУЧАТЕЛЕЙ — файл с номерами и люди из чатов
  *   1476  ПРОГРЕВ — расписание, срок, смена IP
  *   1736  ОТКРЫТЬ АККАУНТ НА СВОЁМ КОМПЬЮТЕРЕ
- *   1888  ЕГРЮЛ
  *   1997  РЕЖИМЫ (боковая панель)
  *   2021  ОБЗОР + КАЛЬКУЛЯТОР МОЩНОСТИ
- *   2088  АВТОСКАН ЛИДОВ: интервал + чаты + следующий заход
  *   2140  СКАЧИВАНИЕ СПИСКОВ (по запросу, не вживую)
  *
  * Всё рисуется опросом раз в две секунды (см. loop внизу файла):
@@ -44,6 +42,8 @@ const esc = (v) => String(v ?? '').replace(/[&<>"']/g,
 
 /** Вошёл или нет — это первое, что нужно видеть в списке. */
 const accReady = (a) => a.session && a.authed;
+// какие прокси сторож сейчас считает лежащими (по подписи без пароля) — из state()
+let proxyDownLabels = new Set();
 const accBadge = (a) =>
   // «Подключение сессии — Вася» в бейдж не влезает и дёргает вёрстку;
   // при заливке показываем короткое и понятное
@@ -54,9 +54,14 @@ const accBadge = (a) =>
   : a.quarantine ? `<span class="st st-no">${a.spamUntil
       ? 'ограничен до ' + new Intl.DateTimeFormat('ru-RU', {timeZone: 'Asia/Yekaterinburg',
           day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'}).format(new Date(a.spamUntil))
-      : a.spamKind === 'perm' ? 'ограничен бессрочно' : 'ограничен'}</span>`
+      : a.spamKind === 'frozen' ? 'заморожен' : a.spamKind === 'perm' ? 'ограничен бессрочно' : 'ограничен'}</span>`
+  // «вошёл» — это только файл сессии; без живого прокси работать он не будет
+  : accReady(a) && !a.proxy ? '<span class="st st-no" title="Прокси не задан — аккаунт пойдёт в Telegram с IP сервера">без прокси</span>'
+  : accReady(a) && proxyDownLabels.has(a.proxyLabel) ? '<span class="st st-no">прокси не отвечает</span>'
   : accReady(a) ? '<span class="st st-ok">вошёл</span>'
   : a.profile && !a.session ? '<span class="st st-no">нужен перенос</span>'
+  // файл сессии есть, а входа нет — Telegram отозвал ключ панели
+  : a.session && !a.authed ? '<span class="st st-no" title="Telegram отозвал ключ панели — нужен новый вход">сессия отозвана</span>'
   : '<span class="st st-no">не вошёл</span>';
 
 /**
@@ -82,24 +87,30 @@ const fmtLeftJs = (sec) => {
   return m >= 60 ? `${Math.floor(m / 60)} ч ${m % 60} мин` : `${m} мин`;
 };
 const warmLine = (a) => {
+  const ekbAt = (t) => new Intl.DateTimeFormat('ru-RU', {timeZone: 'Asia/Yekaterinburg',
+    day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'}).format(new Date(t));
+  // ключ панели отозван (часто — «завершить другие сеансы» на другом устройстве):
+  // прогон его выкинул, писать он не может, пока не войти заново
+  if (a.session && !a.authed) return '⛔ Telegram отозвал сессию — войди заново: «Войти по коду» или «⋯ → Залить сессию»';
+  if (a.restUntil) return `😴 отдыхает после заморозки до ${ekbAt(a.restUntil)} — в Telegram не заходит`;
+  if (a.holdUntil) return `🌿 после заморозки до ${ekbAt(a.holdUntil)} только греется, людям не пишет`;
   if (a.quarantine) {
-    // временно (с датой снятия) или бессрочно — это пишет сама панель по ответу SpamBot
-    return `⛔ ограничен Telegram: ${esc((a.spam || '').slice(0, 140))}` +
-      (a.spamKind === 'perm' ? ' · бессрочно, пока SpamBot не снимет'
-        : ' · писать незнакомым нельзя, вернётся в рассылку сам');
+    // полный ответ SpamBot — в подсказке: в строке он занимал три строчки
+    const tip = esc((a.spam || '').slice(0, 300));
+    return `<span title="${tip}">` + (a.spamKind === 'frozen' ? '⛔ заморожен — нужен разбан через @SpamBot'
+      : a.spamKind === 'perm' ? '⛔ ограничен бессрочно'
+      : '⛔ ограничен — вернётся в рассылку сам') + '</span>';
   }
   const w = a.warm;
   if (!w) return '';
-  if (w.resting) return `🌱 отлёжка нового аккаунта — ещё ${fmtLeftJs(w.restLeft)}: первые сутки после покупки ничего не делаем, иначе Telegram забанит`;
+  if (w.resting) return `🌱 новый, отлёживается ещё ${fmtLeftJs(w.restLeft)}`;
   // прогрев и рассылка — разные часы: первый считает возраст аккаунта, вторая —
-  // дни, когда он реально пишет людям. Раньше они сливались в одну строку
-  const warmTxt = w.day >= w.fullDay ? `прогрет (день ${w.day})` : `день ${w.day} из ${w.fullDay}`;
+  // дни, когда он реально пишет людям
+  const warmTxt = w.day >= w.fullDay ? 'прогрет' : `прогрев ${w.day} из ${w.fullDay} дн.`;
   const od = typeof a.outreachDay === 'number' ? a.outreachDay : -1;
-  const outTxt = od < 0 ? 'ещё не писал — начнёт с 2 писем в день'
-    : `день ${od + 1} · ${w.cap} писем в день`;
-  const chk = a.checks ? ` · проверка номеров: ${a.checks.cap} в день` : '';
-  const now = a.now ? `<br>▸ сейчас: ${esc(a.now)}` : '';
-  return `🌱 прогрев: ${warmTxt}<br>✉️ рассылка: ${outTxt}${chk}${now}`;
+  const outTxt = a.role === 'warm' ? '' : od < 0 ? ' · ещё не писал' : ` · пишет до ${w.cap} в день`;
+  const now = a.now ? `<br>▸ ${esc(a.now)}` : '';
+  return `🌱 ${warmTxt}${outTxt}${now}`;
 };
 
 /** Кто это на самом деле: имя, @ и телефон — их отдаёт Telegram при входе. */
@@ -119,6 +130,16 @@ const accWho = (a) => {
        : 'войди по QR или залей готовую сессию';
 };
 
+// меню «⋯»: пункт нажат или клик мимо — закрываем; открытым держим одно
+document.addEventListener('click', (e) => {
+  const inMenu = e.target.closest('.accmenu');
+  document.querySelectorAll('.accmenu[open]').forEach(d => {
+    if (d !== inMenu || e.target.closest('.accmenu-list button')) d.open = false;
+  });
+  // пока меню было открыто, список мог отстать — догоняем
+  setTimeout(() => { if (!document.querySelector('#accs .accmenu[open]')) paintAccounts(); }, 0);
+});
+
 let accsHtml = '';        // что уже нарисовано: лишний раз DOM не трогаем
 /* ═══════════ АККАУНТЫ — строка аккаунта и кнопки при ней ═══════════ */
 
@@ -135,40 +156,46 @@ function paintAccounts() {
   // кого пустить в работу, выбирают вкладки рассылки — здесь только показ
   if (work === null) useWork(pickSet);
   // роль: прогрев идёт у всех, в рассылку попадают только отмеченные ✉️
+  // роль — переключатель: прогрев идёт у всех, в рассылку попадают только ✉️
   const rolePill = (a) => a.role === 'warm'
-    ? `<span class="daypill rolepill warm" data-role="${a.id}" title="В рассылке не участвует, только греется. Нажми, чтобы перевести в рассылку">🌱 только прогрев</span>`
-    : `<span class="daypill rolepill" data-role="${a.id}" title="Греется и участвует в рассылке. Нажми, чтобы оставить только прогрев">✉️ в рассылке</span>`;
+    ? `<span class="daypill rolepill warm" data-role="${a.id}" title="Только греется. Нажми — взять в рассылку">🌱 только прогрев</span>`
+    : `<span class="daypill rolepill" data-role="${a.id}" title="Греется и пишет людям. Нажми — оставить только прогрев">✉️ рассылка</span>`;
   // где аккаунт сейчас занят — чтобы не искать его по вкладкам
-  const where = (a) => a.run === 'chats' ? '<span class="tag">в рассылке по чатам</span>'
-    : a.run === 'phones' ? '<span class="tag">в рассылке по номерам</span>' : '';
+  const where = (a) => a.run === 'chats' ? '<span class="tag">▶ по чатам</span>'
+    : a.run === 'phones' ? '<span class="tag">▶ по номерам</span>' : '';
+  // редкие действия — в меню «⋯», на виду только то, что нужно часто
+  const item = (attr, id, text, busy = true) =>
+    `<button class="ghost mini" data-${attr}="${id}"${busy ? ' data-busy' : ''}>${text}</button>`;
   const html = accs.map(a => `
-    <label class="acc ${a.id === cur ? 'sel' : ''}">
+    <div class="acc ${a.id === cur ? 'sel' : ''}">
       ${a.avatar ? `<img class="ava" src="/api/avatar?id=${a.id}&v=${a.avatar}" alt="">`
         : `<span class="ava ava-none">${esc((a.name || a.title || '?').trim().charAt(0).toUpperCase())}</span>`}
-      <span class="nm"><b class="acc-name">${esc(a.name || a.title)} ${accBadge(a)} ${where(a)}</b>
+      <span class="nm"><b class="acc-name">${esc(a.name || a.title)} ${accBadge(a)} ${
+          accReady(a) ? rolePill(a) : ''} ${where(a)}</b>
         <span class="${accReady(a) ? 'on' : 'off'}">${accSub(a)}</span>
-        <span>${esc(a.proxyLabel)}${a.device ? ' · ' + esc(a.device) : ''} · написано ${a.sent} · черновиков ${a.drafts}${
-          a.held ? ` · держит ${a.held}` : ''}</span>
-        <span class="warm ${a.quarantine || (a.warm && a.warm.resting) ? 'off' : ''}">${warmLine(a)}</span>${
-          accReady(a) ? rolePill(a) : ''}${
-          a.warm && a.role !== 'warm' ? `<span class="daypill" data-cap="${a.id}" title="Сообщений в день этим аккаунтом — нажми, чтобы изменить">сегодня ${a.sentToday || 0} из ${a.warm.cap}/день${a.dailyCap ? ' ⚙' : ''}</span>` : ''}</span>
-      <span class="accbtns">
-        <button class="ghost mini" data-tgname="${a.id}" data-busy title="Имя и фамилия в самом Telegram">Имя</button>
-        <button class="ghost mini" data-tguser="${a.id}" data-busy title="@username в Telegram">@ник</button>
-        <button class="ghost mini" data-tgpic="${a.id}" data-busy title="Аватарка в Telegram">Аватар</button>
-        <button class="ghost mini" data-desk="${a.id}" data-busy title="Открыть этот аккаунт в Telegram Desktop">Desktop</button>
-        <button class="ghost mini" data-pckit="${a.id}" title="Скачать комплект и открыть аккаунт в Telegram Desktop на своём компьютере">На ПК</button>
-        <button class="ghost mini" data-prx="${a.id}" data-busy title="Через какой прокси ходит">Прокси</button>
-        <button class="ghost mini" data-chk="${a.id}" data-busy title="Проверить, жив ли прокси">IP</button>
-        <button class="ghost mini" data-imp="${a.id}" data-busy title="Залить файл сессии">Сессия</button>${
-        accReady(a) ? ''
-          : `<button class="ghost mini" data-code="${a.id}" data-busy title="Войти по номеру: Telegram пришлёт код">Код</button>`}${
-        a.profile && !a.session
-          ? `<button class="ghost mini" data-mig="${a.id}" data-busy>На Telethon</button>` : ''}
-        <button class="ghost mini" data-ren="${a.id}" data-busy title="Название только внутри панели">Ярлык</button>
-        <button class="ghost mini" data-del="${a.id}" data-busy title="Удалить сессию с этого компьютера">Убрать</button>
+        <span>${a.proxy ? 'прокси ' + esc(String(a.proxyLabel).replace(/\s*\(.*\)$/, '')) : 'без прокси'} · написал ${a.sent}${
+          a.dailyCap ? ` · свой предел ${a.dailyCap} в день` : ''}</span>
+        <span class="warm ${a.quarantine || (a.warm && a.warm.resting) ? 'off' : ''}">${warmLine(a)}</span></span>
+      <span class="accbtns">${
+        accReady(a) ? '' : item('code', a.id, 'Войти по коду')}${
+        a.profile && !a.session ? item('mig', a.id, 'На Telethon') : ''}
+        ${item('pckit', a.id, 'На ПК', false)}
+        ${item('prx', a.id, 'Прокси')}
+        <details class="accmenu"><summary class="ghost mini" title="Ещё действия">⋯</summary>
+          <span class="accmenu-list">
+            ${item('tgname', a.id, 'Имя в Telegram')}
+            ${item('tguser', a.id, '@ник')}
+            ${item('tgpic', a.id, 'Аватарка')}
+            ${item('desk', a.id, 'Открыть в Desktop')}
+            ${item('chk', a.id, 'Проверить прокси')}
+            ${item('imp', a.id, 'Залить сессию')}
+            ${a.warm && a.role !== 'warm' ? item('cap', a.id, 'Предел писем в день', false) : ''}
+            ${item('ren', a.id, 'Название в панели')}
+            ${item('del', a.id, 'Убрать аккаунт')}
+          </span>
+        </details>
       </span>
-    </label>`).join('');
+    </div>`).join('');
 
   /**
    * Перерисовываем, ТОЛЬКО если разметка изменилась.
@@ -180,6 +207,9 @@ function paintAccounts() {
    * когда смотреть на них и хочется.
    */
   if (html === accsHtml) return;
+  // открыто меню «⋯» — не перерисовываем: иначе оно закрывалось бы на каждом
+  // опросе (раз в 2 с), и до пункта было не дотянуться. Нарисуем, когда закроют
+  if ($('#accs').querySelector('.accmenu[open]')) return;
   accsHtml = html;
   $('#accs').innerHTML = html;
 
@@ -195,7 +225,8 @@ function paintAccounts() {
     const toSend = a.role === 'warm';
     if (toSend && a.warm && !a.warm.atMax &&
         !confirm(`«${a.name || a.title}» ещё не прогрет (день ${a.warm.day} из ${a.warm.fullDay}). Всё равно перевести в рассылку?`)) return;
-    await post('/api/accounts/role', {id: a.id, role: toSend ? 'send' : 'warm'});
+    const r = await post('/api/accounts/role', {id: a.id, role: toSend ? 'send' : 'warm'});
+    if (r && r.ok === false) alert(r.reason || 'не получилось');   // например, отдых после заморозки
     loop();
   });
   // дневной лимит сообщений на конкретный аккаунт (для тестов). 0 — как у всех
@@ -367,8 +398,7 @@ function paintAccounts() {
     ? 'Ни один аккаунт не вошёл — подключи хотя бы один.'
     : [inP.length ? `<b>${inP.length}</b> в рассылке по номерам` : '',
        inC.length ? `<b>${inC.length}</b> по чатам` : '',
-       `свободны <b>${free.length}</b>`].filter(Boolean).join(' · ')
-      + '. Состав набирают вкладки «Рассылка по номерам» и «Рассылка по чатам».';
+       `свободны <b>${free.length}</b>`].filter(Boolean).join(' · ');
   $('#s1').classList.toggle('done', ready.length > 0);
 }
 
@@ -402,7 +432,18 @@ const accounts = async () => {
     const raw = await (await fetch('/api/accounts')).text();
     // перерисовываем только при изменениях: иначе список моргает каждые две секунды
     if (raw === accsRaw) return;
-    accsRaw = raw; accs = JSON.parse(raw); paintAccounts();
+    const wasRole = new Map(accs.map(a => [a.id, a.role]));
+    accsRaw = raw; accs = JSON.parse(raw);
+    // ушёл в «только прогрев» (кнопкой, с другой вкладки или с сервера) —
+    // снимаем галочки в составах. Иначе он так и стоял бы отмеченным, и при
+    // запуске панель спросила бы «взять его в рассылку?» — одно «ОК», и
+    // отдыхающий аккаунт снова пишет людям
+    for (const a of accs) {
+      if (a.role === 'warm' && wasRole.has(a.id) && wasRole.get(a.id) !== 'warm') {
+        for (const s of ['phones', 'chats']) if (crew[s]) crew[s].delete(a.id);
+      }
+    }
+    paintAccounts();
     for (const a of accs) if (a.codeWait) askCode(a);
   } catch {}
 };
@@ -435,9 +476,9 @@ function paintSetNow(s) {
   // Режимы независимы: отметь аккаунты здесь и запускай, даже если второй
   // режим уже работает. Один аккаунт — один режим.
   const line = (mine, other, word) => mine
-    ? 'Рассылка идёт. Состав можно менять на ходу: снял галочку — аккаунт выходит из работы, поставил — входит.'
-    : other ? `Сейчас работает рассылка ${word} — здесь можно запустить свою, на свободных аккаунтах.`
-    : 'Отметь аккаунты в списке выше и запускай.';
+    ? 'Состав можно менять на ходу.'
+    : other ? `Идёт рассылка ${word} — здесь можно запустить свою на свободных аккаунтах.`
+    : '';
   if (p) p.innerHTML = line(!!(runs.phones || {}).on, !!(runs.chats || {}).on, 'по чатам');
   if (c) c.innerHTML = line(!!(runs.chats || {}).on, !!(runs.phones || {}).on, 'по номерам');
 }
@@ -574,7 +615,7 @@ function paintRunState(s) {
       r.on ? `<b>Рассылка ${word} идёт</b>` : `<b>Рассылка ${word} выключена</b>`,
       r.on ? `${n} аккаунт(ов) · режим: ${
         r.mode === 'check' ? 'только проверка' : r.mode === 'write' ? 'только письма' : 'проверка и письма'}`
-        : 'отметь аккаунты ниже и нажми «Запустить»');
+        : 'отметь аккаунты и нажми «Запустить»');
     navLamp(set === 'chats' ? 'chatsend' : 'send', !!r.on);
   };
   bar('#runbar-p', 'phones', 'по номерам');
@@ -606,6 +647,8 @@ const state = async () => {
     $('#claims').textContent = held ? `в работе у аккаунтов: ${held} номеров` : '';
     const px = s.proxy || [];
     const dead = px.filter(p => !p.ok);
+    const downNow = new Set(dead.map(p => p.label));
+    if ([...downNow].join('\n') !== [...proxyDownLabels].join('\n')) { proxyDownLabels = downNow; paintAccounts(); }
     const pst = $('#proxy-st');
     pst.textContent = dead.length
       ? `прокси лежит: ${dead[0].reason} — работа на паузе`
@@ -631,10 +674,15 @@ const state = async () => {
       const id = Object.values(b.dataset).find(v => accs.some(a => a.id === v));
       b.disabled = id ? !!accs.find(a => a.id === id)?.busy : false;
     });
-    $('#notready').hidden = workReady || !accs.length;
+    // плашка — только когда правда никто не вошёл: занятые в прогоне аккаунты не «невошедшие»
+    $('#notready').hidden = accs.some(accReady) || !accs.length;
     $('#stop').disabled = !anyRun;
     paintTotal(s.total);
     $('#s4').classList.toggle('done', s.drafts > 0);
+    parallelByDefault = !!s.profile && !s.profileAdmin;
+    // расходы на прокси видны только в своих профилях, у клиента (основной) — нет
+    const showTraffic = !!s.profile && !s.profileAdmin;
+    if ($('#traffic-card') && $('#traffic-card').hidden === showTraffic) $('#traffic-card').hidden = !showTraffic;
     paintAuto(s.auto || {on: false, accounts: []});
   } catch { $('#status-t').textContent = 'сервер не отвечает'; }
 };
@@ -1084,6 +1132,10 @@ const fmtWait = (s) => s >= 3600 ? `${Math.floor(s / 3600)} ч ${Math.round(s % 
  */
 let formRestored = false;
 let csFunnelRestored = false;      // второй шаг у чатов помнится отдельно
+let csParallelRestored = false;
+// ⚡ параллель стоит сразу во всех профилях, кроме основного: основной —
+// профиль клиента, у него как было (пусто). Без привратника — тоже как было.
+let parallelByDefault = false;
 
 function restoreForm(f) {
   if (formRestored || !f) return;
@@ -1113,6 +1165,16 @@ function paintAuto(a) {
   if (!csFunnelRestored && (runs.chats || {}).form) {
     csFunnelRestored = true;
     $('#cs-funnel').checked = !!runs.chats.form.funnel;
+  }
+  // «Параллельно» — одно значение на обе вкладки: как запущен идущий прогон;
+  // не идёт — в своих профилях включено, у клиента — как запускал в прошлый раз
+  if (!csParallelRestored) {
+    csParallelRestored = true;
+    const was = (r) => r && r.form ? !!r.form.parallel || r.form.serial === false : false;
+    const c = runs.chats || {}, ph = runs.phones || {};
+    const live = c.on ? c : ph.on ? ph : null;
+    const par = live && live.form ? was(live) : parallelByDefault ? true : (was(c) || was(ph));
+    $('#cs-parallel').checked = $('#p-parallel').checked = par;
   }
   $('#cs-funnel').disabled = onC;
   // кнопка каждой вкладки живёт своей жизнью: выбор — её галочки, а блокировка
@@ -1169,9 +1231,9 @@ function paintAuto(a) {
   // настройки запуска общие на оба режима — запираем их, пока работает любой
   for (const id of ['#amode','#apause','#delay','#ddelay','#ddelaymax','#dhold',
                     '#dholdmax','#limit','#dlimit',
-                    '#sm-draft','#sm-send','#serial','#rotate','#rotwait'])
+                    '#sm-draft','#sm-send','#serial','#rotate','#rotwait','#p-parallel','#cs-parallel'])
     if ($(id)) $(id).disabled = on;
-  if (!on && $('#rotate').value.trim()) $('#serial').disabled = true;
+  if (!on && $('#rotate').value.trim()) $('#p-parallel').disabled = true;
 
   // предупреждение об отправке: пока идёт — по тому, что прогон делает НА САМОМ ДЕЛЕ
   const asVoice = on ? a.voice : $('#voicemode').checked;
@@ -1245,9 +1307,11 @@ function paintStage(box, set, run, a) {
  * и это надо показать словами, а не графиком.
  */
 async function takeWarmIntoRun(set) {
-  const warm = [...(crew[set] || [])]
-    .map(id => accs.find(a => a.id === id))
-    .filter(a => a && accReady(a) && a.role === 'warm');
+  const picked = [...(crew[set] || [])].map(id => accs.find(a => a.id === id)).filter(Boolean);
+  // на отдыхе после заморозки — в рассылку не берём и не спрашиваем: сервер всё
+  // равно откажет, а вопрос «взять?» подталкивает нажать «ОК»
+  for (const a of picked) if ((a.holdUntil || a.restUntil) && crew[set]) crew[set].delete(a.id);
+  const warm = picked.filter(a => !a.holdUntil && !a.restUntil && accReady(a) && a.role === 'warm');
   if (!warm.length) return true;
   const lines = warm.map(a => {
     const w = a.warm || {};
@@ -1306,9 +1370,10 @@ async function startAuto(set) {
   const r = await post('/api/auto', {
     on: true, set, mode, send, voice, warm: $('#warmon').checked,
     funnel: set === 'chats' ? $('#cs-funnel').checked : $('#funnel').checked,
-    serial: $('#serial').checked, rotate: $('#rotate').value.trim(),
-    // параллель (все сразу) — пока с вкладки чатов; на одном IP сервер предупредит
-    parallel: set === 'chats' ? !!($('#cs-parallel') && $('#cs-parallel').checked) : false,
+    // параллель (все сразу) — у каждой вкладки своя галочка; на одном IP сервер предупредит
+    serial: !$(set === 'chats' ? '#cs-parallel' : '#p-parallel').checked,
+    rotate: $('#rotate').value.trim(),
+    parallel: $(set === 'chats' ? '#cs-parallel' : '#p-parallel').checked,
     rotateWait: +$('#rotwait').value || 10,
     accounts: [...work].filter(id => accReady(accs.find(a => a.id === id) || {})),
     pause: (+$('#apause').value || 40) * 60,     // поле в минутах, серверу — секунды
@@ -1395,8 +1460,9 @@ $('#b-rotate').onclick = async () => {
 };
 // ротация без очереди бессмысленна: покажем это прямо галочкой
 $('#rotate').oninput = () => {
-  if ($('#rotate').value.trim()) { $('#serial').checked = true; $('#serial').disabled = true; }
-  else $('#serial').disabled = false;
+  // ссылка смены IP — только по очереди: параллельно все сидели бы на одном адресе
+  if ($('#rotate').value.trim()) { $('#serial').checked = true; $('#p-parallel').checked = false; $('#p-parallel').disabled = true; }
+  else $('#p-parallel').disabled = false;
 };
 
 document.querySelectorAll('button[data-t]').forEach(b => b.onclick = async () => {
@@ -1700,7 +1766,7 @@ $('#b-list').onclick = () => {
   const n = list.split('\n').filter(x => x.trim()).length;
   if ($('#mjoin').checked &&
       !confirm(`Аккаунт вступит в закрытые чаты по приглашениям, если ещё не в них.\n\nСписок: ${n} ссылок. Продолжить?`)) return;
-  $('#list-note').textContent = `отправил ${n} ссылок в разбор…`;
+  $('#list-note').textContent = `${n} ссылок ушло в разбор — ход по каждому чату в «Что происходит» внизу`;
   startParse({list, join: $('#mjoin').checked, again: $('#magain').checked});
 };
 $('#b-parse').onclick = () => {
@@ -1773,25 +1839,39 @@ const warmup = async () => {
     if (w.plan && $('#cap-plan')) {
       $('#cap-plan').innerHTML = w.plan.map((st, i) => {
         const last = i === w.plan.length - 1;
-        const val = st.cap === 0 ? 'отлёжка — не пишем' : `до ${st.cap} сообщений/день`;
+        const val = st.cap === 0 ? 'не пишет' : `до ${st.cap} в день`;
         const label = st.day === 0 ? 'первые сутки' : `с ${st.day}-го дня`;
         return `<div class="cap-row"><span class="cap-day">${label}</span>` +
                `<span class="cap-val ${last ? 'max' : ''}">${val}${last ? ' · максимум' : ''}</span></div>`;
       }).join('');
     }
     if (w.checkMax && document.activeElement !== $('#checkcap')) $('#checkcap').value = w.checkMax;
+    for (const [box, note] of [['#cs-between', '#cs-between-note'], ['#p-between', '#p-between-note']]) {
+      if ($(box) && document.activeElement !== $(box)) {
+        $(box).checked = !!w.between;
+        $(note).textContent = w.between && !w.on ? '⚠ прогрев выключен — живой день не идёт' : '';
+      }
+    }
     const maxNow = w.plan ? w.plan[w.plan.length - 1].cap : 15;
     if (document.activeElement !== $('#daycap')) $('#daycap').value = maxNow;
-    $('#daycap-note').textContent = w.maxCap > 0 ? '' : '(сейчас стоит по умолчанию)';
+    $('#daycap-note').textContent = '';
     // при общем прокси без ссылки — предупреждаем прямо тут
     $('#warm-rot-note').textContent = w.alone && !w.rotate
-      ? '⚠ прокси один на всех, а ссылка не задана — аккаунты будут греться с одного IP'
+      ? 'прокси одна строка на всех — если она сама не меняет IP, греются с одного'
       : (w.rotate ? 'ссылка задана — IP меняется между аккаунтами' : '');
     $('#b-warm').textContent = warmOn ? 'Выключить прогрев' : 'Включить прогрев';
     $('#b-warm').className = warmOn ? 'ghost' : 'primary';
-    $('#warm-state').textContent = warmOn
-      ? `работает сам по ${w.accounts.length} аккаунт(ам): новые сначала лежат сутки, потом прогрев стартует автоматически с 1-го дня — тыкать ничего не надо`
-      : 'выключен — нажми, чтобы аккаунты начали подписываться и читать';
+    $('#warm-state').textContent = warmOn ? `работает по ${w.accounts.length} акк.` : '';
+    // догрев между пачками рассылки («Живой день») — видно прямо тут, включён ли
+    $('#warm-between').innerHTML = !warmOn
+      ? '<span style="color:var(--mut)">Догрев между пачками рассылки тоже не идёт — он работает только при включённом прогреве.</span>'
+      : w.between
+        ? '<b style="color:var(--ok)">🌱 Догрев между пачками включён</b> <span style="color:var(--mut)">(«Живой день»): с 8 до 23 аккаунты в рассылке читают каналы, ставят реакции и переписываются</span>'
+        : '<b>Догрев между пачками выключен</b> <span style="color:var(--mut)">— между письмами только 1–2 действия к утру</span>';
+    const wb = $('#warm-between-btn');
+    wb.hidden = !warmOn;
+    wb.textContent = w.between ? 'Выключить догрев' : 'Включить догрев';
+    wb.dataset.on = w.between ? '1' : '';
     /**
      * В списке прогрева — только те, кто ещё греется. Созревший уходит отсюда
      * сам и появляется свободным в обеих вкладках рассылки: там его отмечают
@@ -1801,10 +1881,8 @@ const warmup = async () => {
     const grown = w.accounts.filter(a => a.day >= a.fullDay && !a.resting);
     const warming = w.accounts.filter(a => !(a.day >= a.fullDay && !a.resting));
     const grownLine = grown.length
-      ? `<p class="hint" style="margin:10px 0 0">Прогрелись и ушли в рассылку: <b>${grown.length}</b>` +
-        ` — ${grown.map(a => esc(a.title)).join(', ')}.` +
-        ` Отметь их на вкладках <button class="linkbtn" data-goto="send">по номерам</button>` +
-        ` или <button class="linkbtn" data-goto="chatsend">по чатам</button> и запускай.</p>`
+      ? `<p class="hint" style="margin:10px 0 0">Прогреты: <b>${grown.length}</b>` +
+        ` — ${grown.map(a => esc(a.title)).join(', ')}</p>`
       : '';
     $('#warm-list').innerHTML = (warming.length ? warming.map(a => {
       // человеческий статус: что с аккаунтом прямо сейчас
@@ -1873,6 +1951,24 @@ $('#b-warm').onclick = async () => {
 
 // warmRotDirty объявлен выше
 $('#warm-rotate').oninput = () => { warmRotDirty = true; };
+// догрев между пачками — настройка профиля, сохраняем сразу
+$('#warm-between-btn').onclick = async () => {
+  const r = await post('/api/warmup', {between: !$('#warm-between-btn').dataset.on});
+  if (r && r.ok === false) alert(r.reason || 'не сохранилось');
+  warmup();
+};
+// «Параллельно» — одна настройка на обе вкладки: прокси общий, и очередь у них
+// общая, так что по-разному выставить их нельзя
+for (const [a, b] of [['#p-parallel', '#cs-parallel'], ['#cs-parallel', '#p-parallel']]) {
+  if ($(a)) $(a).addEventListener('change', () => { if ($(b)) $(b).checked = $(a).checked; });
+}
+for (const [box, note] of [['#cs-between', '#cs-between-note'], ['#p-between', '#p-between-note']]) {
+  if ($(box)) $(box).onchange = async () => {
+    const r = await post('/api/warmup', {between: $(box).checked});
+    $(note).textContent = r && r.ok === false ? (r.reason || 'не сохранилось') : 'сохранено';
+    warmup();
+  };
+}
 // срок прогрева: за сколько дней аккаунт выходит на полный объём
 if ($('#warmdays-save')) $('#warmdays-save').onclick = async () => {
   const days = Math.max(2, Math.min(21, parseInt($('#warmdays').value) || 7));
@@ -1893,146 +1989,6 @@ $('#warm-rot-save').onclick = async () => {
     : (r.reason || 'не сохранилось');
 };
 
-
-/* ---------- горячие лиды из чатов ---------- */
-let leadTpl = '', leadLink = '', leadTplLoaded = false;
-function fillLeadTpl(tpl, p) {
-  let t = spin(tpl || '');
-  const first = (p.display_name || '').split(' ')[0] || '';
-  const req = p.what_looking_for || 'квартиру';
-  const map = {'{чат}': p.found_chat || '', '{chat}': p.found_chat || '',
-    '{запрос}': req, '{request}': req, '{бюджет}': p.budget || '', '{budget}': p.budget || '',
-    '{срок}': p.timeline || '', '{имя}': first, '{name}': first,
-    '{LINK}': leadLink || '', '{ссылка}': leadLink || ''};
-  for (const k in map) t = t.split(k).join(map[k]);
-  return t.replace(/\(\s*\)/g, '').replace(/[ \t]+/g, ' ').trim();
-}
-function leadPrev() {
-  const p = leadData.find(x => !x.message_sent) ||
-    {display_name: 'Анна', found_chat: 'Мамы Академического',
-     what_looking_for: '2-комнатную в районе Академический', budget: 'до 8 млн', timeline: 'к весне'};
-  $('#lead-tpl-prev').textContent = 'Пример:\n' + fillLeadTpl($('#lead-tpl').value || leadTpl, p);
-}
-async function loadLeadTpl() {
-  try {
-    const r = await (await fetch('/api/leads/template')).json();
-    leadTpl = r.template || ''; leadLink = r.link || '';
-    if (document.activeElement !== $('#lead-tpl')) $('#lead-tpl').value = leadTpl;
-    leadTplLoaded = true; leadPrev();
-  } catch {}
-}
-$('#lead-tpl').addEventListener('input', () => { leadTpl = $('#lead-tpl').value; leadPrev(); leadsHtml = ''; });
-$('#b-lead-tpl').onclick = async () => {
-  await post('/api/leads/template', {template: $('#lead-tpl').value});
-  $('#lead-tpl-note').textContent = 'шаблон сохранён';
-  leadsHtml = ''; setTimeout(() => $('#lead-tpl-note').textContent = '', 2000);
-};
-
-let leadData = [], leadDraft = {}, leadsHtml = '';
-const leadStatus = s => ({hot: '🔥 HOT', warm: '🟡 WARM', closed: '✔ закрыт'}[s] || s);
-const leadKey = p => p.username ? '@' + p.username : 'id:' + p.user_id;
-
-// оповещения о новых горячих лидах
-let hotSeen, hotAlertReady = false, freshHi = new Set(), leadNotifyOn = false;
-let baseTitle = document.title, titleTimer = 0;
-try { hotSeen = new Set(JSON.parse(localStorage.getItem('hotSeen') || '[]')); } catch { hotSeen = new Set(); }
-try { leadNotifyOn = localStorage.getItem('leadNotify') === '1'; } catch {}
-const saveHotSeen = () => { try { localStorage.setItem('hotSeen', JSON.stringify([...hotSeen].slice(-500))); } catch {} };
-
-function flashTitle(n) {
-  try {
-    document.title = `(🔥${n}) новый лид!`;
-    clearTimeout(titleTimer);
-    titleTimer = setTimeout(() => { document.title = baseTitle; }, 8000);
-  } catch {}
-}
-function browserNotify(p) {
-  try {
-    if (!('Notification' in window) || Notification.permission !== 'granted') return;
-    const req = p.what_looking_for || 'квартиру';
-    const said = (p.evidence && p.evidence[0]) ? '«' + p.evidence[0].quote + '»' : ('ищет ' + req);
-    const nt = new Notification(`🔥 Горячий лид: ${p.display_name || 'аноним'}`,
-      { body: said.slice(0, 160), tag: 'lead-' + p.user_id });
-    nt.onclick = () => { window.focus(); };
-  } catch {}
-}
-function showLeadAlert(n, p) {
-  const el = $('#lead-alert'); if (!el) return;
-  const req = p.what_looking_for || 'квартиру';
-  el.innerHTML =
-    `<div class="la-txt">🔥 <b>Новый горячий лид${n > 1 ? ` (ещё +${n - 1})` : ''}:</b> ` +
-    `${esc(p.display_name || 'аноним')} ищет ${esc(req)}` +
-    `${p.found_chat ? ` — из «${esc(p.found_chat)}»` : ''}. Напишите первым!</div>` +
-    `<button class="la-go">Показать</button><button class="la-x" title="скрыть">×</button>`;
-  el.hidden = false;
-  el.querySelector('.la-go').onclick = () => {
-    el.hidden = true;
-    const c = document.querySelector(`.lead[data-u="${leadKey(p)}"]`) || document.querySelector('.lead');
-    if (c) c.scrollIntoView({ behavior: 'smooth', block: 'center' });
-  };
-  el.querySelector('.la-x').onclick = () => { el.hidden = true; };
-}
-
-async function leads() {
-  // не перетираем карточки, пока человек правит текст письма
-  if (document.activeElement && document.activeElement.classList &&
-      document.activeElement.classList.contains('lmsg')) return;
-  let arr = [];
-  try { arr = await (await fetch('/api/leads')).json(); } catch { return; }
-  leadData = arr;
-  if (!leadTplLoaded) loadLeadTpl();
-  const unsent = arr.filter(p => !p.message_sent);
-  const sent = arr.filter(p => p.message_sent && !p.skipped).length;
-  const skipped = arr.filter(p => p.skipped).length;
-
-  // новые горячие лиды — подсветить и оповестить (но не на самой первой загрузке)
-  const hot = unsent.filter(p => p.status === 'hot');
-  const freshNow = hot.filter(p => !hotSeen.has(String(p.user_id)));
-  if (hotAlertReady && freshNow.length) {
-    freshNow.forEach(p => freshHi.add(String(p.user_id)));
-    showLeadAlert(freshNow.length, freshNow[0]);
-    if (leadNotifyOn) browserNotify(freshNow[0]);
-    flashTitle(freshNow.length);
-    leadsHtml = '';
-  }
-  hot.forEach(p => hotSeen.add(String(p.user_id)));
-  saveHotSeen();
-  hotAlertReady = true;
-
-  const hotN = hot.length;
-  $('#lead-sum').innerHTML = arr.length
-    ? `🔥 горячих: <b>${hotN}</b> · ждут отправки ${unsent.length} · написано ${sent} · скрыто ${skipped}`
-    : 'Пока никого. Нажмите «Найти горячих лидов» — аккаунт должен состоять в чатах.';
-
-  const html = unsent.map(p => {
-    const key = leadKey(p);
-    const meta = [p.what_looking_for, p.budget, p.timeline, p.financing].filter(Boolean).join(' · ');
-    const ev = (p.evidence && p.evidence[0]) ? p.evidence[0].quote : '';
-    const isFresh = freshHi.has(String(p.user_id));
-    const msg = leadDraft[key] != null ? leadDraft[key]
-      : (leadTpl ? fillLeadTpl(leadTpl, p) : ((p.outreach && p.outreach.variant_a) || ''));
-    return `<div class="lead ${isFresh ? 'fresh' : ''}" data-u="${esc(key)}">
-      <div class="lead-h"><b>${esc(p.display_name || 'без имени')}</b>
-        <span class="lmut">${p.username ? '@' + esc(p.username) : 'без ника'}</span>
-        ${isFresh ? '<span class="lbadge hot">🆕 новый</span>' : ''}
-        <span class="lbadge ${p.status}">${leadStatus(p.status)} ${p.score}</span></div>
-      <div class="lmeta">${esc(meta || 'запрос уточняется')} · нашли в «${esc(p.found_chat || '')}»</div>
-      ${ev ? `<div class="lev">«${esc(ev)}»</div>` : ''}
-      <textarea class="lmsg" data-u="${esc(key)}" spellcheck="false">${esc(msg)}</textarea>
-      <div class="lbtns">
-        <button class="softbtn mini" data-var="a" data-u="${esc(key)}">Текст A</button>
-        <button class="softbtn mini" data-var="b" data-u="${esc(key)}">Текст B (вопрос)</button>
-        <button class="primary mini" data-send="${esc(key)}">✍️ Написать</button>${
-        p.by && accs.some(a => a.id === p.by)
-          ? `<button class="softbtn mini" data-kit="${esc(p.by)}"
-               title="Скачать комплект и продолжить переписку с этого аккаунта у себя на компьютере">🖥 Открыть на ПК</button>` : ''}
-        <button class="softbtn mini" data-skip="${esc(key)}">Скрыть</button>
-      </div></div>`;
-  }).join('');
-  if (html === leadsHtml) return;
-  leadsHtml = html;
-  $('#leads-list').innerHTML = html || (arr.length ? '<p class="hint" style="margin:0">Все лиды обработаны 👍</p>' : '');
-}
 
 /* ═══════════ ОТКРЫТЬ АККАУНТ НА СВОЁМ КОМПЬЮТЕРЕ ═══════════ */
 /**
@@ -2223,173 +2179,6 @@ $('#kit-go').onclick = async () => {
   }
 };
 
-// тумблер браузерных уведомлений о лидах
-function paintNotifyBtn() {
-  const b = $('#b-lead-notify'); if (!b) return;
-  b.textContent = leadNotifyOn ? '🔔 Оповещения: вкл' : '🔔 Оповещения: выкл';
-  b.classList.toggle('on', leadNotifyOn);
-}
-$('#b-lead-notify').onclick = async () => {
-  if (!leadNotifyOn) {
-    if ('Notification' in window && Notification.permission !== 'granted') {
-      const perm = await Notification.requestPermission();
-      if (perm !== 'granted') { alert('Браузер не дал разрешение на уведомления. Баннер в панели всё равно будет показываться.'); }
-    }
-    leadNotifyOn = true;
-  } else leadNotifyOn = false;
-  try { localStorage.setItem('leadNotify', leadNotifyOn ? '1' : '0'); } catch {}
-  paintNotifyBtn();
-};
-paintNotifyBtn();
-
-$('#leads-list').addEventListener('input', e => {
-  if (e.target.classList.contains('lmsg')) leadDraft[e.target.dataset.u] = e.target.value;
-});
-$('#leads-list').addEventListener('click', async e => {
-  const b = e.target.closest('button'); if (!b) return;
-  if (b.dataset.kit) { openKit(b.dataset.kit); return; }
-  const box = b.closest('.lead'); const key = box ? box.dataset.u : '';
-  if (b.dataset.var) {
-    const p = leadData.find(x => leadKey(x) === key);
-    const t = (p && p.outreach && p.outreach['variant_' + b.dataset.var]) || '';
-    leadDraft[key] = t; box.querySelector('.lmsg').value = t; return;
-  }
-  if (b.dataset.send) {
-    const text = box.querySelector('.lmsg').value.trim();
-    if (!text) { alert('Пустое сообщение'); return; }
-    if (!confirm('Отправить это сообщение лиду сейчас?')) return;
-    b.disabled = true; b.textContent = 'Отправляю…';
-    const r = await post('/api/leads/send', {user: key, variant: 'a', text});
-    if (r && r.ok === false && r.reason) alert(r.reason);
-    delete leadDraft[key]; freshHi.delete(String(key).replace(/^id:/,'').replace(/^@/,'')); leadsHtml = '';
-    setTimeout(leads, 1200);
-  }
-  if (b.dataset.skip) {
-    if (!confirm('Скрыть лида? Больше писать ему не будем.')) return;
-    await post('/api/leads/skip', {user: key});
-    delete leadDraft[key]; leadsHtml = '';
-    setTimeout(leads, 300);
-  }
-});
-
-$('#b-leads').onclick = async () => {
-  const who = parser();
-  if (!who) { alert('Отметь хотя бы один вошедший и свободный аккаунт — он должен состоять в чатах'); return; }
-  const folder = $('#lead-folder').value.trim() || 'chats';
-  const r = await post('/api/start', {name: 'leads', account: who.id, folder,
-    limit: $('#lead-limit').value, days: $('#lead-days').value});
-  if (!r.ok && r.reason) alert(r.reason);
-  state();
-};
-$('#b-leads-one').onclick = async () => {
-  const who = parser();
-  if (!who) { alert('Отметь аккаунт'); return; }
-  const chat = $('#lead-chat').value.trim();
-  if (!chat) { alert('Вставь ссылку на чат'); return; }
-  const r = await post('/api/start', {name: 'leads', account: who.id, chat,
-    limit: $('#lead-limit').value, days: $('#lead-days').value});
-  if (!r.ok && r.reason) alert(r.reason);
-  state();
-};
-
-/* ═══════════ ЕГРЮЛ ═══════════ */
-/**
- * Таблица с ИНН живёт отдельно от базы номеров: сюда грузят список компаний,
- * панель спрашивает про них бота и достаёт человека. Найденный телефон сам
- * уезжает в базу номеров — дальше он идёт обычным путём.
- */
-let egAccFilled = false;
-
-function egStatus(r) {
-  if (r.status === 'готово') return '<span class="lbadge hot">готово</span>';
-  if (r.status === 'сбой') return '<span class="lbadge warm">сбой</span>';
-  if (r.status === 'пусто') return '<span class="lbadge">нет данных</span>';
-  return '<span class="lbadge">в очереди</span>';
-}
-
-async function egrulView() {
-  let d;
-  try { d = await (await fetch('/api/egrul')).json(); } catch { return; }
-
-  // аккаунт-сборщик: список вошедших, заполняем один раз
-  const sel = $('#eg-acc');
-  if (sel && (!egAccFilled || sel.options.length <= 1) && accs.length) {
-    sel.innerHTML = '<option value="">— выбери аккаунт-сборщик —</option>' +
-      accs.filter(accReady).map(a =>
-        `<option value="${a.id}">${esc(a.name || a.title)}</option>`).join('');
-    if (d.account) sel.value = d.account;
-    egAccFilled = true;
-  }
-
-  const btn = $('#eg-auto');
-  if (btn) {
-    btn.textContent = d.on ? '🤖 Сам: вкл' : '🤖 Сам: выкл';
-    btn.classList.toggle('on', !!d.on);
-  }
-
-  runbar('#runbar-eg', !!d.on,
-    d.on ? '<b>Сбор по ИНН работает</b>' : '<b>Сбор по ИНН выключен</b>',
-    d.running ? 'идёт заход прямо сейчас'
-      : d.on ? 'панель будит сборщика сама'
-      : 'нажми «Собрать сейчас» или включи «Сам»');
-
-  const wait = d.nextAt && d.nextAt > Date.now()
-    ? ` · следующий заход ${new Date(d.nextAt).toLocaleTimeString('ru', {hour: '2-digit', minute: '2-digit'})}` : '';
-  $('#eg-sum').innerHTML = d.total
-    ? `всего <b>${d.total}</b> · разобрано ${d.done} · без данных ${d.empty} · ` +
-      `осталось ${d.left} · с телефоном <b>${d.phones}</b> · ` +
-      `сегодня запросов ${d.today} из ${d.daily}` +
-      (d.running ? ' · <b>идёт сбор</b>' : wait) +
-      (d.note ? ` · ${esc(d.note)}` : '')
-    : 'Таблицы пока нет — перетащи файл с ИНН.';
-
-  const rows = d.rows || [];
-  $('#eg-table').innerHTML = rows.length ? (
-    '<tr><th>ИНН</th><th>компания</th><th>кто решает</th><th>телефон</th><th>статус</th></tr>' +
-    rows.map(r => `<tr>
-      <td>${esc(r.inn)}</td>
-      <td>${esc((r.company || '').slice(0, 42)) || '<span class="no">—</span>'}</td>
-      <td>${r.lpr ? esc(r.lpr) + (r.lpr_role ? `<br><span class="no">${esc(r.lpr_role)}</span>` : '') : '<span class="no">—</span>'}</td>
-      <td>${r.phone ? esc(r.phone) : '<span class="no">—</span>'}</td>
-      <td>${egStatus(r)}${r.note ? `<br><span class="no">${esc(r.note)}</span>` : ''}</td>
-    </tr>`).join('')) : '';
-}
-
-// загрузка таблицы: перетаскиванием или щелчком
-(() => {
-  const drop = $('#eg-drop'), inp = $('#eg-file');
-  if (!drop) return;
-  const send = async (file) => {
-    if (!file) return;
-    $('#eg-sum').textContent = `читаю ${file.name}…`;
-    const r = await fetch('/api/egrul/upload', {
-      method: 'POST',
-      headers: {'x-panel': '1', 'x-filename': encodeURIComponent(file.name)},
-      body: file,
-    }).then(x => x.json()).catch(() => ({ok: false}));
-    if (!r.ok) alert(r.reason || 'не вышло принять файл');
-    setTimeout(egrulView, 1500);
-  };
-  drop.onclick = () => inp.click();
-  inp.onchange = () => send(inp.files[0]);
-  drop.ondragover = (e) => { e.preventDefault(); drop.classList.add('over'); };
-  drop.ondragleave = () => drop.classList.remove('over');
-  drop.ondrop = (e) => { e.preventDefault(); drop.classList.remove('over'); send(e.dataTransfer.files[0]); };
-})();
-
-if ($('#eg-run')) $('#eg-run').onclick = async () => {
-  const r = await post('/api/egrul/start', {account: $('#eg-acc').value});
-  if (!r.ok) alert(r.reason || 'не вышло');
-  setTimeout(egrulView, 800);
-};
-if ($('#eg-auto')) $('#eg-auto').onclick = async () => {
-  const on = !$('#eg-auto').classList.contains('on');
-  const r = await post('/api/egrul/auto', {on, account: $('#eg-acc').value});
-  if (!r.ok) alert(r.reason || 'не вышло');
-  egrulView();
-};
-if ($('#eg-csv')) $('#eg-csv').onclick = () => { location.href = '/api/egrul/csv'; };
-
 // какой режим сейчас открыт — тяжёлые списки тянем только для него
 function activeView() {
   const v = document.querySelector('.view.active');
@@ -2400,18 +2189,17 @@ function activeView() {
 const loop = async () => {
   await accounts(); await state(); await tail(); await eventsFeed(); await qr(); await message(); await voice();
   if (busy) return;
-  await base(); await leads(); await repliesList(); await warmup(); await funnel(); await mirror();
+  await base(); await repliesList(); await warmup(); await funnel(); await mirror();
+  await traffic();
   if (activeView() === 'chatsend') await members();
   if (activeView() === 'results') await resultsView();
-  if (activeView() === 'egrul') await egrulView();
 };
 loop(); setInterval(loop, 2000);
 
 /* ═══════════ РЕЖИМЫ (боковая панель) ═══════════ */
 const VIEW_TITLE = {
   overview: 'Обзор', accounts: 'Аккаунты', warmup: 'Прогрев', send: 'Рассылка по номерам',
-  results: 'Результаты', chatsend: 'Рассылка по чатам', leads: 'Горячие лиды',
-  egrul: 'ЕГРЮЛ', tools: 'Обслуживание',
+  results: 'Результаты', chatsend: 'Рассылка по чатам', tools: 'Обслуживание',
 };
 function showView(name) {
   if (!VIEW_TITLE[name]) name = 'overview';
@@ -2443,6 +2231,57 @@ showView((location.hash || '').replace('#', '') || localStorage.getItem('tg-view
 
 /* ═══════════ ОБЗОР + КАЛЬКУЛЯТОР МОЩНОСТИ ═══════════ */
 const nf = (n) => (n == null ? '—' : new Intl.NumberFormat('ru-RU').format(Math.round(n)));
+
+// ── Трафик и прокси: итог и баланс Asocks + «за что» по задачам и аккаунтам ──
+// Платный прокси считается за гигабайт; данные меняются раз в полчаса —
+// спрашиваем раз в минуту, а не на каждом двухсекундном опросе панели.
+let trafficAt = 0;
+const fmtBytes = (b) => (b >= 1e9 ? (b / 1e9).toFixed(2) + ' ГБ'
+  : b >= 1e6 ? (b / 1e6).toFixed(1) + ' МБ' : Math.round((b || 0) / 1e3) + ' КБ');
+const usd = (x) => '$' + (x || 0).toFixed(x >= 1 ? 2 : 3);
+async function traffic() {
+  if (Date.now() - trafficAt < 60_000 || !$('#traffic-card') || $('#traffic-card').hidden) return;
+  trafficAt = Date.now();
+  let t;
+  try { t = await (await fetch('/api/traffic')).json(); } catch { return; }
+  const set = (id, v) => { const el = $(id); if (el) el.textContent = v; };
+  const a = t.asocks || {};
+  if (!a.on) set('#tr-asocks', 'Asocks не подключён: на сервере нет ключа API.');
+  else if (a.empty) set('#tr-asocks', 'Asocks подключён — первый снимок баланса появится в течение получаса.');
+  else {
+    const at = new Date(a.at).toLocaleTimeString('ru-RU', {hour: '2-digit', minute: '2-digit'});
+    set('#tr-day', `${fmtBytes(a.day.bytes)} · ${usd(a.day.usd)}`);
+    set('#tr-week', `${fmtBytes(a.week.bytes)} · ${usd(a.week.usd)}`);
+    set('#tr-month', `${fmtBytes(a.month.bytes)} · ${usd(a.month.usd)}`);
+    set('#tr-balance', usd(a.balance));
+    set('#tr-runway', a.runwayDays ? `~${Math.floor(a.runwayDays)} дн.` : '—');
+    set('#tr-asocks', `По данным Asocks на ${at}` +
+      (a.usdPerGb ? ` · по факту ${usd(a.usdPerGb)} за ГБ` : '') +
+      ` · учёт с ${new Date(a.since).toLocaleDateString('ru-RU')}`);
+  }
+  const w = (t.tasks && t.tasks.week) || {byTask: {}, byAcc: {}, total: 0, paid: 0};
+  const rows = (obj, names) => Object.entries(obj || {}).sort((x, y) => y[1] - x[1]).slice(0, 8)
+    .map(([k, v]) => `<div class="trf-row"><span>${esc(names ? (names[k] || k) : k)}</span><b>${fmtBytes(v)}</b></div>`)
+    .join('') || '<div class="hint">пока пусто — задачи начнут записывать свой трафик с этой версии</div>';
+  $('#tr-tasks').innerHTML = rows(w.byTask);
+  $('#tr-accs').innerHTML = rows(w.byAcc, t.names);
+  // прод — его трафик по задачам и аккаунтам (виден только из своих профилей)
+  const m = t.main && t.main.week;
+  $('#tr-main-box').hidden = !m;
+  if (m) {
+    $('#tr-main-tasks').innerHTML = rows(m.byTask);
+    $('#tr-main-accs').innerHTML = rows(m.byAcc, t.mainNames);
+  }
+  // расход по портам: у прода и теста свои логины — Asocks считает их отдельно
+  const pts = ((a.ports || {}).ports || []).filter((x) => x.bytes > 0 || x.usd > 0)
+    .sort((x, y) => y.usd - x.usd);
+  $('#tr-ports').innerHTML = pts.length
+    ? pts.map((x) => `<div class="trf-row"><span>${esc(x.name)}</span><b>${fmtBytes(x.bytes)} · ${usd(x.usd)}` +
+        (x.bytes > 1e6 ? ` · ${usd(x.usd / (x.bytes / 1e9))}/ГБ` : '') + '</b></div>').join('')
+    : '<div class="hint">появится со следующим снимком Asocks (раз в 30 мин)</div>';
+  set('#tr-paid', w.total ? `Через платный прокси за 7 дней — ${fmtBytes(w.paid)} из ${fmtBytes(w.total)}; ` +
+    'туннель на сервере бесплатный. Telegram на ПК из комплекта сюда не попадает, но тоже идёт через прокси.' : '');
+}
 // РАЗГОН РАССЫЛКИ по дню рассылки (не по возрасту прогрева): день 0 = первый день
 // реальных сообщений. Аккаунт, который ещё не начинал слать, стартует с 2/день.
 const OUTREACH_PLAN = [[0, 2], [2, 5], [4, 8], [6, 12], [9, 15]];
@@ -2470,7 +2309,6 @@ function paintDash() {
   const ready = accs.filter(isReady);
   const sentToday = accs.reduce((n, a) => n + (a.sentToday || 0), 0);
   const maxCap = Math.max(0, parseInt($('#daycap')?.value) || 15);
-  const hot = (leadData || []).filter((p) => p.status === 'hot').length;
   const od = (a) => (typeof a.outreachDay === 'number' ? a.outreachDay : -1);
 
   // сегодня — по дню рассылки каждого аккаунта (не начинали → 2/день)
@@ -2489,7 +2327,6 @@ function paintDash() {
   set('#ov-accs', nf(total)); set('#ov-accs-sub', 'вошло ' + nf(entered));
   set('#ov-warm', nf(resting)); set('#ov-warm-sub', 'готовы к работе ' + nf(ready.length));
   set('#ov-today', nf(sentToday)); set('#ov-today-sub', 'потолок сегодня ' + nf(dayNow));
-  set('#ov-hot', nf(hot)); set('#ov-hot-sub', 'автоскан ' + (asEvery ? 'каждые ' + asEvery : 'раз в 15 мин'));
 
   set('#calc-accs', nf(ready.length));
   set('#calc-day-now', nf(dayNow));
@@ -2508,58 +2345,8 @@ function calcWhatIf() {
 $('#calc-what-accs')?.addEventListener('input', calcWhatIf);
 $('#calc-what-cap')?.addEventListener('input', calcWhatIf);
 
-/* ═══════════ АВТОСКАН ЛИДОВ: интервал + чаты + следующий заход ═══════════ */
-let asEvery = '', asNextMs = 0, asChats = [];
-async function autoscanInfo() {
-  try {
-    const d = await (await fetch('/api/leads/autoscan')).json();
-    asEvery = d.every || ''; asNextMs = d.nextMs || 0; asChats = d.chats || [];
-    const line = $('#as-line');
-    if (line) {
-      let s = `каждые ${d.every} · ${d.count} ${plural(d.count, 'чат', 'чата', 'чатов')}`;
-      if (asNextMs) {
-        const left = Math.round((asNextMs - Date.now()) / 60000);
-        if (left >= 0) s += ` · следующий заход ${left <= 0 ? 'вот-вот' : 'через ' + left + ' мин'}`;
-      }
-      line.textContent = s;
-    }
-    const box = $('#as-chats');
-    if (box) box.textContent = asChats.length ? asChats.join('\n') : 'список чатов пуст (файл lead-chats.txt)';
-    const dot = document.querySelector('#autoscan .as-dot');
-    if (dot) dot.style.background = d.on ? '' : 'var(--mut)';
-    $('#as-title').textContent = d.on ? 'Автопоиск включён' : 'Автопоиск выключен';
-    if (!d.on) line.textContent = 'чаты не читаются · ' + `${d.count} ${plural(d.count, 'чат', 'чата', 'чатов')} в списке`;
-    const sw = $('#as-switch');
-    sw.hidden = false;
-    sw.textContent = d.on ? 'Выключить автопоиск' : 'Включить автопоиск';
-    sw.dataset.on = d.on ? '1' : '';
-  } catch {}
-}
-$('#as-switch')?.addEventListener('click', async () => {
-  const sw = $('#as-switch');
-  const turnOn = !sw.dataset.on;
-  if (!confirm(turnOn
-    ? 'Включить автопоиск лидов? Раз в 15 минут один из аккаунтов a4–a9 будет читать чаты через общий прокси — в очереди с рассылкой и прогревом.'
-    : 'Выключить автопоиск лидов? Чаты перестанут читаться по таймеру. «Найти горячих лидов сейчас» по-прежнему работает вручную.')) return;
-  sw.disabled = true;
-  try { await post('/api/leads/autoscan', { on: turnOn }); } catch {}
-  sw.disabled = false;
-  autoscanInfo();
-});
-function plural(n, a, b, c) {
-  const m10 = n % 10, m100 = n % 100;
-  if (m10 === 1 && m100 !== 11) return a;
-  if (m10 >= 2 && m10 <= 4 && (m100 < 10 || m100 >= 20)) return b;
-  return c;
-}
-$('#as-toggle')?.addEventListener('click', () => {
-  const box = $('#as-chats'); if (box) box.hidden = !box.hidden;
-});
-
-// обновляем обзор/калькулятор часто (данные тянет основной loop), автоскан — редко
+// обновляем обзор/калькулятор часто (данные тянет основной loop)
 setInterval(paintDash, 1200); paintDash();
-autoscanInfo(); setInterval(autoscanInfo, 60000);
 
 /* ═══════════ СКАЧИВАНИЕ СПИСКОВ (по запросу, не вживую) ═══════════ */
 $('#b-found-csv')?.addEventListener('click', () => { location.href = '/api/found/csv'; });
-$('#b-leads-csv')?.addEventListener('click', () => { location.href = '/api/leads/csv'; });

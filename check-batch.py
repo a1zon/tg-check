@@ -160,8 +160,9 @@ async def main():
         await tglib.aclose(client)
 
     decided = found + idle + none_n
-    say(f"\nготово: в Telegram {found} из {decided}"
-        + (f", давно не заходили {idle}" if idle else "")
+    # «давно не заходил» — тоже аккаунт в Telegram, только писать ему не будем
+    say(f"\nготово: проверено {decided}: живых в Telegram {found}, "
+        f"давно не заходили {idle}, нет в Telegram {none_n}"
         + (f"; ещё {ran - decided} не проверились — квота Telegram" if ran > decided else ""))
     say(f"результат: {tglib.RESULTS}")
 

@@ -74,3 +74,8 @@ lead-chats.txt
 leads-sheet.txt
 mirror-names.txt
 avatars/
+.send-gap.*
+asocks.json
+asocks-usage.jsonl
+traffic.csv
+asocks-ports.json

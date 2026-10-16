@@ -140,6 +140,11 @@ def stored_cloud_pass(acc_id):
 
 async def main():
     acc = tglib.resolve(tglib.arg("account", ""))
+    # полный отдых после заморозки: новый вход на ПК — это тоже действие с аккаунтом
+    rest = tglib.full_rest_left(acc)
+    if rest > 0:
+        raise SystemExit(f"«{acc['title']}» на полном отдыхе после заморозки ещё "
+                         f"{rest // 3600} ч {rest % 3600 // 60} мин — вход и комплект не делаю")
     out = tglib.arg("out", "")
     tdata_current = tglib.arg("tdata-current", "")
     want_list = tglib.flag("list")

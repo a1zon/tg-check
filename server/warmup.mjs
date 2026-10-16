@@ -62,6 +62,15 @@ export function planFor(days) {
  * стартует с 2/сутки — иначе PEER_FLOOD на запуске. Совпадает с web/app.js:OUTREACH_PLAN.
  */
 const OUTREACH_PLAN = [[0, 2], [2, 5], [4, 8], [6, 12], [9, 15]];
+/**
+ * Конец последнего отдыха без рассылки (после ограничения или заморозки), мс.
+ * Разгон писем после него начинается заново: день рассылки считаем от первого
+ * письма после этой отметки, а не от самого первого письма аккаунта.
+ */
+export function restEnd(acc) {
+  return Math.max(Date.parse(acc?.sendHoldUntil || '') || 0, Date.parse(acc?.fullRestUntil || '') || 0);
+}
+
 export function outreachCap(outreachDay) {
   const d = outreachDay == null || outreachDay < 0 ? 0 : outreachDay;  // не начинали → как день 0
   let c = 2;
@@ -210,8 +219,10 @@ export function makeWarmup({ readCsv, accounts }) {
     // рассылку, шлёт по дню кампании (2→…→15), а не по возрастному плато. Это тот же
     // разгон, что показывает калькулятор — теперь он применяется и к реальной отправке.
     if (!resting) {
+      const from = restEnd(acc);
       const first = readCsv('drafts.csv')
-        .filter((r) => r.account === acc.id && (r.ok === 'true' || r.sent === 'true') && r.at)
+        .filter((r) => r.account === acc.id && (r.ok === 'true' || r.sent === 'true') && r.at
+                && Date.parse(r.at) >= from)
         .reduce((m, r) => (!m || r.at < m ? r.at : m), '');
       const outreachDay = first ? Math.floor((Date.now() - Date.parse(first)) / 864e5) : -1;
       cap = Math.min(cap, outreachCap(outreachDay));

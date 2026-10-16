@@ -1,6 +1,5 @@
 # tg-check — техническая база
 
-Веб-панель для управления пулом Telegram-аккаунтов: подключение сессий, прокси и смена IP, прогрев поведением, профиль и аватарки, открытие аккаунта в Telegram Desktop, разбор чатов, поиск горячих лидов, ИИ-модуль. Бэкенд на Node, вся работа с Telegram — Python-задачи на Telethon.
 
 Секретов в этом документе нет — только где они лежат. Пароли, ключи и ссылки с `api_key` в чат не вставлять.
 
@@ -14,7 +13,7 @@
 | Панель | `/opt/tg-panel`, пользователь `tgpanel`, служба `tg-panel` |
 | Адрес панели | `https://bqa.egor-kochnev.ru` (nginx → `127.0.0.1:8787`), вход по логину/паролю |
 | Запасной доступ | служба `tg-tunnel` — `cloudflared tunnel --url http://127.0.0.1:8787`, ссылка: `grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' /var/log/tg-tunnel.log \| tail -1` |
-| Поиск лидов по таймеру | `lead-watch.timer` (раз в 15 мин) → `lead-watch.sh`. **Сейчас выключен** (`systemctl disable --now lead-watch.timer`) |
+| Поиск лидов по таймеру | убран 16.10: `lead-watch.timer` выключен (`systemctl disable --now`), файлы юнитов ещё лежат в `/etc/systemd/system/`; старые скрипты перенесены в `/opt/tg-panel/_backup_2026-10-16-leads/` |
 | Локальная копия кода | `~/Projects/tg-check` (git, ветка с незакоммиченными правками — рабочая копия, которая выкладывается) |
 
 Версии: Node 20.20, Python 3.14, Telethon 1.45 в `venv-tg/`. Запуск панели: `node admin.mjs --port 8787 --no-open` (так в systemd).
@@ -42,7 +41,6 @@ login-qr.py / login-code.py   вход по QR / по коду
 profile.py           имя, фамилия, @username, аватар (после смены — обновляет аватарку в панели)
 warmup-activity.py   одно действие прогрева за запуск
 parse-chat.py        разбор участников чатов → members.csv
-scan-leads.py        поиск горячих лидов по сообщениям чатов (+ отправка в Google-таблицу)
 llm.py               клиент к LLM (OpenAI-совместимый API)
 cleanup-contacts.py  убрать из адресной книги контакты-метки (10 цифр номера)
 desktop-pack.py      одна папка tdata с 3 аккаунтами для Desktop
@@ -65,7 +63,7 @@ deploy/push.sh       выкладка на сервер
 | `warm-list.json` | куда водить при прогреве: каналы, чаты, боты, реакции, фразы `talk_open`/`talk_reply`, `dm_focus` |
 | `events.jsonl` | лента «Что происходит» (последние 500 событий) |
 | `members.csv` | итог разбора чатов: `key,username,name,user_id,chat,at,by` |
-| `leads.json`, `leads-log.csv`, `lead-chats.txt`, `leads-sheet.txt` | горячие лиды и адрес Google Apps Script |
+| `leads.json`, `leads-log.csv`, `lead-chats.txt`, `leads-sheet.txt` | остатки убранного поиска лидов; панель их больше не читает |
 | `auth.json` | логин/хеш пароля панели |
 | `.env` | ключи LLM (см. §8) — **не в git** |
 | `mirror.json`, `mirror-names.txt` | субдомены сайта (см. §9) |
@@ -139,7 +137,7 @@ deploy/push.sh       выкладка на сервер
 
 ## 11. Сайт и связанные сервисы
 
-- Лендинг `egor-kochnev.ru`: статический `index.html` (исходник в `deploy/egor-kochnev/`), nginx `egor-k`, `/var/www/egor`. Форма и события шлют POST в **Google Apps Script** (адрес в `CONFIG.sheetUrl` сайта и в `leads-sheet.txt`) → Google-таблица «Как я хочу M-очку», лист «Заявки». Метка источника — параметр `?src=`.
+- Лендинг `egor-kochnev.ru`: статический `index.html` (исходник в `deploy/egor-kochnev/`), nginx `egor-k`, `/var/www/egor`. Форма и события шлют POST в **Google Apps Script** (адрес в `CONFIG.sheetUrl` сайта) → Google-таблица «Как я хочу M-очку», лист «Заявки». Метка источника — параметр `?src=`.
 - Известная проблема формы: ответ Apps Script бывает 5–8 с и иногда 503; сайт ждёт ответа и не повторяет — стоит показывать «Спасибо» сразу и отправлять с повтором.
 - **Сертификаты:** `egor-kochnev-pool` — один сертификат Let's Encrypt на `egor-kochnev.ru`, `www` и 95 имён-субдоменов из `mirror-names.txt` (HTTP-проверка, автопродление certbot). nginx `egor-k` смотрит на него. Wildcard через DNS не выпущен: домен на другом аккаунте reg.ru (`DOMAIN_NOT_FOUND`); хук `/etc/letsencrypt/regru-hook.py` и `regru.ini` лежат на случай, если дадут доступ.
 - Субдомены в панели (`mirror.json`, режим `wildcard`) берутся только из `mirror-names.txt` — иначе у имени не будет сертификата.

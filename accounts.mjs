@@ -91,7 +91,23 @@ export function setAuthed(id, value) {
  * рассылку переводятся руками, когда созреют. У старых записей роли нет —
  * они работали в рассылке и до разделения, так и остаётся.
  */
-export const inOutreach = (acc) => acc.role !== 'warm';
+const untilLeft = (acc, key) => {
+  const t = Date.parse(acc?.[key] || '');
+  return Number.isFinite(t) ? Math.max(0, t - Date.now()) : 0;
+};
+
+/**
+ * После заморозки — два вида отдыха (оба ставятся руками, ISO-время):
+ *   fullRestUntil — ПОЛНЫЙ: к Telegram не подключается вовсе;
+ *   sendHoldUntil — «без рассылки»: людям не пишет, а прогрев идёт
+ *                   (реакции, каналы, переписка со своими).
+ * Роль можно переключить одним «ОК» при запуске прогона — отметку так не снимешь.
+ * Возвращают, сколько мс ещё осталось, 0 — можно.
+ */
+export const fullRestLeft = (acc) => untilLeft(acc, 'fullRestUntil');
+export const sendHoldLeft = (acc) => Math.max(untilLeft(acc, 'sendHoldUntil'), fullRestLeft(acc));
+
+export const inOutreach = (acc) => acc.role !== 'warm' && !sendHoldLeft(acc);
 
 /** id -> аккаунт. Без id берём первый: так старые запуски из терминала работают как раньше. */
 export function resolve(id) {

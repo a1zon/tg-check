@@ -106,7 +106,7 @@ tar -C "$DIR" "${TAR_EXTRA[@]}" -czf - \
   --exclude='./message-parts.json' --exclude='./message.txt' --exclude='./message2.txt' \
   --exclude='./warm-list.json' --exclude='./leads.json' --exclude='./leads-log.csv' \
   --exclude='*.xlsx' --exclude='*.session' --exclude='./_backup_*' \
-  --exclude='./_reset_backup_*' --exclude='.DS_Store' \
+  --exclude='./_reset_backup_*' --exclude='.DS_Store' --exclude='.send-gap.*' --exclude='./asocks.json' --exclude='./asocks-usage.jsonl' --exclude='./asocks-ports.json' --exclude='./traffic.csv' \
   . | "${SSH[@]}" "$TARGET" "tar xzf - --no-same-owner -C '$REMOTE'"
 # tar под root восстановил бы владельца из архива — то есть номер пользователя
 # с ЭТОГО компьютера, которого на сервере нет. Поэтому и --no-same-owner,

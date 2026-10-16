@@ -1485,9 +1485,13 @@ function autoTick() {
   // По очереди работает кто-то один, поэтому порядок решает: без него первые
   // в списке забирали бы заход за заходом, а последние ждали бы, пока у первых
   // кончится дневной предел. Пускаем того, кто дольше всех не работал.
-  const queue = auto.serial
+  // Снятые за ограничение Telegram не пишут, но ответы на прежние письма читать
+  // можно и нужно: иначе «да» такому аккаунту ждало бы конца ограничения (у a9
+  // 16.10 — месяц), и никто бы его не увидел. Им — только «смотрит ответы», в конце очереди
+  const held = auto.ids.filter((id) => auto.per.get(id)?.stopped && auto.per.get(id).quarantine && byId.has(id));
+  const queue = (auto.serial
     ? [...live].sort((x, y) => (auto.per.get(x).lastAt || 0) - (auto.per.get(y).lastAt || 0))
-    : live;
+    : live).concat(held);
   // параллель на общем IP — запуски разводим по времени (см. launchHold)
   const spread = !auto.serial && !ownProxyEach();
 
@@ -1506,7 +1510,11 @@ function autoTick() {
     const o = auto.opts[set] || auto;
     if (!left) continue;            // режим этого аккаунта уже закончил работу
     let job;
-    if (now < s.nextAt) {
+    if (s.stopped) {
+      if (!wroteAny().has(id)) continue;
+      job = funnelJob(id);
+      if (!job) continue;
+    } else if (now < s.nextAt) {
       // отдыхает между пачками писем — но посмотреть, ответили ли ему, можно:
       // это чтение диалогов, а не рассылка. Отдых при этом не сбивается (autoAfter)
       if (!wroteAny().has(id)) continue;
@@ -1560,13 +1568,13 @@ function autoTick() {
       // второе письмо (follow) уходит только при включённом втором шаге;
       // без него «Смотрит ответы» просто фиксирует ответы, ничего не отправляя
       send: o.send && !o.voice && (job.name === 'drafts'
-        || (job.name === 'follow' && o.funnel && !accounts.sendHoldLeft(byId.get(id)))),
+        || (job.name === 'follow' && o.funnel && !s.stopped && !accounts.sendHoldLeft(byId.get(id)))),
       voice: job.name === 'drafts' && o.voice,
     }, (code, st) => autoAfter(id, code, st));
     launchedBy = 'manual';
 
     if (r.ok) {
-      s.note = '';
+      if (!s.stopped) s.note = '';
       s.lastAt = now;
       // по очереди — значит один за раз: следующего позовём, когда этот
       // закончит и панель снова сменит IP
@@ -1615,6 +1623,8 @@ function autoFail(id, s) {
 function autoAfter(id, code, st) {
   const s = auto.per.get(id);
   if (!s || !auto.on) return;
+  // снятый за ограничение только смотрел ответы — его отдых и отметки не трогаем
+  if (s.stopped && s.quarantine) return;
   const o = optOf(id);
   const now = Date.now();
   // задача была проверкой ответов посреди отдыха: что бы ни случилось, отметку снимаем

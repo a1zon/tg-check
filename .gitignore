@@ -66,6 +66,7 @@ auto-run.json
 auto-last.json
 followup-runs.json
 followup-texts.json
+sent-ids.csv
 base-set.json
 leads.json
 leads-log.csv

@@ -41,6 +41,10 @@ CHAT_NUMBERS = CHATS_DIR / "numbers.csv"
 CHAT_RESULTS = CHATS_DIR / "results.csv"
 ALL_DRAFTS = (DIR / "drafts.csv", CHATS_DIR / "drafts.csv")   # история отправок аккаунта — общая
 MEMBERS = DIR / "members.csv"    # участники чатов, собранные разбором
+# кому ушло первое письмо — по id Telegram: по нему проверка ответов узнаёт
+# человека, даже если ник сменился или номер скрыт (followup.py)
+SENT_IDS = DIR / "sent-ids.csv"
+SENT_IDS_HEAD = ["key", "user_id", "account", "at"]
 WARMUP = DIR / "warmup.csv"      # что аккаунты делали на прогреве
 WARM_LIST = DIR / "warm-list.json"           # куда прогрев их водит (правит хозяин)
 WARM_LIST_DEFAULT = CODE / "warm-list.default.json"  # образец, приезжает с кодом

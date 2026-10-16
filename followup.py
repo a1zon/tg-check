@@ -45,7 +45,7 @@ RUNS = tglib.DIR / "followup-runs.json"
 TEXTS = tglib.DIR / "followup-texts.json"
 
 
-async def backfill_texts(client, acc_id, dialogs):
+async def backfill_texts(client, acc_id, dialogs, by_key, by_id):
     """Ответы без текста у этого аккаунта — достаём само сообщение по сохранённому msg id."""
     try:
         texts = json.loads(TEXTS.read_text("utf-8"))
@@ -61,10 +61,8 @@ async def backfill_texts(client, acc_id, dialogs):
     for d in dialogs:
         if not d.is_user:
             continue
-        u = getattr(d.entity, "username", None)
-        phone = "+" + str(d.entity.phone) if getattr(d.entity, "phone", None) else ""
-        k = next((x for x in (phone, tglib.member_key(u, d.entity.id)) if x in need), None)
-        if not k or not str(need[k]).isdigit():
+        k = whose(d.entity, by_key, by_id)
+        if k not in need or not str(need[k]).isdigit():
             continue
         try:
             m = await client.get_messages(d.entity, ids=int(need[k]))
@@ -107,6 +105,42 @@ VERDICT_SYS = (
 VERDICT_RE = re.compile(r"\b(НЕЯСНО|НЕТ|ДА|UNCLEAR|YES|NO)\b", re.I)
 VERDICT_MAP = {"да": "yes", "yes": "yes", "нет": "no", "no": "no",
                "неясно": "unclear", "unclear": "unclear"}
+
+
+def recipients(ours):
+    """
+    Как узнать в диалоге того, кому писали. Ключ в журнале — номер, @ник или
+    id:<id>, а Telegram в диалоге отдаёт другое:
+      • ник в настоящем регистре, а в журнале — как набрали в таблице
+        (на тестовом профиле 16.10 так «не видно» было 4 диалога из 6);
+      • номер — только если человек его открыл: контакт после письма мы
+        удаляем, и у скрывшего номер его в диалоге нет;
+      • ник человек мог сменить или убрать.
+    Поэтому ник и номер сверяем без учёта регистра, а по id — где он известен:
+    его пишет рассылка при отправке (sent-ids.csv) и разбор чатов (members.csv).
+    Для старых писем по номеру — ник, который видела проверка номеров.
+    """
+    by_key = {k.lower(): k for k in ours}
+    for f in (tglib.DIR / "results.csv", tglib.CHATS_DIR / "results.csv"):
+        for r in tglib.read_csv(f):
+            u = (r.get("username") or "").lstrip("@").lower()
+            if u and r.get("phone") in ours:
+                by_key.setdefault("@" + u, r["phone"])
+    by_id = {}
+    for f in (tglib.MEMBERS, tglib.SENT_IDS):
+        for r in tglib.read_csv(f):
+            if r.get("user_id") and r.get("key") in ours:
+                by_id[str(r["user_id"])] = r["key"]
+    return by_key, by_id
+
+
+def whose(entity, by_key, by_id):
+    """Ключ из журнала для собеседника — или None, если мы ему не писали."""
+    phone = "+" + str(entity.phone) if getattr(entity, "phone", None) else ""
+    for k in (phone, tglib.member_key(getattr(entity, "username", None), entity.id)):
+        if k and k.lower() in by_key:
+            return by_key[k.lower()]
+    return by_id.get(str(entity.id))
 
 
 def written_by_us():
@@ -204,6 +238,7 @@ async def main():
         f"{tglib.proxy_label(acc.get('proxy'))}")
 
     ours, (final, unclear) = written_by_us(), history()
+    by_key, by_id = recipients(ours)
     client = await tglib.connect(acc)
     tglib.ensure_head(FILE, HEAD)
     # у старого файла нет колонки text — дописываем шапку, строки не трогаем
@@ -222,10 +257,7 @@ async def main():
             last = d.message
             if not last or last.out:
                 continue
-            u = getattr(d.entity, "username", None)
-            key = tglib.member_key(u, d.entity.id)
-            phone = "+" + str(d.entity.phone) if getattr(d.entity, "phone", None) else ""
-            who = next((k for k in (phone, key) if k and k in ours), None)
+            who = whose(d.entity, by_key, by_id)
             if not who:
                 continue
             answered += 1
@@ -234,7 +266,7 @@ async def main():
             replied.append((who, d.entity, last.id))
 
         mark_run(acc["id"], len(dialogs), answered, len(replied))
-        await backfill_texts(client, acc["id"], dialogs)
+        await backfill_texts(client, acc["id"], dialogs, by_key, by_id)
         say(f"проверил ответы: диалогов {len(dialogs)}, ответили из базы {answered}, новых {len(replied)}")
         say(f"ответили и ещё не разобраны: {len(replied)}")
         if not replied:

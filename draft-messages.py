@@ -319,6 +319,7 @@ async def main():
             good, sent_flag = False, ""
             imported = False          # клали ли контакт в адресную книгу
             record = True             # писать ли строку в drafts.csv (в finally)
+            user = None
             # дедуп в рамках прогона: одна и та же строка (дубль из results.csv при
             # параллельном разборе) не должна уйти человеку дважды
             if phone in seen_phones:
@@ -480,6 +481,12 @@ async def main():
                     tglib.append_row(tglib.DRAFTS,
                                      [phone, acc["id"], str(good).lower(), sent_flag, now_iso()],
                                      tglib.DRAFTS_HEAD)
+                # id того, кому ушло: по ключу из базы проверка ответов человека
+                # не всегда узнает — ник бывает в другом регистре или сменён,
+                # а номер у удалённого из контактов скрыт
+                if sent_flag == "true" and getattr(user, "id", None):
+                    tglib.append_row(tglib.SENT_IDS, [phone, str(user.id), acc["id"], now_iso()],
+                                     tglib.SENT_IDS_HEAD)
             # бронь держим до конца прогона (release_all в atexit): досрочное
             # снятие под параллельной рассылкой давало повтор одному человеку
             if fails_row >= MAX_FAILS_IN_ROW:

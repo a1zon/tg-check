@@ -109,7 +109,22 @@ const events = makeEvents({ DIR, tz: WORK_TZ, nameOf: (who) => {
 } });
 // тексты старых ответов, которые followup.py дотянул из диалогов (у ранних строк followup.csv их нет)
 const oldTexts = () => { try { return JSON.parse(fs.readFileSync(path.join(DIR, 'followup-texts.json'), 'utf8')) || {}; } catch { return {}; } };
-const results = makeResults({ readRaw, tz: WORK_TZ, replyOf: (k) => events.replyOf(k), oldTexts });
+// переписка с ответившими — её пишет followup.py в talks/<акк>.json; держим до правки файла
+const talkCache = new Map();
+function talksOf(acc) {
+  if (!/^[\w-]+$/.test(String(acc || ''))) return {};
+  const f = path.join(DIR, 'talks', `${acc}.json`);
+  let st;
+  try { st = fs.statSync(f); } catch { return {}; }
+  const hit = talkCache.get(acc);
+  if (hit && hit.mtimeMs === st.mtimeMs) return hit.data;
+  let data = {};
+  try { data = JSON.parse(fs.readFileSync(f, 'utf8')) || {}; } catch {}
+  talkCache.set(acc, { mtimeMs: st.mtimeMs, data });
+  return data;
+}
+const results = makeResults({ readRaw, tz: WORK_TZ, replyOf: (k) => events.replyOf(k), oldTexts,
+                              talkOf: (acc, key) => talksOf(acc)[key] || null });
 
 /**
  * Разовая разметка ролей для аккаунтов, заведённых до разделения прогрева и
@@ -3379,6 +3394,12 @@ async function handler(req, res) {
       const set = u.searchParams.get('set') === 'chats' ? 'chats' : 'phones';
       const name = (id) => { const a = accounts.list().find((x) => x.id === id); return a ? (a.name || a.title) : id; };
       return json(res, 200, results.compute(set, name));
+    }
+
+    /** Переписка с ответившим целиком — вкладка «Результаты» тянет её при раскрытии. */
+    if (u.pathname === '/api/talk') {
+      const t = talksOf(u.searchParams.get('acc'))[u.searchParams.get('key') || ''];
+      return json(res, 200, { msgs: t?.msgs || [] });
     }
 
     /** Лента событий — человеческим языком, свежие сверху. */

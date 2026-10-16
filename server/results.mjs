@@ -10,7 +10,7 @@
  */
 import path from 'node:path';
 
-export function makeResults({ readRaw, tz, replyOf = () => '', oldTexts = () => ({}) }) {
+export function makeResults({ readRaw, tz, replyOf = () => '', oldTexts = () => ({}), talkOf = () => null }) {
   const dayOf = (iso) => {
     const t = Date.parse(iso);
     return Number.isFinite(t)
@@ -67,9 +67,15 @@ export function makeResults({ readRaw, tz, replyOf = () => '', oldTexts = () => 
     const answers = [...verdict.values()]
       .filter((r) => r.verdict === 'yes' || r.verdict === 'unclear')
       .sort((a, b) => String(b.at).localeCompare(String(a.at)))
-      .map((r) => ({ who: r.key, account: titles(r.account), accountId: r.account, at: when(r.at),
-                     verdict: r.verdict, link: r.sent === 'true',
-                     text: r.text || texts[r.key] || replyOf(r.key) }));
+      .map((r) => {
+        // вся переписка — отдельным запросом при раскрытии (/api/talk), тут только сколько её
+        const talk = talkOf(r.account, r.key);
+        const msgs = talk?.msgs || [];
+        return { who: r.key, account: titles(r.account), accountId: r.account, at: when(r.at),
+                 verdict: r.verdict, link: r.sent === 'true',
+                 text: r.text || texts[r.key] || replyOf(r.key) || msgs[0]?.[2] || '',
+                 more: Math.max(0, msgs.length - 1), lastAt: msgs.length ? msgs[msgs.length - 1][1] : 0 };
+      });
     for (const r of verdict.values()) {
       const v = r.verdict === 'yes' ? 'yes' : r.verdict === 'no' ? 'no' : 'unclear';
       inc('replied'); inc(v);

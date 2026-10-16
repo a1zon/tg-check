@@ -996,19 +996,88 @@ const resultsView = async (force) => {
       : '<tr><td class="hint">пока пусто</td></tr>';
     $('#rs-days').innerHTML = table(r.days || [], 'день', 'day');
     $('#rs-accs').innerHTML = table(r.accounts || [], 'аккаунт', 'title');
-    const ans = r.answers || [];
-    $('#rs-answers').innerHTML = ans.length
-      ? '<tr><th>когда</th><th>кто</th><th>аккаунт</th><th>как понято</th><th>ответ</th><th></th></tr>' +
-        ans.map((x) => `<tr><td>${esc(x.at)}</td><td>${esc(x.who)}</td><td>${esc(x.account)}</td>
-          <td>${x.verdict === 'yes' ? 'да' + (x.link ? ' · ссылка ушла' : '') : 'непонятно'}</td>
-          <td class="ans-text">${esc(x.text || '—')}</td>
-          <td>${x.accountId ? `<button class="ghost mini" data-ans-acc="${esc(x.accountId)}" title="Открыть этот аккаунт в Telegram Desktop на своём компьютере и ответить человеку">Ответить</button>` : ''}</td></tr>`).join('')
-      : '<tr><td class="hint">пока нет</td></tr>';
-    // «Ответить» — тот же комплект «На ПК», что в списке аккаунтов: панель на сервере, писать — со своего компьютера
-    $('#rs-answers').querySelectorAll('[data-ans-acc]').forEach((b) => b.onclick = () => openKit(b.dataset.ansAcc));
+    renderAnswers(r.answers || []);
   } catch {}
 };
 $('#res-set').onchange = () => { resSetTouched = true; resultsView(true); };
+
+/*
+ * Ответы — по аккаунтам, свёрнуто: список и так длинный. У человека раскрывается
+ * вся переписка после его первого ответа (её читает «смотрит ответы», talks/<акк>.json);
+ * тянем её только при раскрытии. Что раскрыто — помним между обновлениями вкладки.
+ */
+const ansOpen = new Set(), talkOpen = new Set(), talkCache = new Map();
+let ansSig = '';
+const ruPlural = (n, one, few, many) => {
+  const a = n % 10, b = n % 100;
+  return a === 1 && b !== 11 ? one : a >= 2 && a <= 4 && (b < 10 || b >= 20) ? few : many;
+};
+const talkTime = (ts) => new Date(ts * 1000).toLocaleString('ru-RU', { timeZone: 'Asia/Yekaterinburg',
+  day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+const threadHtml = (msgs) => msgs.length
+  ? msgs.map(([out, ts, text]) => `<div class="bub ${out ? 'out' : 'in'}">${esc(text)}<i>${out ? 'мы · ' : ''}${talkTime(ts)}</i></div>`).join('')
+  : '<div class="hint">переписка подтянется при следующей проверке ответов (раз в полчаса)</div>';
+
+async function loadTalk(el) {
+  const id = el.dataset.acc + ' ' + el.dataset.key;
+  const box = el.querySelector('.thread');
+  if (talkCache.has(id)) box.innerHTML = threadHtml(talkCache.get(id));
+  else box.innerHTML = '<div class="hint">загружаю…</div>';
+  try {
+    const d = await (await fetch(`/api/talk?acc=${encodeURIComponent(el.dataset.acc)}&key=${encodeURIComponent(el.dataset.key)}`)).json();
+    talkCache.set(id, d.msgs || []);
+    box.innerHTML = threadHtml(d.msgs || []);
+  } catch { if (!talkCache.has(id)) box.innerHTML = '<div class="hint">не загрузилось</div>'; }
+}
+
+function renderAnswers(ans) {
+  const sig = JSON.stringify(ans);
+  if (sig === ansSig) return;          // ничего нового — не перерисовываем: раскрытое не схлопнется
+  ansSig = sig;
+  const box = $('#rs-answers');
+  if (!ans.length) { box.innerHTML = '<div class="hint">пока нет</div>'; return; }
+  const byAcc = new Map();
+  for (const x of ans) {
+    if (!byAcc.has(x.accountId)) byAcc.set(x.accountId, []);
+    byAcc.get(x.accountId).push(x);
+  }
+  box.innerHTML = [...byAcc].map(([acc, list]) => {
+    const yes = list.filter((x) => x.verdict === 'yes').length;
+    return `<details class="ans-acc" data-acc="${esc(acc)}"${ansOpen.has(acc) ? ' open' : ''}>
+      <summary><b>${esc(list[0].account)}</b><span class="ans-sum">${list.length} ${ruPlural(list.length, 'ответ', 'ответа', 'ответов')}` +
+      `${yes ? ` · <span class="ans-yes">да ${yes}</span>` : ''}${list.length - yes ? ` · непонятно ${list.length - yes}` : ''} · последний ${esc(list[0].at)}</span></summary>` +
+      list.map((x) => {
+        const id = acc + ' ' + x.who;
+        return `<details class="ans-p" data-acc="${esc(acc)}" data-key="${esc(x.who)}"${talkOpen.has(id) ? ' open' : ''}>
+          <summary><span class="ans-when">${esc(x.at)}</span><span class="ans-who">${esc(x.who)}</span>
+            <span class="${x.verdict === 'yes' ? 'ans-yes' : 'ans-unc'}">${x.verdict === 'yes' ? 'да' + (x.link ? ' · ссылка ушла' : '') : 'непонятно'}</span>
+            <span class="ans-first">${esc(x.text || '—')}</span>
+            ${x.more ? `<span class="ans-more" title="сообщений после первого ответа">+${x.more}</span>` : ''}
+            <button class="ghost mini" data-ans-acc="${esc(acc)}" title="Открыть этот аккаунт в Telegram Desktop на своём компьютере и ответить человеку">Ответить</button></summary>
+          <div class="thread">${talkOpen.has(id) && talkCache.has(id) ? threadHtml(talkCache.get(id)) : ''}</div></details>`;
+      }).join('') + '</details>';
+  }).join('');
+  // раскрытые до перерисовки — подтянуть свежую переписку
+  box.querySelectorAll('.ans-p[open]').forEach(loadTalk);
+}
+
+// toggle не всплывает — ловим на погружении
+$('#rs-answers').addEventListener('toggle', (e) => {
+  const el = e.target;
+  if (el.classList.contains('ans-acc')) {
+    if (el.open) ansOpen.add(el.dataset.acc); else ansOpen.delete(el.dataset.acc);
+  } else if (el.classList.contains('ans-p')) {
+    const id = el.dataset.acc + ' ' + el.dataset.key;
+    if (el.open) { talkOpen.add(id); loadTalk(el); } else talkOpen.delete(id);
+  }
+}, true);
+// «Ответить» — тот же комплект «На ПК», что в списке аккаунтов: панель на сервере, писать — со своего компьютера
+$('#rs-answers').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-ans-acc]');
+  if (!b) return;
+  e.preventDefault();                  // кнопка в заголовке — раскрывать не надо
+  openKit(b.dataset.ansAcc);
+});
 let resSetTouched = false;   // пока не выбрали руками — показываем тот набор, по которому идёт рассылка
 
 /** Лента событий — что произошло, человеческим языком, свежие сверху. */

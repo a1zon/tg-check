@@ -43,6 +43,65 @@ RUNS = tglib.DIR / "followup-runs.json"
 # тексты ответов, записанных до появления колонки text: дотягиваем по id сообщения
 # в отдельный файл — followup.csv дописывают параллельно, переписывать его целиком нельзя
 TEXTS = tglib.DIR / "followup-texts.json"
+# переписка с ответившими — целиком, от их первого ответа: её показывает вкладка
+# «Результаты». Файл на аккаунт: задачи разных аккаунтов идут параллельно
+TALKS = tglib.DIR / "talks"
+TALK_MAX = 60        # столько последних сообщений диалога храним
+TALK_TEXT = 1500     # и столько символов одного сообщения
+TALK_READS = 40      # больше диалогов за заход не перечитываем — остальные в следующий
+
+
+def load_talks(acc_id):
+    try:
+        d = json.loads((TALKS / f"{acc_id}.json").read_text("utf-8"))
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_talks(acc_id, talks):
+    TALKS.mkdir(exist_ok=True)
+    tmp = TALKS / f"{acc_id}.json.tmp"
+    tmp.write_text(json.dumps(talks, ensure_ascii=False) + "\n", "utf-8")
+    tmp.replace(TALKS / f"{acc_id}.json")     # разом: панель не прочтёт половину файла
+
+
+def media_label(m):
+    """Что прислали вместо текста (или вместе с ним) — словами."""
+    if m.voice:
+        return "🎤 голосовое"
+    if m.video_note:
+        return "⏺ видеосообщение"
+    if m.sticker:
+        return "стикер"
+    if m.gif:
+        return "GIF"
+    if m.photo:
+        return "🖼 фото"
+    if m.video:
+        return "🎬 видео"
+    if m.document:
+        return "📎 файл"
+    if m.geo or m.venue:
+        return "📍 место"
+    if m.contact:
+        return "👤 контакт"
+    return "вложение"
+
+
+async def read_talk(client, ent):
+    """Переписка от первого ответа человека: [[наше 1/0, время unix, текст], …]."""
+    msgs = []
+    async for m in client.iter_messages(ent, limit=TALK_MAX):
+        if m.action:
+            continue                  # служебное: «вступил», «звонок» и т.п.
+        text = (m.message or "").strip()
+        if m.media and not m.web_preview:
+            text = f"{text}\n[{media_label(m)}]" if text else f"[{media_label(m)}]"
+        msgs.append([1 if m.out else 0, int(m.date.timestamp()), text[:TALK_TEXT]])
+    msgs.reverse()
+    first = next((i for i, x in enumerate(msgs) if not x[0]), None)
+    return msgs[first:] if first is not None else []
 
 
 async def backfill_texts(client, acc_id, dialogs, by_key, by_id):
@@ -253,24 +312,43 @@ async def main():
         FILE.write_text(",".join(HEAD) + "\n" + (raw.split("\n", 1)[1] if "\n" in raw else ""), "utf-8")
 
     replied = []
+    talks, talk_reads, talks_new = load_talks(acc["id"]), 0, False
     try:
         dialogs = await client.get_dialogs(limit=DIALOGS)
         answered = 0
         for d in dialogs:
             if not d.is_user or d.entity.bot:
                 continue
-            # ответил — значит последнее слово в диалоге не наше
-            last = d.message
-            if not last or last.out:
-                continue
             who = whose(d.entity, by_key, by_id)
             if not who:
+                continue
+            last = d.message
+            # Переписку целиком — для «Результатов» — перечитываем, только когда в
+            # диалоге появилось новое. Впервые — у тех, кто уже отвечал
+            known = talks.get(who)
+            spoke = known or who in final or who in unclear or (last and not last.out)
+            if (last and spoke and (not known or known.get("last_id") != last.id)
+                    and talk_reads < TALK_READS):
+                talk_reads += 1
+                try:
+                    msgs = await read_talk(client, d.entity)
+                except Exception as e:
+                    msgs = []
+                    say(f"  переписку {who} не прочитал: {type(e).__name__}")
+                if msgs:
+                    talks[who] = {"last_id": last.id, "msgs": msgs}
+                    talks_new = True
+                await asyncio.sleep(random.uniform(0.3, 0.7))
+            # ответил — значит последнее слово в диалоге не наше
+            if not last or last.out:
                 continue
             answered += 1
             if who in final or unclear.get(who) == str(last.id):
                 continue
             replied.append((who, d.entity, last.id))
 
+        if talks_new:
+            save_talks(acc["id"], talks)
         mark_run(acc["id"], len(dialogs), answered, len(replied))
         await backfill_texts(client, acc["id"], dialogs, by_key, by_id)
         say(f"проверил ответы: диалогов {len(dialogs)}, ответили из базы {answered}, новых {len(replied)}")

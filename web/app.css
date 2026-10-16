@@ -434,3 +434,35 @@ details.fieldset[open] > summary.fh::before{content:'▾'}
 /* у карточек своё «стекло» (backdrop-filter) — каждая отдельный слой, и следующая
    накрывала выпадающее меню. Карточку с открытым меню поднимаем над соседями */
 .card:has(.accmenu[open]){position:relative;z-index:40}
+
+/* ——— ответы: по аккаунтам, у человека раскрывается вся переписка ——— */
+.ans-acc{border:1px solid var(--line);border-radius:12px;margin-bottom:8px;background:rgba(120,164,255,.04)}
+.ans-acc>summary,.ans-p>summary{cursor:pointer;list-style:none;display:flex;gap:10px;align-items:baseline}
+.ans-acc>summary::-webkit-details-marker,.ans-p>summary::-webkit-details-marker{display:none}
+.ans-acc>summary::before,.ans-p>summary::before{content:'▸';color:var(--mut);flex:none;width:10px}
+.ans-acc[open]>summary::before,.ans-p[open]>summary::before{content:'▾'}
+.ans-acc>summary{padding:10px 14px;font-size:13.5px;flex-wrap:wrap}
+.ans-acc>summary b{color:#fff}
+.ans-sum{color:var(--mut);font-size:12.5px}
+.ans-yes{color:var(--ok);font-weight:600;white-space:nowrap}
+.ans-unc{color:var(--mut);white-space:nowrap}
+.ans-p{border-top:1px solid var(--line)}
+.ans-p>summary{padding:8px 14px 8px 24px;font-size:13px}
+.ans-p>summary .mini{margin-left:auto;flex:none}
+.ans-when{color:var(--mut);font-size:12px;white-space:nowrap}
+.ans-who{white-space:nowrap}
+.ans-first{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ink)}
+.ans-p[open] .ans-first{white-space:normal}
+.ans-more{color:var(--acc);font-size:12px;white-space:nowrap}
+.thread{padding:4px 14px 12px 34px;display:flex;flex-direction:column;gap:6px}
+.bub{max-width:78%;padding:7px 10px;border-radius:12px;font-size:13px;line-height:1.45;
+  white-space:pre-wrap;word-break:break-word}
+.bub.in{align-self:flex-start;background:rgba(120,164,255,.10);border:1px solid var(--line)}
+.bub.out{align-self:flex-end;background:rgba(90,162,255,.22);border:1px solid rgba(90,162,255,.35)}
+.bub i{display:block;font-style:normal;color:var(--mut);font-size:11px;margin-top:3px}
+@media(max-width:620px){
+  .ans-p>summary{flex-wrap:wrap;padding-left:14px}
+  .ans-first{flex-basis:100%;white-space:normal}
+  .thread{padding-left:14px}
+  .bub{max-width:92%}
+}

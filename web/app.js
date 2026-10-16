@@ -2357,6 +2357,7 @@ const loop = async () => {
   if (busy) return;
   await base(); await repliesList(); await warmup(); await funnel(); await mirror();
   await traffic();
+  if (activeView() === 'warmup') await commentsView();
   if (activeView() === 'chatsend') await members();
   if (activeView() === 'results') await resultsView();
 };
@@ -2411,6 +2412,55 @@ const nf = (n) => (n == null ? '—' : new Intl.NumberFormat('ru-RU').format(Mat
 // ── Трафик и прокси: итог и баланс Asocks + «за что» по задачам и аккаунтам ──
 // Платный прокси считается за гигабайт; данные меняются раз в полчаса —
 // спрашиваем раз в минуту, а не на каждом двухсекундном опросе панели.
+/* ═══════════ КОММЕНТАРИИ В ЧАТАХ — сводка и очередь на одобрение ═══════════ */
+let commentsAt = 0, commentsRaw = '';
+async function commentsView(force) {
+  if (!force && Date.now() - commentsAt < 15_000) return;
+  commentsAt = Date.now();
+  let c;
+  try { c = await (await fetch('/api/comments')).json(); } catch { return; }
+  const raw = JSON.stringify(c);
+  if (raw === commentsRaw) return;          // ничего не поменялось — не трогаем (и правку в поле)
+  commentsRaw = raw;
+  const set = (id, v) => { const el = $(id); if (el) el.textContent = v; };
+  const review = c.reviewed < c.approveFirst;
+  set('#cmt-state', !c.on
+    ? 'Выключены. Включаются в warm-list.json → comments.on (образ и правила текста — comment-persona.txt).'
+    : (review ? `Первые ${c.approveFirst} комментариев ждут одобрения здесь: разобрано ${c.reviewed}. `
+              : 'Пишутся сами, без одобрения. ') +
+      (c.held.length ? `Под ограничением комментировать можно: ${c.held.join(', ')}.` : ''));
+  set('#cmt-day', c.stats.day); set('#cmt-week', c.stats.week);
+  set('#cmt-chats', `${c.chats.assigned}/${c.chats.total}`); set('#cmt-deleted', c.stats.deleted);
+  const box = $('#cmt-pending');
+  if (box && !box.contains(document.activeElement)) {   // не сбиваем того, кто правит текст
+    box.innerHTML = c.pending.length ? c.pending.map((p) => `
+      <div class="cmt-item" data-id="${esc(p.id)}">
+        <div><b>${esc(p.name)}</b> → ${esc(p.chat_title || p.chat)}</div>
+        <div class="cmt-their">${esc(p.their_name || 'участник')}: ${esc(p.their)}</div>
+        <textarea>${esc(p.decision && p.decision.text || p.reply)}</textarea>
+        <div class="frow">${p.decision
+          ? `<span class="hint">${p.decision.ok ? 'одобрен — уйдёт со следующим заходом аккаунта' : 'отклонён'}</span>`
+          : '<button class="primary mini" data-ok="1">Одобрить</button><button class="ghost mini" data-ok="0">Отклонить</button>'}
+        </div>
+      </div>`).join('') : '<div class="hint">пусто</div>';
+  }
+  const rec = $('#cmt-recent');
+  if (rec) rec.innerHTML = c.recent.length ? c.recent.map((r) => `<div class="trf-row"><span>${esc(r.name)} · ${esc(r.chat)}: ${esc(r.text)}</span><b>${new Date(r.at).toLocaleString('ru-RU', {day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'})}</b></div>`).join('')
+    : '<div class="hint">пока ни одного</div>';
+}
+$('#cmt-pending')?.addEventListener('click', async (e) => {
+  const b = e.target.closest('button[data-ok]');
+  if (!b) return;
+  const item = b.closest('.cmt-item');
+  b.disabled = true;
+  try {
+    const r = await post('/api/comments/decide', {
+      id: item.dataset.id, ok: b.dataset.ok === '1', text: item.querySelector('textarea').value });
+    if (!r.ok) alert(r.reason || 'не вышло');
+  } catch (err) { alert(err.message); }
+  commentsRaw = ''; await commentsView(true);
+});
+
 let trafficAt = 0;
 const fmtBytes = (b) => (b >= 1e9 ? (b / 1e9).toFixed(2) + ' ГБ'
   : b >= 1e6 ? (b / 1e6).toFixed(1) + ' МБ' : Math.round((b || 0) / 1e3) + ' КБ');

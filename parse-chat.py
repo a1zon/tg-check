@@ -162,18 +162,22 @@ def _save_chat(chat_id, rec):
         tmp.replace(DONE)
 
 
-def mark_done(chat_id, title, n):
-    """Чат пройден ДО КОНЦА — больше не берём его в следующие заходы."""
-    _save_chat(chat_id, {"title": title, "at": tglib.now_iso(), "n": n, "done": True, "offset": 0})
+def mark_done(chat_id, title, n, username=""):
+    """Чат пройден ДО КОНЦА — больше не берём его в следующие заходы.
+    username — публичный ник чата: по нему туда могут зайти другие аккаунты
+    (комментарии в чатах), по одному id чат открывает только участник."""
+    _save_chat(chat_id, {"title": title, "at": tglib.now_iso(), "n": n, "done": True, "offset": 0,
+                         **({"username": username} if username else {})})
 
 
-def mark_progress(chat_id, title, n, offset):
+def mark_progress(chat_id, title, n, offset, username=""):
     """
     Чат обрезан пределом/флудом — запоминаем offset, чтобы следующий заход
     продолжил С ЭТОГО МЕСТА, а не с начала (иначе крупный чат вечно перечитывал
     бы первую страницу и участники за пределом не собирались никогда).
     """
-    _save_chat(chat_id, {"title": title, "at": tglib.now_iso(), "n": n, "done": False, "offset": int(offset or 0)})
+    _save_chat(chat_id, {"title": title, "at": tglib.now_iso(), "n": n, "done": False, "offset": int(offset or 0),
+                         **({"username": username} if username else {})})
 
 
 def save_members(rows):
@@ -510,7 +514,8 @@ async def main():
                     client, entity, acc["id"], cap, only_user, start_offset)
             except ChatAdminRequiredError:
                 say("  список участников закрыт настройками чата — пропускаю")
-                mark_done(entity.id, tglib.cell(getattr(entity, "title", entity.id)), 0)
+                mark_done(entity.id, tglib.cell(getattr(entity, "title", entity.id)), 0,
+                          getattr(entity, "username", "") or "")
                 continue
             except ChannelPrivateError:
                 say("  чат приватный, аккаунт в нём не состоит — пропускаю")
@@ -530,9 +535,9 @@ async def main():
             # дочитан до конца — помечаем done; обрезан пределом/флудом — сохраняем
             # offset, чтобы следующий заход продолжил С ЭТОГО МЕСТА (а не с нуля)
             if finished:
-                mark_done(entity.id, title, len(people))
+                mark_done(entity.id, title, len(people), getattr(entity, "username", "") or "")
             else:
-                mark_progress(entity.id, title, len(people), offset)
+                mark_progress(entity.id, title, len(people), offset, getattr(entity, "username", "") or "")
             if wait:
                 left_chats = len(items) - i
                 break

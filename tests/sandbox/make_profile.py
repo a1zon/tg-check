@@ -93,7 +93,8 @@ def main(dst):
          "between": True, "per": {}}, ensure_ascii=False, indent=2), "utf-8")
     wl = json.loads((REPO / "warm-list.default.json").read_text("utf-8"))
     wl.setdefault("comments", {})
-    wl["comments"].update({"on": True, "typing": [1, 2], "held_accounts": ["a4"], "approve_first": 1})
+    wl["comments"].update({"on": True, "typing": [1, 2], "read_pause": [0, 1], "held_accounts": ["a4"],
+                           "approve_first": 1})
     (dst / "warm-list.json").write_text(json.dumps(wl, ensure_ascii=False, indent=2), "utf-8")
 
     # ------------------------------------------------------------ мир Telegram

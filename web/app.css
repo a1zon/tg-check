@@ -466,3 +466,11 @@ details.fieldset[open] > summary.fh::before{content:'▾'}
   .thread{padding-left:14px}
   .bub{max-width:92%}
 }
+
+/* комментарии в чатах — очередь на одобрение */
+.cmt-nums{grid-template-columns:repeat(4,1fr)}
+.cmt-nums div b{font-size:19px}
+.cmt-item{border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:8px}
+.cmt-item .cmt-their{color:var(--mut);font-size:13px;margin:4px 0 6px;overflow-wrap:anywhere}
+.cmt-item textarea{width:100%;box-sizing:border-box;min-height:52px;resize:vertical;font:inherit;font-size:14px}
+.cmt-item .frow{margin-top:6px;gap:8px;flex-wrap:wrap}

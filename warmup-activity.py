@@ -28,6 +28,7 @@ import json
 import random
 from datetime import datetime, timezone
 
+import comments
 import tglib
 from tglib import say
 
@@ -69,7 +70,7 @@ TOP_UP = {"sub": (0, 0), "chat": (0, 0), "react": (1, 1), "dm": (0, 1), "bot": (
 # утренний догрев (done_today считает всё за день), поэтому утро остаётся
 # прежним, а вечером остаётся запас на два-три действия.
 BETWEEN = {"sub": (0, 0), "chat": (0, 0), "react": (3, 4), "dm": (1, 2), "bot": (0, 0)}
-BETWEEN_KINDS = ("react", "dm")     # подписки, группы и боты посреди рассылки ни к чему
+BETWEEN_KINDS = ("react", "dm", "comment")   # подписки, группы и боты посреди рассылки ни к чему
 
 # ДОГРЕВ ПОСЛЕ ЗАМОРОЗКИ — аккаунт «без рассылки» (sendHoldUntil): людям не
 # пишет, а живёт как обычный человек — читает каналы и ставит реакции,
@@ -77,7 +78,7 @@ BETWEEN_KINDS = ("react", "dm")     # подписки, группы и боты
 # ему надо заново набрать историю, но без новых подписок, групп и ботов —
 # всё, что похоже на «накрутку» сразу после блокировки, ни к чему.
 REWARM = {"sub": (0, 0), "chat": (0, 0), "react": (3, 5), "dm": (2, 3), "bot": (0, 0)}
-REWARM_KINDS = ("react", "dm")
+REWARM_KINDS = ("react", "dm", "comment")  # комментарии — только тем, кого разрешили (comments.held_accounts)
 
 
 def warm_days():
@@ -112,12 +113,12 @@ def plan_for(days):
         out[1] = out.pop(first)
     return sorted(out.items())
 
-KINDS = ("sub", "chat", "react", "dm", "bot")
+KINDS = ("sub", "chat", "react", "dm", "bot", "comment")
 
 # Кого зовём чаще. Чтение с реакцией — самое безобидное и самое «человеческое»,
 # подписки и вступления реже. Переписку зовём чаще, чем раньше: разговор из
 # одного сообщения в сутки — не разговор, собеседник ждёт ответа днями.
-WEIGHT = {"react": 5, "sub": 2, "chat": 1, "dm": 3, "bot": 2}
+WEIGHT = {"react": 5, "sub": 2, "chat": 1, "dm": 3, "bot": 2, "comment": 3}
 
 # Человеческие фразы для панели: что аккаунт делает сейчас / что сделал.
 # Их показывает прогресс-бар — чтобы было видно живое действие, а не сухой лог.
@@ -125,11 +126,13 @@ DOING = {
     "sub": "подписывается на канал", "chat": "вступает в группу",
     "react": "читает ленту и ставит реакцию", "dm": "пишет своему аккаунту",
     "bot": "запускает бота", "spam": "спрашивает у SpamBot про лимиты",
+    "comment": "читает чаты и отвечает по делу",
 }
 DONE = {
     "sub": "подписался на канал", "chat": "вступил в группу",
     "react": "почитал ленту, поставил реакцию", "dm": "написал своему аккаунту",
     "bot": "запустил бота", "spam": "проверил лимиты у SpamBot",
+    "comment": "ответил в чате",
 }
 
 
@@ -190,6 +193,38 @@ def caps(acc_id, day, between=False, rewarm=False, lively=False):
         h = hashlib.sha256(f"{acc_id}:{today}:{kind}".encode()).hexdigest()
         out[kind] = lo + int(h[:8], 16) % (hi - lo + 1)
     return out
+
+
+def pick_daily(acc_id, kind, lo, hi):
+    """Одно число из вилки на сутки — как в caps(): не скачет между запусками."""
+    lo, hi = int(lo), int(hi)
+    if hi <= lo:
+        return max(0, lo)
+    today = datetime.now().strftime("%Y-%m-%d")
+    h = hashlib.sha256(f"{acc_id}:{today}:{kind}".encode()).hexdigest()
+    return lo + int(h[:8], 16) % (hi - lo + 1)
+
+
+def comment_cap(acc, day, rewarm, held, cfg):
+    """
+    Сколько комментариев сегодня. Только прогретым (во время прогрева — ноль) и
+    только при comments.on. Временно ограниченным и «без рассылки» после
+    ограничения — лишь тем, кто явно в comments.held_accounts.
+    """
+    if not cfg["on"]:
+        return 0
+    allowed_held = acc["id"] in (cfg.get("held_accounts") or [])
+    # под ограничением SpamBot (любым) — только если разрешили, и только временным
+    restricted = acc.get("spamOk") is False or acc.get("spamKind") in ("temp", "perm", "frozen")
+    if held or restricted:
+        if not allowed_held or acc.get("spamKind") in ("perm", "frozen"):
+            return 0
+        return pick_daily(acc["id"], "comment", *cfg["held_per_day"])
+    if rewarm:
+        return pick_daily(acc["id"], "comment", *cfg["held_per_day"]) if allowed_held else 0
+    if day < warm_days():
+        return 0
+    return pick_daily(acc["id"], "comment", *cfg["per_day"])
 
 
 def history(acc_id):
@@ -602,6 +637,7 @@ async def main():
     want = tglib.arg("what", "")
     between = tglib.flag("between")     # догрев между пачками рассылки
     lively = tglib.flag("lively")       # «живой день»: аккаунт из рассылки греется весь день
+    held = tglib.flag("held")           # временно ограничен SpamBot: только комментарии, если разрешено
 
     # полный отдых после заморозки — ни одного действия, даже SpamBot
     rest = tglib.full_rest_left(acc)
@@ -629,7 +665,9 @@ async def main():
         return
 
     rows = history(acc["id"])
-    cap = caps(acc["id"], day, between, rewarm, lively)
+    ccfg = comments.config(data)
+    cap = {} if held else caps(acc["id"], day, between, rewarm, lively)
+    cap["comment"] = comment_cap(acc, day, rewarm, held, ccfg)
     focus = focus_ids(data)
     focused = acc["id"] in focus
     if focused:
@@ -662,6 +700,16 @@ async def main():
         tglib.state(done=0, left=0, note="дневной предел прогрева")
         return
 
+    # одобренный в панели комментарий уже посчитан (когда встал в очередь) —
+    # отправляем его первым делом, мимо суточного предела
+    approved = ccfg["on"] and comments.has_approved(acc["id"])
+    if approved and want in ("", "comment"):
+        want = "comment"
+        left["comment"] = max(1, left.get("comment", 0))
+    if want == "comment" and left.get("comment", 0) <= 0:
+        say("комментариев на сегодня хватит" if cap.get("comment") else "комментарии этому аккаунту сейчас не положены")
+        tglib.state(done=0, left=0, note="дневной предел прогрева")
+        return
     kinds = [k for k, v in left.items() if v > 0] if not want else [want]
     if want == "":
         if not data.get("chats"):
@@ -677,6 +725,8 @@ async def main():
         kinds = [k for k in kinds if k in BETWEEN_KINDS]
     if rewarm:
         kinds = [k for k in kinds if k in REWARM_KINDS]
+    if held:
+        kinds = [k for k in kinds if k == "comment"]
     if not kinds:
         say("на сегодня всё — аккаунт своё отработал")
         tglib.state(done=0, left=0, note="дневной предел прогрева")
@@ -717,13 +767,33 @@ async def main():
                 ok = await do_react(client, acc, rows, data)
         elif kind == "bot":
             ok = await do_bot(client, acc, rows, data)
+        elif kind == "comment":
+            ok, what, chat = await comments.do_comment(client, acc, data, comments.joined_today(acc["id"]))
+            if what in ("sent", "queued"):
+                note(acc["id"], "comment", chat, "ok")
+            elif what == "joined":
+                # вступление в группу — это «chat» прогрева: по ней потом и реакции
+                note(acc["id"], "chat", chat, "ok")
+                kind = "chat"
+            elif ok is None and (lively or between) and left.get("react", 0) > 0 and not held:
+                # отвечать было не на что — заход не пропадает, как у переписки
+                kind = "react"
+                tglib.state(act=DOING["react"], phase="doing")
+                ok = await do_react(client, acc, rows, data)
         else:
             ok = await do_sub(client, acc, rows, data, kind)
     except Exception as e:
-        from telethon.errors import FloodWaitError
+        from telethon.errors import FloodWaitError, PeerFloodError
         if isinstance(e, FloodWaitError):
             say(f"\nстоп: Telegram просит паузу {e.seconds} с")
             tglib.state(done=0, left=0, stop="flood", cooldown=e.seconds)
+            return
+        if isinstance(e, PeerFloodError):
+            # Telegram придержал аккаунт за активность с незнакомыми — как в
+            # рассылке: отлёжка 12 часов, комментарий в журнале прогрева
+            note(acc["id"], kind, "", "peer_flood")
+            say("\nстоп: PEER_FLOOD — Telegram придержал аккаунт, отлёжка 12 ч")
+            tglib.state(done=0, left=0, stop="flood", cooldown=12 * 3600)
             return
         raise
     finally:

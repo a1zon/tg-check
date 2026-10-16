@@ -47,14 +47,18 @@ def _cfg(k, d=""):
     return os.environ.get(k) or _ENV.get(k, d)
 
 
-def chat(system, user, max_tokens=400, temperature=0.8, tries=5):
+def chat(system, user, max_tokens=400, temperature=0.8, tries=5, model=None):
     """Один запрос к модели через curl (надёжно тоннелит HTTPS через прокси).
-    Возвращает текст ответа или None (мягкий фейл, причина в LAST_ERR)."""
+    Возвращает текст ответа или None (мягкий фейл, причина в LAST_ERR).
+    model — своя модель для задачи (комментарии); имя вида «провайдер/модель»
+    понимает только агрегатор (OpenRouter), у прямого провайдера берём LLM_MODEL."""
     global LAST_ERR
     LAST_ERR = ""
     base = _cfg("LLM_BASE_URL", "https://api.deepseek.com").rstrip("/")
     key = _cfg("LLM_API_KEY")
-    model = _cfg("LLM_MODEL", "deepseek-chat")
+    if model and "/" in model and "openrouter" not in base:
+        model = None
+    model = model or _cfg("LLM_MODEL", "deepseek-chat")
     proxy = _cfg("LLM_PROXY")
     if not key:
         LAST_ERR = "нет LLM_API_KEY в .env"

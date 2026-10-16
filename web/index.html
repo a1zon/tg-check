@@ -2,7 +2,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Telegram — панель</title>
-<link rel="stylesheet" href="/app.css?v=r92">
+<link rel="stylesheet" href="/app.css?v=r93">
 <div class="app">
 
   <!-- ЛЕВАЯ ПАНЕЛЬ РЕЖИМОВ -->
@@ -163,6 +163,21 @@
           <div id="warm-rot-note" class="peek"></div>
         </details>
         <div id="warm-list" style="margin-top:12px"></div>
+      </div>
+
+      <div class="card" id="cmt-card" style="margin-top:14px">
+        <div class="cardtitle">Комментарии в чатах</div>
+        <p class="hint" id="cmt-state" style="margin:0 0 10px">—</p>
+        <div class="nums cmt-nums">
+          <div><b id="cmt-day">—</b><span>за сутки</span></div>
+          <div><b id="cmt-week">—</b><span>за 7 дней</span></div>
+          <div><b id="cmt-chats">—</b><span>чатов в работе</span></div>
+          <div><b id="cmt-deleted">—</b><span>удалили модераторы</span></div>
+        </div>
+        <div class="trf-h" style="margin-top:14px">Ждут одобрения</div>
+        <div id="cmt-pending"></div>
+        <div class="trf-h" style="margin-top:14px">Последние отправленные</div>
+        <div id="cmt-recent"></div>
       </div>
     </section>
 
@@ -658,4 +673,4 @@
 
   </main>
 </div>
-<script src="/app.js?v=r92"></script>
+<script src="/app.js?v=r93"></script>

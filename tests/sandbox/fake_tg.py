@@ -190,7 +190,7 @@ class FakeClient:
             return w["chats"][str(i)]["messages"], i, None
         return (w["dms"].setdefault(self.acc["id"], {}).setdefault(str(i), []), None, i)
 
-    async def get_messages(self, entity, limit=None, ids=None, min_id=0, **kw):
+    async def get_messages(self, entity, limit=None, ids=None, min_id=0, max_id=0, **kw):
         w = load()
         kind, i = self._resolve(w, entity)
         msgs, chat, peer = self._thread(w, kind, i)
@@ -203,7 +203,8 @@ class FakeClient:
                 got.append(_msg(w, m, self.me_uid, chat=chat, peer_user=peer) if m else None)
             self._count("get_messages(ids)", B_MSG * len(want))
             return got[0] if one else got
-        sel = [m for m in msgs if int(m["id"]) > int(min_id or 0) and not m.get("deleted")]
+        sel = [m for m in msgs if int(m["id"]) > int(min_id or 0) and not m.get("deleted")
+               and (not max_id or int(m["id"]) < int(max_id))]
         sel = list(reversed(sel))[: (limit if limit is not None else 1)]
         self._count(f"get_messages({limit},min_id={min_id})", B_MSG * len(sel) + B_ENTITY)
         return [_msg(w, m, self.me_uid, chat=chat, peer_user=peer) for m in sel]

@@ -582,6 +582,8 @@ function start(name, opts, onDone) {
   if (name === 'warmup' && opts.lively) args.push('--lively');
   // одно конкретное действие прогрева (замороженному — только SpamBot)
   if (name === 'warmup' && opts.what) args.push('--what', String(opts.what));
+  // временно ограничен SpamBot, но разрешено комментировать (comments.held_accounts)
+  if (name === 'warmup' && opts.held) args.push('--held');
   // «(с отправкой)» — только у рассылки: у проверки ответов это читалось так,
   // будто аккаунт пишет людям, хотя он лишь смотрит диалоги
   const tag = t.voice && voice ? ' (голосовое)' : t.send && send && name !== 'follow' ? ' (с отправкой)' : '';
@@ -630,6 +632,25 @@ const BETWEEN_MIN_LEFT = 10 * 60_000;
 // эти паузы — про обычный прогрев («на сегодня всё», «поспи пару часов»);
 // догрев между пачками их не ждёт. Отлёжку после флуда и сбои — ждёт.
 const BETWEEN_SKIP_WAIT = new Set(['', 'дневной предел прогрева', 'спит после сессии']);
+// Настройки комментариев (раздел comments в warm-list.json — его правит хозяин,
+// задачи читают сами). Панели нужно немногое: включены ли и кому из временно
+// ограниченных их разрешили. Файл перечитываем, только когда он изменился.
+let commentsCfgCache = { mtime: -1, cfg: {} };
+function commentsCfg() {
+  const file = path.join(DIR, 'warm-list.json');
+  let mtime = 0;
+  try { mtime = fs.statSync(file).mtimeMs; } catch { return {}; }
+  if (mtime !== commentsCfgCache.mtime) {
+    let cfg = {};
+    try { cfg = JSON.parse(fs.readFileSync(file, 'utf8')).comments || {}; } catch {}
+    commentsCfgCache = { mtime, cfg };
+  }
+  return commentsCfgCache.cfg;
+}
+const commentsHeld = () => {
+  const c = commentsCfg();
+  return new Set(c.on ? (c.held_accounts || []) : []);
+};
 // сутки по Екатеринбургу — «между пачками на сегодня всё» живёт до полуночи
 const ekbDay = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Yekaterinburg' }).format(new Date());
 
@@ -824,7 +845,14 @@ function warmTick() {
     // не узнать, что бессрочное сняли, — висел бы вечно.
     const heldInRun = auto.on && auto.ids.includes(acc.id) && !!auto.per.get(acc.id)?.quarantine;
     const frozenCheck = acc.spamOk === false && (acc.spamKind === 'frozen' || heldInRun);
-    if (frozenCheck) {
+    // Временно ограниченному, которого явно разрешили комментировать (comments.held_accounts
+    // в warm-list.json), после суточного вопроса SpamBot — 1–2 комментария в день вместо
+    // полного простоя. Писать людям в личку ему по-прежнему нельзя.
+    const heldComment = frozenCheck && acc.spamKind === 'temp' && st.frozenCheckDay === ekbDay()
+      && commentsHeld().has(acc.id);
+    if (heldComment) {
+      if (st.heldDoneDay === ekbDay() || now < st.nextAt) continue;
+    } else if (frozenCheck) {
       if (st.frozenCheckDay === ekbDay() || now < st.nextAt) continue;
     } else if (auto.on && auto.ids.includes(acc.id) && accounts.inOutreach(acc) && !outreachDoneForNow(acc)) {
       const s = auto.per.get(acc.id);
@@ -872,13 +900,16 @@ function warmTick() {
     // пачками» (3–4 реакции + 1–2 переписки), а не по скупому догреву 1–2 в сутки
     const livelyCaps = lively && accounts.inOutreach(acc);
     const r = start('warmup', { account: acc.id, warm: false, between, lively: livelyCaps,
-                                what: frozenCheck ? 'spam' : '' }, (code, state) => {
+                                held: heldComment,
+                                what: heldComment ? 'comment' : frozenCheck ? 'spam' : '' }, (code, state) => {
       const s = warmOf(acc.id);
       s.left = Math.max(0, s.left - 1);
       if (state?.act) s.act = state.act;   // что аккаунт сделал последним
       s.actAt = Date.now();
       // между пачками на сегодня всё — до полуночи больше не зовём
       if (between && state?.note === 'дневной предел прогрева') s.betweenDay = ekbDay();
+      // ограниченному комментарии на сегодня кончились — до завтрашнего SpamBot
+      if (heldComment && state?.note === 'дневной предел прогрева') s.heldDoneDay = ekbDay();
       // замороженного сегодня уже спросили (скрипт не отказал «уже спрашивали»)
       if (frozenCheck && code === 0 && !state?.note && !state?.stop) s.frozenCheckDay = ekbDay();
       if (state?.stop === 'flood' && state.cooldown) {
@@ -3770,6 +3801,51 @@ async function handler(req, res) {
         } catch {}
       }
       return json(res, 200, { asocks: asocks.summary(), tasks: trafficView(), names, main, mainNames });
+    }
+
+    /* ───────── КОММЕНТАРИИ В ЧАТАХ — очередь на одобрение и сводка ───────── */
+    // Пишет comments.py (действие прогрева «comment»): журнал comments.csv,
+    // очередь comments-pending.json, состояние чатов comment-plan.json.
+    // Решения панели — в отдельном comments-decisions.json: его пишет ТОЛЬКО
+    // панель, задачи только читают, поэтому общий файл с ними не делим.
+    if (u.pathname === '/api/comments' && req.method !== 'POST') {
+      const cfg = commentsCfg();
+      const j = (f, d) => readJson(path.join(DIR, f)) ?? d;
+      const pending = j('comments-pending.json', []);
+      const dec = j('comments-decisions.json', {});
+      const plan = j('comment-plan.json', {});
+      const names = Object.fromEntries(accounts.list().map((a) => [a.id, a.name || a.title]));
+      const rows = readRaw('comments.csv');
+      const since = (h) => new Date(Date.now() - h * 3600e3).toISOString();
+      const count = (st, h) => rows.filter((r) => r.status === st && r.at >= since(h)).length;
+      const states = Object.values(plan);
+      return json(res, 200, {
+        on: !!cfg.on, held: cfg.held_accounts || [], approveFirst: cfg.approve_first ?? 50,
+        reviewed: Object.values(dec).filter((v) => v && (v.ok === true || v.ok === false)).length,
+        pending: (Array.isArray(pending) ? pending : []).filter((p) => p.status === 'pending')
+          .map((p) => ({ ...p, decision: dec[p.id] || null, name: names[p.account] || p.account }))
+          .slice(-50).reverse(),
+        stats: { day: count('sent', 24), week: count('sent', 168), rejected: count('rejected', 168),
+                 deleted: states.reduce((n, st) => n + (Number(st.deleted_total) || 0), 0) },
+        chats: { total: states.length, assigned: states.filter((st) => st.account && !st.off).length,
+                 off: states.filter((st) => st.off).length },
+        recent: rows.filter((r) => r.status === 'sent').slice(-15).reverse()
+          .map((r) => ({ at: r.at, name: names[r.account] || r.account, chat: r.chat, text: r.text, their: r.their })),
+      });
+    }
+    if (u.pathname === '/api/comments/decide' && req.method === 'POST') {
+      const { id, ok, text } = await body(req);
+      const pending = readJson(path.join(DIR, 'comments-pending.json')) || [];
+      const it = Array.isArray(pending) && pending.find((p) => p.id === id);
+      if (!it) return json(res, 200, { ok: false, reason: 'комментарий не найден — обнови страницу' });
+      const file = path.join(DIR, 'comments-decisions.json');
+      const dec = readJson(file) || {};
+      const t = String(text ?? '').replace(/\s+/g, ' ').trim().slice(0, 280);
+      dec[id] = { ok: !!ok, at: new Date().toISOString(), ...(ok && t && t !== it.reply ? { text: t } : {}) };
+      fs.writeFileSync(file + '.tmp', JSON.stringify(dec, null, 1) + '\n');
+      fs.renameSync(file + '.tmp', file);
+      push(`\n💬 комментарий ${ok ? 'одобрен' : 'отклонён'} (${it.account}, ${it.chat_title || it.chat})`);
+      return json(res, 200, { ok: true });
     }
 
     if (u.pathname === '/api/warmup') {

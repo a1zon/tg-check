@@ -1031,8 +1031,17 @@ function warmTick() {
       if (state?.stop === 'flood' && state.cooldown) {
         s.left = 0;
         // то же правило, что в рассылке: после ограничения — отлёжка ≥ 3 часов
-        s.nextAt = Date.now() + Math.max(state.cooldown * 1000, REST_AFTER_LIMIT);
+        const until = Date.now() + Math.max(state.cooldown * 1000, REST_AFTER_LIMIT);
+        s.nextAt = until;
         s.note = 'Telegram просит паузу — отлёжка 3 ч';
+        // ВАЖНО: PEER_FLOOD прилетел на прогреве/комментарии, но ограничение —
+        // на уровне аккаунта. Рассылка того же аккаунта должна встать тоже,
+        // иначе она продолжит писать незнакомым сразу после сигнала. Пишем
+        // floodUntil в реестр (его поднимает и restoreRest, admin.mjs autoAfter)
+        // и, если аккаунт сейчас в прогоне, двигаем его отдых там же.
+        try { accounts.setField(acc.id, { floodUntil: new Date(until).toISOString() }); } catch {}
+        const ps = auto.per.get(acc.id);
+        if (ps) { ps.floodUntil = until; ps.nextAt = Math.max(ps.nextAt || 0, until); }
       } else if (state?.note) {
         // «отлёжка» или «дневной предел» — до завтра тут делать нечего.
         // В «живом дне» спим до утра (суточный счёт к тому времени обнулится):

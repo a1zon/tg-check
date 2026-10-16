@@ -52,11 +52,16 @@ DEFAULTS = {
     "chat_rest_hours": 24,     # в один чат — не чаще (продолжение разговора — можно)
     "chats_per_account": 8,    # сколько чатов закрепляем за аккаунтом
     "visit_per_action": 3,     # сколько чатов смотрим за один заход
-    "joins_per_day": 2,        # вступлений в новые чаты в сутки
+    "joins_per_day": 1,        # вступлений в новые чаты в сутки (медленно, как прогрев)
+    "settle_hours": 24,        # после вступления столько не комментируем — «обживаемся»
     "thread_depth": 3,         # сколько раз подряд отвечаем в одном разговоре
     "context": 15,             # столько последних сообщений чата видит модель
     "read_pause": [3, 8],      # «читаем» перед ответом, сек
     "typing": [10, 40],        # «печатает…», сек (по длине текста)
+    # чаты с такими словами в названии не берём и освобождаем — не наша тема
+    # (мамы, селлеры/маркетплейсы, работа, знакомства, крипта и т.п.)
+    "skip_title": r"мам[аы]|берем|селлер|wildberries|ozon|\bwb\b|маркетплейс|ваканс|работа|"
+                  r"знакомств|крипт|ставк|беттинг|forex|заработок|пикап|18\+|нюдс",
     "model": "openai/gpt-6-luna",
 }
 MIN_LEN = 15                   # короче — реакции и «ок», отвечать не на что
@@ -144,18 +149,25 @@ def norm_chat(x):
     return s.lower() if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{3,31}", s) else ""
 
 
+def off_topic(title, cfg):
+    """Не наша тема по названию чата (мамы, селлеры, работа и т.п.)."""
+    pat = cfg.get("skip_title")
+    return bool(pat and title and re.search(pat, str(title), re.I))
+
+
 def chat_pool(cfg):
-    """{ник: заголовок} — где можно комментировать."""
+    """{ник: заголовок} — где можно комментировать (без чатов не по теме)."""
     out = {}
     for x in cfg.get("chats") or []:
         u = norm_chat(x)
-        if u:
+        if u and not off_topic(u, cfg):
             out[u] = u
     if not cfg.get("chats"):
         for rec in _read_json(tglib.DIR / "chats.json", {}).values():
             u = norm_chat((rec or {}).get("username"))
-            if u:
-                out[u] = (rec or {}).get("title") or u
+            title = (rec or {}).get("title") or u
+            if u and not off_topic(title, cfg):
+                out[u] = title
     return out
 
 
@@ -451,6 +463,15 @@ async def visit(client, acc, u, st, cfg, own_ids, system, recent, allow_join, re
 
     msgs = await client.get_messages(ent, limit=READ_LIMIT, min_id=int(st.get("last_seen") or 0))
     st["last_visit"] = iso(now())
+    # после вступления сперва «обживаемся»: читаем, но не комментируем settle_hours,
+    # чтобы не было «вступил и сразу пишет» (как у живого человека)
+    if st.get("joined_at") and hours_since(st["joined_at"]) < float(cfg["settle_hours"]):
+        if msgs:
+            st["last_seen_before"] = int(st.get("last_seen") or 0)
+            st["last_seen"] = max(m.id for m in msgs)
+            with contextlib.suppress(Exception):
+                await client.send_read_acknowledge(ent, max_id=st["last_seen"])
+        return "none", "обживаюсь после вступления — пока только читаю"
     if not msgs:
         return "none", "нового нет"
     st["last_seen_before"] = int(st.get("last_seen") or 0)
@@ -563,12 +584,13 @@ async def send_approved(client, acc, plan, cfg):
     return None, None
 
 
-async def do_comment(client, acc, data, joined_today):
+async def do_comment(client, acc, data, joined_today, may_join=True):
     """
     Действие прогрева → (итог, что было, чат). Итог: True — комментарий ушёл
     (или встал на одобрение), None — отвечать было не на что, False — не вышло.
     «Что было»: sent | queued | joined | none. FloodWait и PeerFlood поднимает
-    наверх — их обрабатывает прогрев (отлёжка).
+    наверх — их обрабатывает прогрев (отлёжка). may_join=False (между пачками,
+    догрев, ограниченный) — в новые чаты не вступаем, только дочитываем свои.
     """
     cfg = config(data)
     if not cfg["on"]:
@@ -580,9 +602,19 @@ async def do_comment(client, acc, data, joined_today):
         return None, "none", ""
     drop_rejected()
     own_ids = {int(a["user_id"]) for a in tglib.load_accounts() if a.get("user_id")}
+    lead = letter_chats()
     with locked(PLAN):
         plan = _read_json(PLAN, {})
-        mine = assign(plan, pool, acc, cfg, letter_chats())
+        # на каждом заходе освобождаем свои чаты, которые стали не нашими:
+        # аккаунт начал брать из них лидов (письма/разбор) или они не по теме —
+        # так правило «не комментируем там, откуда пишем» держится и дальше
+        for u, st in list(plan.items()):
+            if st.get("account") != acc["id"] or st.get("off"):
+                continue
+            title = st.get("title") or pool.get(u) or u
+            if acc["id"] in lead.get(str(title).strip().lower(), set()) or off_topic(title, cfg):
+                release(st, acc["id"], "берём отсюда лидов" if not off_topic(title, cfg) else "не наша тема")
+        mine = assign(plan, pool, acc, cfg, lead)
         _write_json(PLAN, plan)
     if not mine:
         say("свободных чатов для этого аккаунта нет (заняты другими или тут он берёт людей для писем)")
@@ -601,7 +633,7 @@ async def do_comment(client, acc, data, joined_today):
     system = persona(acc["id"])
     recent = recent_texts()
     order = sorted(mine, key=lambda u: plan[u].get("last_visit") or "")
-    joins_left = int(cfg["joins_per_day"]) - joined_today
+    joins_left = (int(cfg["joins_per_day"]) - joined_today) if may_join else 0
     result = (None, "none", "")
     for u in order[: int(cfg["visit_per_action"])]:
         st = plan[u]

@@ -771,7 +771,11 @@ async def main():
         elif kind == "bot":
             ok = await do_bot(client, acc, rows, data)
         elif kind == "comment":
-            ok, what, chat = await comments.do_comment(client, acc, data, comments.joined_today(acc["id"]))
+            # в новые чаты вступаем только в обычном прогреве; между пачками,
+            # в догреве после заморозки и у ограниченного — только свои чаты
+            may_join = not (between or rewarm or held)
+            ok, what, chat = await comments.do_comment(
+                client, acc, data, comments.joined_today(acc["id"]), may_join=may_join)
             if what in ("sent", "queued"):
                 note(acc["id"], "comment", chat, "ok")
             elif what == "joined":

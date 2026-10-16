@@ -28,7 +28,43 @@ const read = () => {
   catch { return []; }
 };
 
-export const save = (list) => fs.writeFileSync(FILE, JSON.stringify(list, null, 2) + '\n');
+// Замок на accounts.json, общий с Python-задачами (tglib.py): простой lock-файл
+// через O_EXCL — его умеют оба языка, в отличие от flock. Нужен, потому что с
+// параллелью (6 задач) и сторожем файл правят сразу несколько процессов: без
+// замка «прочитал-изменил-записал» теряет чужую правку (напр. вердикт spamOk).
+const LOCK = FILE + '.lock';
+function withLock(fn) {
+  let fd = null;
+  const t0 = Date.now();
+  while (fd === null) {
+    try { fd = fs.openSync(LOCK, 'wx'); }
+    catch (e) {
+      if (e.code !== 'EEXIST') throw e;
+      // краш с незакрытым замком не должен вешать всё: старше 10 с — крадём
+      try { if (Date.now() - fs.statSync(LOCK).mtimeMs > 10_000) { fs.unlinkSync(LOCK); continue; } } catch {}
+      if (Date.now() - t0 > 5_000) { fd = -1; break; }   // не дождались — пишем без замка, чем копим
+      const until = Date.now() + 40; while (Date.now() < until) { /* короткий спин */ }
+    }
+  }
+  try { if (fd !== null && fd >= 0) fs.writeSync(fd, String(process.pid)); } catch {}
+  try { return fn(); }
+  finally { if (fd !== null && fd >= 0) { try { fs.closeSync(fd); } catch {} try { fs.unlinkSync(LOCK); } catch {} } }
+}
+
+// Атомарная запись: сначала во временный файл, потом rename поверх — читатель
+// (панель или задача) никогда не получит обрезанный файл и пустой список.
+function writeAtomic(list) {
+  const tmp = FILE + '.tmp.' + process.pid;
+  fs.writeFileSync(tmp, JSON.stringify(list, null, 2) + '\n');
+  fs.renameSync(tmp, FILE);
+}
+
+export const save = (list) => writeAtomic(list);
+
+/** Прочитать-изменить-записать под общим замком: fn(list) правит список на месте. */
+function mutate(fn) {
+  return withLock(() => { const l = read(); const r = fn(l); writeAtomic(l); return r; });
+}
 
 /** Список аккаунтов. Первый вызов заводит реестр из старой папки профиля. */
 export function list() {
@@ -69,21 +105,21 @@ export const isAuthed = (acc) => acc.authed === true;
 
 /** Правит поля записи аккаунта, не трогая остальные — как set_field в tglib.py. */
 export function setField(id, fields) {
-  const l = list();
-  const a = l.find((x) => x.id === id);
-  if (!a) return false;
-  Object.assign(a, fields);
-  save(l);
-  return true;
+  return mutate((l) => {
+    const a = l.find((x) => x.id === id);
+    if (!a) return false;
+    Object.assign(a, fields);
+    return true;
+  });
 }
 
 export function setAuthed(id, value) {
-  const l = list();
-  const acc = l.find((a) => a.id === id);
-  if (!acc) return false;
-  acc.authed = !!value;
-  save(l);
-  return true;
+  return mutate((l) => {
+    const acc = l.find((a) => a.id === id);
+    if (!acc) return false;
+    acc.authed = !!value;
+    return true;
+  });
 }
 
 /**
@@ -119,15 +155,15 @@ export function resolve(id) {
 }
 
 export function add(title) {
-  const l = list();
-  const n = Math.max(0, ...l.map((a) => +(String(a.id).match(/\d+$/)?.[0] || 0))) + 1;
-  const acc = { id: `a${n}`, title: (title || '').trim() || `Аккаунт ${n}`,
-                dir: path.join('accounts', `a${n}`), added: new Date().toISOString(),
-                role: 'warm' };
-  fs.mkdirSync(profilePath(acc), { recursive: true });
-  l.push(acc);
-  save(l);
-  return acc;
+  return mutate((l) => {
+    const n = Math.max(0, ...l.map((a) => +(String(a.id).match(/\d+$/)?.[0] || 0))) + 1;
+    const acc = { id: `a${n}`, title: (title || '').trim() || `Аккаунт ${n}`,
+                  dir: path.join('accounts', `a${n}`), added: new Date().toISOString(),
+                  role: 'warm' };
+    fs.mkdirSync(profilePath(acc), { recursive: true });
+    l.push(acc);
+    return acc;
+  });
 }
 
 /**
@@ -203,40 +239,41 @@ export async function openProxy(acc) {
 }
 
 export function setProxy(id, raw) {
-  const l = list();
-  const acc = l.find((a) => a.id === id);
-  if (!acc) return false;
-  parseProxy(raw);                 // проверяем до записи: кривую строку не сохраняем
-  acc.proxy = String(raw || '').trim();
-  save(l);
-  return true;
+  parseProxy(raw);                 // проверяем до замка: кривую строку не сохраняем
+  return mutate((l) => {
+    const acc = l.find((a) => a.id === id);
+    if (!acc) return false;
+    acc.proxy = String(raw || '').trim();
+    return true;
+  });
 }
 
 export function rename(id, title) {
-  const l = list();
-  const acc = l.find((a) => a.id === id);
-  if (!acc) return false;
   // имя приходит из браузера и может оказаться мусором — такое не принимаем,
   // иначе аккаунт в панели называется «undefined»
   const t = String(title ?? '').trim();
   if (!t || /^(undefined|null|nan)$/i.test(t)) return false;
-  acc.title = t;
-  save(l);
-  return true;
+  return mutate((l) => {
+    const acc = l.find((a) => a.id === id);
+    if (!acc) return false;
+    acc.title = t;
+    return true;
+  });
 }
 
 /** Убирает аккаунт вместе с профилем: сессия на этом компьютере пропадает. */
 export function remove(id) {
-  const l = list();
-  const acc = l.find((a) => a.id === id);
-  if (!acc) return false;
-  fs.rmSync(profilePath(acc), { recursive: true, force: true });
-  // сессия Telethon живёт отдельным файлом — её тоже убираем, иначе
-  // «отключённый» аккаунт остаётся рабочим ключом на диске
-  fs.rmSync(sessionPath(acc), { force: true });
-  fs.rmSync(path.join(DIR, 'qr', `${acc.id}.svg`), { force: true });
-  save(l.filter((a) => a.id !== id));
-  return true;
+  return mutate((l) => {
+    const acc = l.find((a) => a.id === id);
+    if (!acc) return false;
+    fs.rmSync(profilePath(acc), { recursive: true, force: true });
+    // сессия Telethon живёт отдельным файлом — её тоже убираем, иначе
+    // «отключённый» аккаунт остаётся рабочим ключом на диске
+    fs.rmSync(sessionPath(acc), { force: true });
+    fs.rmSync(path.join(DIR, 'qr', `${acc.id}.svg`), { force: true });
+    l.splice(0, l.length, ...l.filter((a) => a.id !== id));
+    return true;
+  });
 }
 
 /** --account из аргументов запуска. */

@@ -18,6 +18,7 @@ import logging
 import os
 import re
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -68,34 +69,37 @@ DEVICE = dict(device_model="Desktop", system_version="Windows 10",
 
 # Под каким устройством аккаунт заходит в Telegram.
 #
-# Десять аккаунтов с одинаковым «Desktop / Windows 10» — это десять
-# одинаковых отпечатков, и по ним их видно как одну связку. Поэтому каждому
-# достаётся своё устройство: телефон, версия системы и версия клиента,
-# которые бывают вместе в жизни.
+# ВАЖНО про согласованность. api_id 2040 — это Telegram DESKTOP. Отпечаток
+# должен совпадать с типом клиента: Desktop-ключ + модель телефона на Android —
+# это рассинхрон, который сам по себе подозрителен (и именно так ломал бы отпечаток
+# прежний список телефонов — он убран). Аккаунты тут приезжают из tdata Telegram
+# Desktop, поэтому их честный отпечаток — Desktop; меняем только версии системы и
+# клиента, чтобы 18 аккаунтов не были байт-в-байт одинаковыми, но все оставались
+# правдоподобным Desktop.
 #
-# Выбирается один раз и навсегда записывается в accounts.json. Менять
-# устройство у живой сессии нельзя: для Telegram это выглядит так, будто
-# человек посреди дня пересел с одного телефона на другой, не выходя из
-# аккаунта.
-PHONES = [
-    ("Xiaomi Redmi Note 12", "Android 13", "11.2.2"),
-    ("Xiaomi Redmi Note 13 Pro", "Android 14", "11.4.2"),
-    ("Samsung SM-S911B", "Android 14", "11.5.0"),
-    ("Samsung SM-A546E", "Android 13", "11.2.2"),
-    ("Google Pixel 7", "Android 14", "11.4.2"),
-    ("Google Pixel 6a", "Android 13", "11.3.1"),
-    ("OnePlus CPH2451", "Android 14", "11.5.0"),
-    ("realme RMX3630", "Android 13", "11.2.2"),
-    ("HONOR ANY-LX1", "Android 13", "11.3.1"),
-    ("vivo V2333", "Android 14", "11.4.2"),
-    ("Xiaomi 23021RAAEG", "Android 14", "11.5.0"),
-    ("Samsung SM-A245F", "Android 14", "11.4.2"),
-    ("Xiaomi 2201117TY", "Android 13", "11.3.1"),
-    ("OPPO CPH2477", "Android 14", "11.4.2"),
-    ("Samsung SM-M336B", "Android 13", "11.2.2"),
-    ("TECNO LI7", "Android 13", "11.3.1"),
-    ("Google Pixel 8", "Android 14", "11.5.0"),
-    ("Xiaomi 23049PCD8G", "Android 13", "11.4.2"),
+# Применяется ТОЛЬКО при новом входе (fresh login) и закрепляется в accounts.json.
+# У живой сессии отпечаток не трогаем: для Telegram смена устройства посреди
+# сессии выглядит как «пересел на другой компьютер не выходя» — это риск сам по
+# себе. Поэтому разные отпечатки получают НОВЫЕ аккаунты, а не уже вошедшие.
+DESKTOP_VARIANTS = [
+    ("Desktop", "Windows 10 x64", "4.16.8"),
+    ("Desktop", "Windows 11 x64", "5.1.2"),
+    ("Desktop", "Windows 10 x64", "5.2.3"),
+    ("Desktop", "Windows 11 x64", "5.3.1"),
+    ("PC 64bit", "Windows 10", "4.14.9"),
+    ("Desktop", "Windows 11 x64", "5.5.1"),
+    ("Desktop", "Windows 10 x64", "5.5.5"),
+    ("PC 64bit", "Windows 11", "5.6.3"),
+    ("Desktop", "Windows 10 x64", "5.7.2"),
+    ("Desktop", "Windows 11 x64", "5.8.3"),
+    ("Desktop", "macOS 14.5", "11.2.2"),
+    ("Desktop", "macOS 15.1", "11.4.1"),
+    ("PC 64bit", "Windows 10 x64", "5.2.3"),
+    ("Desktop", "Windows 11 x64", "5.1.7"),
+    ("Desktop", "Windows 10 x64", "4.16.6"),
+    ("Desktop", "Windows 11 x64", "5.6.1"),
+    ("Desktop", "Ubuntu 24.04", "5.5.1"),
+    ("Desktop", "Windows 10 x64", "5.3.0"),
 ]
 
 
@@ -104,12 +108,12 @@ def device_for(acc):
     Параметры устройства аккаунта.
 
     Порядок такой:
-      • записаны в accounts.json — берём их, что бы там ни было: это либо
-        родные данные из JSON от продавца, либо то, что мы сами закрепили;
-      • ещё не записаны, но сессия уже есть — оставляем старое умолчание
-        (Desktop/Windows). Сессия заходила именно так, и менять ей устройство
-        задним числом опаснее, чем оставить как есть;
-      • аккаунт новый — выдаём телефон из списка и закрепляем навсегда.
+      • записаны в accounts.json — берём их (родные данные от продавца или то,
+        что мы закрепили при входе);
+      • ещё не записаны, но сессия уже есть — оставляем умолчание Desktop/Windows.
+        Сессия заходила именно так; менять отпечаток живой сессии задним числом
+        опаснее, чем оставить как есть;
+      • аккаунт новый (сессии ещё нет) — выдаём свой Desktop-вариант и закрепляем.
     """
     d = acc.get("device")
     if isinstance(d, dict) and d.get("device_model"):
@@ -120,13 +124,13 @@ def device_for(acc):
     if session_path(acc).exists():
         return dict(DEVICE)
 
-    # Устройство должно быть СВОИМ: два аккаунта с одинаковым телефоном —
-    # это снова один отпечаток на двоих, ради чего всё и затевалось.
-    # Поэтому выбираем из тех, что ещё никем не заняты.
+    # Вариант должен быть СВОИМ: не повторяем уже занятую пару система+версия,
+    # чтобы аккаунты не были одинаковыми.
     import random
-    taken = {str((a.get("device") or {}).get("device_model", "")) for a in load_accounts()}
-    free = [ph for ph in PHONES if ph[0] not in taken]
-    model, system, app = random.choice(free or PHONES)
+    taken = {(str((a.get("device") or {}).get("system_version", "")),
+              str((a.get("device") or {}).get("app_version", ""))) for a in load_accounts()}
+    free = [v for v in DESKTOP_VARIANTS if (v[1], v[2]) not in taken]
+    model, system, app = random.choice(free or DESKTOP_VARIANTS)
     picked = {"device_model": model, "system_version": system, "app_version": app}
     set_field(acc["id"], device=picked)
     acc["device"] = picked
@@ -162,8 +166,48 @@ def load_accounts():
         return []
 
 
+import contextlib as _contextlib
+
+
+@_contextlib.contextmanager
+def _accounts_lock():
+    """
+    Замок на accounts.json, общий с панелью (accounts.mjs): простой lock-файл
+    через O_EXCL — его одинаково понимают Python и Node (flock бы не совпал).
+    Нужен, потому что с параллелью файл правят сразу несколько процессов, и
+    «прочитал-изменил-записал» без замка теряет чужую правку.
+    """
+    lock = str(ACCOUNTS) + ".lock"
+    fd = None
+    t0 = time.time()
+    while fd is None:
+        try:
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            try:
+                if time.time() - os.path.getmtime(lock) > 10:   # краш с незакрытым замком — крадём
+                    os.unlink(lock); continue
+            except OSError:
+                pass
+            if time.time() - t0 > 5:
+                break                                            # не дождались — пишем без замка
+            time.sleep(0.04)
+    try:
+        if fd is not None:
+            os.write(fd, str(os.getpid()).encode())
+        yield
+    finally:
+        if fd is not None:
+            os.close(fd)
+            with _contextlib.suppress(OSError):
+                os.unlink(lock)
+
+
 def save_accounts(lst):
-    ACCOUNTS.write_text(json.dumps(lst, ensure_ascii=False, indent=2) + "\n", "utf-8")
+    # атомарно: tmp + rename — читатель не получит обрезанный файл и пустой список
+    tmp = str(ACCOUNTS) + ".tmp." + str(os.getpid())
+    Path(tmp).write_text(json.dumps(lst, ensure_ascii=False, indent=2) + "\n", "utf-8")
+    os.replace(tmp, ACCOUNTS)
 
 
 def resolve(acc_id=""):
@@ -190,13 +234,15 @@ def session_path(acc) -> Path:
 
 
 def set_field(acc_id, **fields):
-    """Правит запись аккаунта в реестре, не трогая остальные поля."""
-    lst = load_accounts()
-    for a in lst:
-        if a.get("id") == acc_id:
-            a.update(fields)
-            save_accounts(lst)
-            return True
+    """Правит запись аккаунта в реестре, не трогая остальные поля. Под общим
+    замком: чтение и запись атомарны относительно панели и других задач."""
+    with _accounts_lock():
+        lst = load_accounts()
+        for a in lst:
+            if a.get("id") == acc_id:
+                a.update(fields)
+                save_accounts(lst)
+                return True
     return False
 
 

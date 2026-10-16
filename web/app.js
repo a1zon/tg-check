@@ -2552,6 +2552,13 @@ async function traffic() {
       (a.usdPerGb ? ` · по факту ${usd(a.usdPerGb)} за ГБ` : '') +
       ` · учёт с ${new Date(a.since).toLocaleDateString('ru-RU')}`);
   }
+  // модель (OpenRouter): баланс и расход — снимок раз в полчаса
+  const lm = t.llm;
+  const money = (x) => (x == null ? '—' : '$' + Number(x).toFixed(x >= 1 ? 2 : 3));
+  set('#tr-llm', lm ? `Модель (OpenRouter): баланс ${lm.credits != null && lm.used != null ? money(lm.credits - lm.used) : '—'}` +
+    (lm.credits != null ? ` из ${money(lm.credits)}` : '') +
+    ` · за сутки ${money(lm.day)} · за 7 дней ${money(lm.week)} · за 30 дней ${money(lm.month)}` +
+    ` · на ${new Date(lm.at).toLocaleTimeString('ru-RU', {hour: '2-digit', minute: '2-digit'})}` : '');
   const w = (t.tasks && t.tasks.week) || {byTask: {}, byAcc: {}, total: 0, paid: 0};
   const rows = (obj, names) => Object.entries(obj || {}).sort((x, y) => y[1] - x[1]).slice(0, 8)
     .map(([k, v]) => `<div class="trf-row"><span>${esc(names ? (names[k] || k) : k)}</span><b>${fmtBytes(v)}</b></div>`)

@@ -54,6 +54,7 @@ import * as desktop from './server/desktop.mjs';
 import { buildKit, buildPult, kitProxy } from './server/kit.mjs';
 import { makeAsocks, ASOCKS_EVERY } from './server/asocks.mjs';
 import { makeOwnProxy, ASOCKS_GATEWAY } from './server/ownproxy.mjs';
+import { makeLlmUsage, LLM_EVERY } from './server/llmusage.mjs';
 import * as vercel from './server/vercel.mjs';
 
 // Код один на всех, данные у каждого профиля свои.
@@ -213,6 +214,7 @@ const { warm, doneToday, doneTodayAll, setMaxCap, getMaxCap, getPlan,
 // поэтому снимки баланса и трафика пишет только основной профиль (его папка —
 // папка кода), второй читает тот же файл. Ключ — asocks.json рядом с кодом.
 const asocks = makeAsocks({ dir: CODE });
+const llmUsage = makeLlmUsage({ dir: DIR, code: CODE });
 
 /**
  * Потолок одновременных задач. Пока у аккаунтов один прокси на всех, задачи и
@@ -257,7 +259,38 @@ if (DIR === CODE) {
   });
   setTimeout(asocksTick, 20_000);
   setInterval(asocksTick, ASOCKS_EVERY);
+  // расход на модель (OpenRouter) — тоже раз в полчаса, тоже только основной профиль
+  const llmTick = () => llmUsage.snapshot().catch(() => {});
+  setTimeout(llmTick, 30_000);
+  setInterval(llmTick, LLM_EVERY);
 }
+
+/**
+ * Своя сессия Asocks умерла — новая сама. Мобильные сессии изредка пропадают из
+ * пула (16.10: у одного аккаунта через 15 минут после раздачи, шлюз отвечает 404).
+ * Сторож объявляет такой прокси лежащим, аккаунт встаёт без засчитанного сбоя —
+ * и стоял бы, пока человек не нажмёт кнопку. Теперь: лежит своя сессия дольше
+ * 5 минут — панель выдаёт этому аккаунту новую (та же проверка, что у кнопки).
+ */
+const OWN_DEAD_AFTER = 5 * 60_000;
+const ownDownSince = new Map();
+setInterval(() => {
+  if (!asocks.enabled() || ownProxy.busy()) return;
+  const dead = [];
+  for (const a of accounts.list()) {
+    if (!a.proxyOwn || !accounts.hasSession(a) || !proxyGuard.down(a.proxy)) { ownDownSince.delete(a.id); continue; }
+    if (!ownDownSince.has(a.id)) ownDownSince.set(a.id, Date.now());
+    else if (Date.now() - ownDownSince.get(a.id) >= OWN_DEAD_AFTER) dead.push(a);
+  }
+  if (!dead.length) return;
+  push(`\n🌐 своя сессия Asocks лежит 5+ минут у ${dead.map((a) => a.title).join(', ')} — выдаю новую`);
+  ownProxy.assign({ ids: dead.map((a) => a.id), country: 'KZ' }).then((r) => {
+    for (const x of r) ownDownSince.delete(x.id);
+    const ok = r.filter((x) => x.ok).length;
+    events.note('🌐', `замена умерших сессий Asocks: ${ok} из ${r.length}` +
+      (ok < r.length ? ' — ' + r.filter((x) => !x.ok).map((x) => x.why).join('; ') : ''));
+  }).catch((e) => push(`🌐 замена сессии не удалась: ${e.message}`));
+}, 60_000);
 
 // «За что ушёл трафик»: каждая задача пишет свой объём в traffic.csv (tglib).
 // Туннель на этом же сервере (127.x) бесплатный, всё остальное — платный прокси.
@@ -3892,7 +3925,7 @@ async function handler(req, res) {
             .map((a) => [a.id, a.name || a.title]));
         } catch {}
       }
-      return json(res, 200, { asocks: asocks.summary(), tasks: trafficView(), names, main, mainNames });
+      return json(res, 200, { asocks: asocks.summary(), llm: llmUsage.summary(), tasks: trafficView(), names, main, mainNames });
     }
 
     /* ───────── КОММЕНТАРИИ В ЧАТАХ — очередь на одобрение и сводка ───────── */

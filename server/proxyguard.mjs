@@ -122,7 +122,9 @@ export function makeProxyGuard({ parseProxy, label, proxies, rotateLink, rotateI
     if (switching()) return;
     for (const raw of new Set(proxies())) {
       const s = stateOf(raw);
-      if (now - s.checkedAt < (s.down ? EVERY_DOWN : EVERY_OK)) continue;
+      // моргнул один раз (fails > 0) — перепроверяем через 30 с, а не через 10 минут:
+      // иначе «лежит» (две неудачи подряд) выяснялось бы только через 10–20 минут
+      if (now - s.checkedAt < (s.down || s.fails ? EVERY_DOWN : EVERY_OK)) continue;
       await check(raw);
       if (s.down) await revive(raw, s);
     }

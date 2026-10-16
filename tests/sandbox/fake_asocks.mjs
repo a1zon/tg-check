@@ -16,12 +16,13 @@ const user = (req) => Buffer.from(String(req.headers['proxy-authorization'] || '
 let k = 0;
 const px = http.createServer((req, res) => {
   const u = user(req);
+  if (u.startsWith('dead')) { res.writeHead(404); return res.end(); }   // сессия пропала из пула
   const ip = u.startsWith('jumpy') ? `10.9.9.${++k}` : `10.0.0.${u.split('-')[1]}`;
   if (String(req.url).includes('ipify')) { res.writeHead(200); return res.end(ip); }   // сторож прокси
   res.writeHead(200, { 'content-type': 'application/json' });
   res.end(JSON.stringify({ ip, country: 'KZ', org: 'AS29355 Kcell JSC' }));
 });
-px.on('connect', (req, sock) => sock.end(user(req).startsWith('blocked')
+px.on('connect', (req, sock) => sock.end(/^(blocked|dead)/.test(user(req))
   ? 'HTTP/1.1 403 Forbidden\r\n\r\n' : 'HTTP/1.1 200 Connection established\r\n\r\n'));
 px.listen(18998, '127.0.0.1');
 console.log('fake asocks: api 18997, gateway 18998');

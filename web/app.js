@@ -1209,41 +1209,81 @@ const fmtWait = (s) => s >= 3600 ? `${Math.floor(s / 3600)} ч ${Math.round(s % 
  * что идущий прогон работает без них.
  */
 let formRestored = false;
-let csFunnelRestored = false;      // второй шаг у чатов помнится отдельно
 let csParallelRestored = false;
 // ⚡ параллель стоит сразу во всех профилях, кроме основного: основной —
 // профиль клиента, у него как было (пусто). Без привратника — тоже как было.
 let parallelByDefault = false;
+// Снимки формы по режимам (auto-last.json пишет их по каждому) и признак
+// «человек что-то поправил, но ещё не запускал».
+let formBySet = { phones: null, chats: null };
+let formTouched = false;
+let formShownSet = '';
+// Поля запуска: правка в любом из них — это «в форме есть несохранённое».
+const FORM_FIELDS = ['#amode', '#apause', '#delay', '#ddelay', '#ddelaymax', '#dhold', '#dholdmax',
+                     '#limit', '#dlimit', '#rotate', '#rotwait', '#warmon', '#funnel', '#cs-funnel',
+                     '#cs-ddelay', '#cs-ddelaymax', '#sm-send', '#sm-draft', '#checkcap', '#daycap'];
 
-function restoreForm(f) {
-  if (formRestored || !f) return;
-  formRestored = true;
+function applyForm(f, forceSend = false) {
+  if (!f) return;
   const val = (id, v) => { if ($(id) && v !== undefined && v !== null && v !== '') $(id).value = v; };
   const chk = (id, v) => { if ($(id) && v !== undefined) $(id).checked = !!v; };
   val('#amode', f.mode);
   // режим по умолчанию — ВСЕГДА «отправка»; черновик стал отладочным и не
-  // залипает между запусками (раньше восстанавливался draft и уходило вхолостую)
-  chk('#sm-send', true); chk('#sm-draft', false); sendModeChange();
-  chk('#funnel', f.funnel); chk('#serial', f.serial); chk('#warmon', f.warm !== false);
+  // залипает между запусками (раньше восстанавливался draft и уходило вхолостую).
+  // Но при переходе между вкладками выбор «отправлять/черновик» не трогаем:
+  // человек его только что видел и помнит, а подмена на ровном месте пугает.
+  if (forceSend) { chk('#sm-send', true); chk('#sm-draft', false); sendModeChange(); }
+  // «Второй шаг» у каждого режима СВОЙ (#funnel — номера, #cs-funnel — чаты),
+  // поэтому берём его из снимка своего режима, а не из того, что сейчас
+  // подставляем: иначе переход на вкладку чатов переписывал бы галочку номерам
+  // (и наоборот), и следующий запуск унаследовал бы чужой второй шаг.
+  if (formBySet.phones) chk('#funnel', formBySet.phones.funnel);
+  if (formBySet.chats) chk('#cs-funnel', formBySet.chats.funnel);
+  chk('#warmon', f.warm !== false);
   if (!$('#rotate').value.trim()) val('#rotate', f.rotate);
   val('#rotwait', f.rotateWait);
   if (f.pause) val('#apause', Math.round(f.pause / 60));
   val('#limit', f.checkLimit); val('#delay', f.checkDelay);
   val('#dlimit', f.writeLimit); val('#ddelay', f.writeDelay); val('#ddelaymax', f.writeDelayMax);
   val('#dhold', f.hold); val('#dholdmax', f.holdMax);
+  formTouched = false;                 // в полях теперь ровно снимок
+}
+
+function restoreForm(f) {              // первый показ после загрузки страницы
+  if (formRestored || !f) return;
+  formRestored = true;
+  applyForm(f, true);
+}
+
+/**
+ * Настройки запуска — одни поля на обе вкладки, но у каждой вкладки СВОЙ
+ * последний запуск (auto-last.json по режимам). Раньше форма восстанавливалась
+ * один раз и только из базового набора: открыл вкладку чатов после номеров — и
+ * «Запустить по чатам» молча отправляло чужие лимиты, паузы и режим, а свои
+ * настройки чатов не показывались нигде. Теперь при переходе на вкладку
+ * подставляем снимок этой вкладки. Если человек уже что-то поправил и не
+ * запускал — не затираем: его правка важнее снимка.
+ */
+function restoreFormFor(set) {
+  const f = formBySet[set];
+  if (!f || formShownSet === set) return;
+  if (formTouched && formShownSet) return;
+  formShownSet = set;
+  applyForm(f);
 }
 
 function paintAuto(a) {
   autoLast = a = a || autoLast;
-  restoreForm(a.form);
-  const on = autoOn = !!a.on;
   const runs = a.runs || {};
+  // снимки формы по режимам: из них подставляем настройки при переходе на вкладку
+  formBySet = { phones: (runs.phones || {}).form || null, chats: (runs.chats || {}).form || null };
+  restoreForm(a.form);
+  if (formRestored && !formShownSet) formShownSet = a.set || 'phones';
+  const on = autoOn = !!a.on;
   const onP = !!(runs.phones || {}).on, onC = !!(runs.chats || {}).on;
-  // у каждого режима свой второй шаг, и помнит его панель тоже раздельно
-  if (!csFunnelRestored && (runs.chats || {}).form) {
-    csFunnelRestored = true;
-    $('#cs-funnel').checked = !!runs.chats.form.funnel;
-  }
+  // у каждого режима свой второй шаг: его ставит applyForm из снимка СВОЕГО
+  // режима (restoreForm/restoreFormFor), отдельного восстановления не нужно
+
   // «Параллельно» — одно значение на обе вкладки: как запущен идущий прогон;
   // не идёт — в своих профилях включено, у клиента — как запускал в прошлый раз
   if (!csParallelRestored) {
@@ -1296,6 +1336,16 @@ function paintAuto(a) {
       el.className = live ? 'danger big' : 'primary big';
       el.disabled = !chosen.length && !live;
     }
+    if (!live) {
+      // Прокси лежит у ВСЕХ выбранных — сервер такой запуск примет, но тик молча
+      // выйдет, и это выглядит как «запустилось и ничего не происходит». Не даём
+      // нажать и говорим, чего ждём: строку про прокси видно в шапке.
+      const dead = chosen.length > 0 && chosen.every((a) => proxyDownLabels.has(a.proxyLabel));
+      if (dead) {
+        el.disabled = true;
+        el.title = 'Прокси этих аккаунтов не отвечает — запуск ничего не сделает, ждём подъёма';
+      } else el.title = '';
+    }
     return chosen;
   };
   btn($('#b-auto'), 'phones', onP, 'Запустить');
@@ -1306,12 +1356,26 @@ function paintAuto(a) {
         const x = accs.find(y => y.id === id); return x ? (x.name || x.title) : id; }).join(', ')}`
     : csChosen.length ? `запустим: ${csChosen.map(x => x.name || x.title).join(', ')}`
     : 'отметь аккаунты в списке выше';
-  // настройки запуска общие на оба режима — запираем их, пока работает любой
+  // настройки запуска общие на оба режима — запираем их, пока работает любой.
+  // #warmon и #funnel тоже здесь: они уходят в /api/auto при запуске, и раньше
+  // их можно было переключить на ходу — снятая «беречь новые аккаунты» на одной
+  // вкладке выключала отлёжку и у второго, уже идущего прогона.
   for (const id of ['#amode','#apause','#delay','#ddelay','#ddelaymax','#dhold',
-                    '#dholdmax','#limit','#dlimit',
-                    '#sm-draft','#sm-send','#serial','#rotate','#rotwait','#p-parallel','#cs-parallel'])
+                    '#dholdmax','#limit','#dlimit','#warmon','#funnel',
+                    '#sm-draft','#sm-send','#rotate','#rotwait','#p-parallel','#cs-parallel'])
     if ($(id)) $(id).disabled = on;
   if (!on && $('#rotate').value.trim()) $('#p-parallel').disabled = true;
+  // правку в форме запоминаем: переход на другую вкладку не должен затирать
+  // то, что человек поменял и ещё не запустил
+  for (const id of FORM_FIELDS) {
+    const el = $(id);
+    if (el && !el.dataset.formWatch) {
+      el.dataset.formWatch = '1';
+      const mark = () => { formTouched = true; };
+      el.addEventListener('input', mark);
+      el.addEventListener('change', mark);
+    }
+  }
 
   // предупреждение об отправке: пока идёт — по тому, что прогон делает НА САМОМ ДЕЛЕ
   const asVoice = on ? a.voice : $('#voicemode').checked;
@@ -1460,6 +1524,9 @@ async function startAuto(set) {
     writeDelayMax: $('#ddelaymax').value, hold: $('#dhold').value, holdMax: $('#dholdmax').value,
   });
   if (!r.ok && r.reason) alert(r.reason);
+  // запустились — значит в полях ровно снимок этого запуска: правок «на будущее»
+  // в форме больше нет, и переход на другую вкладку снова может показать её снимок
+  if (r.ok) formTouched = false;
   state();
 }
 /* ═══════════ ЗАПУСК РАССЫЛКИ ═══════════ */
@@ -1539,7 +1606,7 @@ $('#b-rotate').onclick = async () => {
 // ротация без очереди бессмысленна: покажем это прямо галочкой
 $('#rotate').oninput = () => {
   // ссылка смены IP — только по очереди: параллельно все сидели бы на одном адресе
-  if ($('#rotate').value.trim()) { $('#serial').checked = true; $('#p-parallel').checked = false; $('#p-parallel').disabled = true; }
+  if ($('#rotate').value.trim()) { $('#p-parallel').checked = false; $('#p-parallel').disabled = true; }
   else $('#p-parallel').disabled = false;
 };
 
@@ -1562,6 +1629,10 @@ document.querySelectorAll('button[data-t]').forEach(b => b.onclick = async () =>
 
   const payload = {
     name: t,
+    // набор — последней открытой вкладки рассылки (её же отмеченные аккаунты);
+    // в «Обслуживании» это написано словами (#tools-set). Проверка номеров —
+    // всегда по номерам: у набора чатов проверять нечего
+    set: t === 'check' ? 'phones' : pickSet,
     warm: $('#warmon') ? $('#warmon').checked : true,
     limit: per,
     delay: drafts ? $('#ddelay').value : $('#delay').value,
@@ -2284,6 +2355,13 @@ const VIEW_TITLE = {
   overview: 'Обзор', accounts: 'Аккаунты', warmup: 'Прогрев', send: 'Рассылка по номерам',
   results: 'Результаты', chatsend: 'Рассылка по чатам', tools: 'Обслуживание',
 };
+// по какому набору пойдут ручные заходы из «Обслуживания» — словами, а не молча
+function paintToolsSet() {
+  const el = $('#tools-set');
+  if (el) el.innerHTML = `«Написать» пойдёт <b>${pickSet === 'chats' ? 'по чатам' : 'по номерам'}</b> ` +
+    'отмеченными там аккаунтами — как на последней открытой вкладке рассылки. «Проверить базу» — всегда по номерам.';
+}
+
 function showView(name) {
   if (!VIEW_TITLE[name]) name = 'overview';
   document.querySelectorAll('.view').forEach((v) => v.classList.toggle('active', v.dataset.view === name));
@@ -2296,10 +2374,13 @@ function showView(name) {
     const set = name === 'chatsend' ? 'chats' : 'phones';
     useWork(set);
     useSet(set, true);              // и база с результатами — про эту же вкладку
+    // у вкладки свои последние настройки запуска — показываем именно их
+    restoreFormFor(set);
   }
   if (location.hash !== '#' + name) history.replaceState(null, '', '#' + name);
   window.scrollTo(0, 0);
   if (name === 'results') resultsView(true);
+  if (name === 'tools') paintToolsSet();
 }
 document.querySelectorAll('.nav-i').forEach((a) => {
   a.onclick = (e) => { e.preventDefault(); showView(a.dataset.view); };

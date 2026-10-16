@@ -4,6 +4,7 @@
 #
 #     bash deploy/push.sh root@1.2.3.4
 #     bash deploy/push.sh panel@example.com --key ~/.ssh/id_ed25519 --port 2222 --voice
+#     bash deploy/push.sh --dry-run        собрать архив и проверить состав, никуда не ходя
 #
 # Что уезжает: код панели. Что НЕ уезжает никогда: сессии Telegram, реестр
 # аккаунтов, пароль от панели, базы и результаты. Это же правило делает
@@ -16,6 +17,7 @@
 #   --voice         доставить ffmpeg (голосовые)
 #   --no-password   не спрашивать вход в панель — его задаст хозяин сам
 #   --code-only     только обновить код и перезапустить службу, без установки
+#   --dry-run       только собрать архив и проверить, что в него не попали данные
 #
 set -euo pipefail
 
@@ -26,6 +28,7 @@ KEY=""
 REMOTE=/opt/tg-panel
 FLAGS=""
 CODE_ONLY=0
+DRY=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -34,6 +37,7 @@ while [ $# -gt 0 ]; do
     --dir) REMOTE="${2:?нужен путь}"; shift ;;
     --tdata|--voice|--no-password) FLAGS="$FLAGS $1" ;;
     --code-only) CODE_ONLY=1 ;;
+    --dry-run) DRY=1 ;;
     -*) echo "не знаю ключ: $1"; exit 1 ;;
     *) TARGET="$1" ;;
   esac
@@ -43,29 +47,132 @@ done
 say() { printf '\n\033[1m%s\033[0m\n' "$*"; }
 die() { printf '\n\033[31m%s\033[0m\n' "$*" >&2; exit 1; }
 
-[ -n "$TARGET" ] || die "куда ставим? bash deploy/push.sh root@адрес-сервера"
+[ -n "$TARGET" ] || [ "$DRY" = 1 ] || die "куда ставим? bash deploy/push.sh root@адрес-сервера"
 [ -f "$DIR/router.mjs" ] || die "запускать из папки панели"
 
 SSH=(ssh -p "$PORT" -o ConnectTimeout=15)
 [ -n "$KEY" ] && SSH+=(-i "$KEY")
 
-say "1/3  Проверяю связь с $TARGET"
+# tar на macOS иначе тащит служебные метки Apple, а tar на сервере ругается
+# на них десятком строк за файл — в выводе тонет всё остальное
+TAR_EXTRA=()
+tar --no-mac-metadata --version >/dev/null 2>&1 && TAR_EXTRA+=(--no-mac-metadata)
+tar --no-xattrs --version >/dev/null 2>&1 && TAR_EXTRA+=(--no-xattrs)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Что не возим: секреты, тяжёлое и ДАННЫЕ. Данные на сервере — его собственные,
+# и повторный запуск их не трогает.
+#
+# Список поддерживается руками, а забытая строка стоит дорого: 16.10 из-за неё
+# уехал events.jsonl (он есть локально, потому что панель его тут создавала) и
+# обнулил на сервере ленту «Что происходит», хотя файл лежал в .gitignore.
+# .gitignore тут не защищает: tar пакует рабочую папку, а не индекс git.
+#
+# Поэтому рядом лежит DATA_GUARD — перечень данных, которых в архиве быть не
+# должно, — и pack() сверяет с ним СОСТАВ СОБРАННОГО АРХИВА. Забыли исключение —
+# выкладка остановится до соединения с сервером, а не затрёт прод молча.
+#
+# Тексты писем, список прогрева и очередь чатов тоже остаются на сервере: их
+# правят прямо в панели, и обновление кода не должно откатывать эту правку.
+# С кодом едет только образец warm-list.default.json — рабочий список панель
+# заведёт из него сама, если его ещё нет.
+# ─────────────────────────────────────────────────────────────────────────────
+EXCLUDES=(
+  './venv' './venv-tg' './node_modules' './.git' './__pycache__' '*.pyc'
+  './sessions' './accounts' './desktop' './qr' './uploads' './tg-profile'
+  './accounts.json' './auth.json' './claims.json' './claims.lock' './cloud.json'
+  './numbers.csv' './results.csv' './drafts.csv' './members.csv'
+  './chats.json' './base.json' './replies.json' './stats-cache.json'
+  './voice.ogg' './voice.json' './followup.csv' './warmup.csv' './warmup.json'
+  './message-parts.json' './message.txt' './message2.txt' './message-chat.txt'
+  './warm-list.json' './chat-priority.txt'
+  './leads.json' './leads-log.csv' './leads-tpl.txt' './lead-chats.txt' './leads-sheet.txt'
+  './mirror.json' './mirror-names.txt'
+  './profiles.json' './router.json' './profiles'
+  './talks' './chats' './extras.csv'
+  '*.csv.lock' './chats.json.lock' '*.json.tmp' '*.csv.tmp'
+  './events.jsonl' './auto-run.json' './auto-run.paused-*.json' './auto-last.json' './base-set.json'
+  './followup-runs.json' './followup-texts.json' './sent-ids.csv' './traffic.csv'
+  './egrul.csv' './egrul-run.json' './egrul-*.log' './messages.csv' './chat-list.txt'
+  './avatars' '.env' './.env'
+  './asocks.json' './asocks-usage.jsonl' './asocks-ports.json'
+  '*.xlsx' '*.session' './_backup_*' './_reset_backup_*' '.DS_Store' '.send-gap.*'
+)
+
+# Имена файлов, которых в архиве быть не должно. Совпадает с EXCLUDES по смыслу,
+# но перечислено отдельно и по basename: проверка идёт по составу архива.
+DATA_GUARD=(
+  accounts.json auth.json claims.json claims.lock cloud.json
+  numbers.csv results.csv drafts.csv members.csv chats.json base.json replies.json
+  stats-cache.json voice.ogg voice.json followup.csv warmup.csv warmup.json
+  message-parts.json message.txt message2.txt message-chat.txt
+  warm-list.json chat-priority.txt
+  leads.json leads-log.csv leads-tpl.txt lead-chats.txt leads-sheet.txt
+  mirror.json mirror-names.txt profiles.json router.json
+  events.jsonl auto-run.json auto-last.json base-set.json
+  followup-runs.json followup-texts.json sent-ids.csv traffic.csv
+  egrul.csv egrul-run.json messages.csv chat-list.txt extras.csv .env
+  asocks.json asocks-usage.jsonl asocks-ports.json
+  'auto-run.paused-*.json' 'egrul-*.log'
+)
+
+TMP_ARCHIVE=""
+pack() {
+  TMP_ARCHIVE="$(mktemp "${TMPDIR:-/tmp}/tg-check-push.XXXXXX")" || die "не смог создать временный файл"
+  trap 'rm -f "$TMP_ARCHIVE"' EXIT
+  local ex=() e
+  for e in "${EXCLUDES[@]}"; do ex+=(--exclude="$e"); done
+  tar -C "$DIR" "${TAR_EXTRA[@]}" "${ex[@]}" -czf "$TMP_ARCHIVE" . || die "не смог собрать архив"
+
+  # Сверка состава: что реально лежит в архиве против DATA_GUARD
+  local bad="" m base pat n=0
+  while IFS= read -r m; do
+    [ -n "$m" ] || continue
+    m="${m#./}"
+    if [ "${m%/}" != "$m" ]; then continue; fi      # каталог
+    n=$((n + 1))
+    base="${m##*/}"
+    for pat in "${DATA_GUARD[@]}"; do
+      # shellcheck disable=SC2254
+      case "$base" in $pat) bad="$bad $m"; break ;; esac
+    done
+  done < <(tar tzf "$TMP_ARCHIVE")
+
+  if [ -n "$bad" ]; then
+    die "в архив попали данные:$bad
+
+  Это файлы сервера, а не код: выкладка их затрёт. Добавь исключение в EXCLUDES
+  (deploy/push.sh) и, если файл новый, строку в DATA_GUARD — и запусти снова.
+  На сервер ничего не ушло."
+  fi
+  echo "  в архиве файлов: $n, данных среди них нет"
+}
+
+# Архив собираем и проверяем ДО соединения с сервером: забытое исключение
+# останавливает выкладку раньше, чем на сервере что-то изменится.
+say "1/3  Собираю архив и проверяю состав"
+pack
+if [ "$DRY" = 1 ]; then
+  say "готово (--dry-run): архив собран и проверен, на сервер ничего не ушло"
+  exit 0
+fi
+
+say "2/3  Проверяю связь с $TARGET и копирую код в $REMOTE"
 # Пароль по SSH запрещаем явно: ему не место ни в скрипте, ни в переписке.
 # А вот «сервер видим впервые, принять его ключ?» спросить можно — на новом
 # сервере это первое, что спрашивает ssh, и молча падать тут незачем.
 if ! "${SSH[@]}" -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no \
      "$TARGET" true; then
   die "не пускает по ключу.
-  Вход по паролю тут не годится — пароли не место в скриптах и переписке.
-  Заведи ключ и положи его на сервер:
-      ssh-keygen -t ed25519            (если ключа ещё нет)
-      ssh-copy-id -p $PORT $TARGET     (спросит пароль сервера один раз)
-  и запусти push.sh снова."
+Вход по паролю тут не годится — пароли не место в скриптах и переписке.
+Заведи ключ и положи его на сервер:
+    ssh-keygen -t ed25519            (если ключа ещё нет)
+    ssh-copy-id -p $PORT $TARGET     (спросит пароль сервера один раз)
+и запусти push.sh снова."
 fi
 USER_REMOTE="$("${SSH[@]}" "$TARGET" 'id -un')"
 echo "  вошли как $USER_REMOTE"
 
-say "2/3  Копирую код в $REMOTE"
 # Готовим место. Под root заводим отдельного пользователя: службе ни к чему
 # права, которых она не использует.
 OWNER_REMOTE="$("${SSH[@]}" "$TARGET" '
@@ -79,35 +186,7 @@ OWNER_REMOTE="$("${SSH[@]}" "$TARGET" '
 "${SSH[@]}" "$TARGET" "\$( [ \"\$(id -u)\" = 0 ] || echo sudo ) mkdir -p '$REMOTE'"
 echo "  папка готова, владелец $OWNER_REMOTE"
 
-# tar на macOS иначе тащит служебные метки Apple, а tar на сервере ругается
-# на них десятком строк за файл — в выводе тонет всё остальное
-TAR_EXTRA=()
-tar --no-mac-metadata --version >/dev/null 2>&1 && TAR_EXTRA+=(--no-mac-metadata)
-tar --no-xattrs --version >/dev/null 2>&1 && TAR_EXTRA+=(--no-xattrs)
-
-# Секреты и тяжёлое не возим. Данные на сервере — его собственные, и повторный
-# запуск их не трогает: ни одного файла с данными в списке ниже нет.
-#
-# Тексты писем и список прогрева тоже остаются на сервере: их правят прямо
-# в панели, и обновление кода не должно откатывать эту правку. С кодом едет
-# только образец warm-list.default.json — рабочий список панель заведёт из него
-# сама, если его ещё нет.
-tar -C "$DIR" "${TAR_EXTRA[@]}" -czf - \
-  --exclude='./venv' --exclude='./venv-tg' --exclude='./node_modules' \
-  --exclude='./.git' --exclude='./__pycache__' --exclude='*.pyc' \
-  --exclude='./sessions' --exclude='./accounts' --exclude='./desktop' \
-  --exclude='./qr' --exclude='./uploads' --exclude='./tg-profile' \
-  --exclude='./accounts.json' --exclude='./auth.json' --exclude='./claims.json' \
-  --exclude='./numbers.csv' --exclude='./results.csv' --exclude='./drafts.csv' \
-  --exclude='./members.csv' --exclude='./chats.json' --exclude='./base.json' \
-  --exclude='./replies.json' --exclude='./stats-cache.json' \
-  --exclude='./voice.ogg' --exclude='./voice.json' \
-  --exclude='./followup.csv' --exclude='./warmup.csv' --exclude='./warmup.json' \
-  --exclude='./message-parts.json' --exclude='./message.txt' --exclude='./message2.txt' \
-  --exclude='./warm-list.json' --exclude='./leads.json' --exclude='./leads-log.csv' \
-  --exclude='*.xlsx' --exclude='*.session' --exclude='./_backup_*' \
-  --exclude='./_reset_backup_*' --exclude='.DS_Store' --exclude='.send-gap.*' --exclude='./asocks.json' --exclude='./asocks-usage.jsonl' --exclude='./asocks-ports.json' --exclude='./traffic.csv' --exclude='./sent-ids.csv' --exclude='./talks' --exclude='*.csv.lock' --exclude='./chats.json.lock' --exclude='*.json.tmp' --exclude='*.csv.tmp' \
-  . | "${SSH[@]}" "$TARGET" "tar xzf - --no-same-owner -C '$REMOTE'"
+"${SSH[@]}" "$TARGET" "tar xzf - --no-same-owner -C '$REMOTE'" < "$TMP_ARCHIVE"
 # tar под root восстановил бы владельца из архива — то есть номер пользователя
 # с ЭТОГО компьютера, которого на сервере нет. Поэтому и --no-same-owner,
 # и явный chown: иначе установка спотыкается о владельца «UNKNOWN».

@@ -49,7 +49,7 @@ def main(dst):
     accs = []
     for i in range(1, 5):
         a = {"id": f"a{i}", "title": f"+7000000000{i}", "name": f"Тест {i}", "user_id": 9000 + i,
-             "phone": f"7000000000{i}", "role": "send", "authed": True, "proxy": "",
+             "phone": f"7000000000{i}", "role": "send", "authed": True, "proxy": "", "dir": f"accounts/a{i}",
              "warmFrom": ago(days=30), "added": ago(days=30), "graduated": True,
              "spamOk": True, "spam": "Ваш аккаунт свободен от каких-либо ограничений"}
         accs.append(a)

@@ -313,6 +313,14 @@ class FakeClient:
                 save(w)
             self._count(name, B_ENTITY)
             return SimpleNamespace()
+        if name == "GetChannelsRequest":
+            out = []
+            for x in req.id:
+                kind, i = self._resolve(w, x)
+                if kind == "chat":
+                    out.append(_chat(w, i, self.me_uid))
+            self._count(name, B_ENTITY * len(out))
+            return SimpleNamespace(chats=out)
         if name == "ImportContactsRequest":
             self._count(name, B_ENTITY)
             return SimpleNamespace(users=[], imported=[])

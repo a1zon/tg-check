@@ -4,8 +4,8 @@
 
 Разбор раньше запоминал чат только по id, а по id чат открывает лишь аккаунт,
 который в нём состоит. Комментарии ходят в эти чаты с ДРУГИХ аккаунтов —
-им нужен публичный ник. Аккаунт-участник один раз смотрит свои диалоги
-(один запрос, ~40 КБ) и дописывает ники тем чатам, где он есть.
+им нужен публичный ник. Аккаунт-разборщик берёт чаты по id из памяти своей
+сессии (один запрос на 50 чатов) и дописывает ники тем, у кого они есть.
 
     python chat-usernames.py --account a1
 
@@ -34,10 +34,29 @@ async def main():
     client = await tglib.connect(acc)
     found = {}
     try:
-        for d in await client.get_dialogs(limit=300):
-            ent = d.entity
-            if str(getattr(ent, "id", "")) in need and getattr(ent, "username", None):
-                found[str(ent.id)] = ent.username
+        # Чаты берём прямо по id из памяти сессии: аккаунт, разбиравший чат, его
+        # «видел», и ключ доступа лежит в сессии. Список диалогов не годится — у
+        # аккаунтов рассылки сотни личных переписок, и группы в первые 300 не
+        # попадают (16.10 так не нашлось ни одного ника из 92). Одним запросом на
+        # 50 чатов — трафика почти нет.
+        from telethon import functions, types
+        known = []
+        for k in sorted(need):
+            try:
+                known.append((k, await client.get_input_entity(types.PeerChannel(int(k)))))
+            except (ValueError, TypeError):
+                pass                       # эту группу сессия не встречала
+        for i in range(0, len(known), 50):
+            part = known[i:i + 50]
+            try:
+                res = await client(functions.channels.GetChannelsRequest(id=[e for _, e in part]))
+            except Exception as e:
+                say(f"не прочитал пачку чатов: {type(e).__name__}")
+                continue
+            for ch in res.chats:
+                if str(ch.id) in need and getattr(ch, "username", None):
+                    found[str(ch.id)] = ch.username
+        say(f"сессия знает {len(known)} из {len(need)} чатов без ника")
     finally:
         await tglib.aclose(client)
     # дописываем под тем же замком, что и разбор (он может идти параллельно)

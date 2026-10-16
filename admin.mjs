@@ -435,6 +435,11 @@ function start(name, opts, onDone) {
   if (!t) return { ok: false, reason: 'неизвестная задача' };
   let acc;
   try { acc = accounts.resolve(account); } catch (e) { return { ok: false, reason: e.message }; }
+  // Набор захода: явно названный вкладкой (opts.set), иначе — тот, в котором
+  // аккаунт уже работает, и лишь затем базовый. Раньше всегда решал setOf(acc.id):
+  // ручной заход с вкладки чатов брал текст «по номерам», а файлы и брони —
+  // корневые, хотя человек стоял на вкладке чатов.
+  const set0 = opts.set || setOf(acc.id);
   const cur = running.get(acc.id);
   if (cur) return { ok: false, reason: `«${acc.title}» уже занят: ${cur.title}` };
   // на этом аккаунте сейчас создают вход или выгоняют устройство — та же сессия
@@ -505,7 +510,7 @@ function start(name, opts, onDone) {
     // Раньше без message2.txt эта проверка роняла запуск посреди отдыха, и
     // 40-минутный сон между порциями превращался в 5-минутный.
     const txt = name === 'follow' ? (send ? read('message2.txt') : 'только читает')
-      : setOf(acc.id) === 'chats' ? (read('message-chat.txt') || read('message.txt'))
+      : set0 === 'chats' ? (read('message-chat.txt') || read('message.txt'))
       : read('message.txt');
     if (!txt) {
       return { ok: false, reason: 'сначала напиши текст сообщения — иначе рассылка пройдёт вхолостую и сожжёт номера' };
@@ -568,7 +573,7 @@ function start(name, opts, onDone) {
   // набор можно задать явно: проба квоты идёт по базе номеров, даже когда
   // рассылка сейчас работает по чатам
   run(acc.id, acc.title, `${t.title} — ${acc.title}${tag}`,
-      t.py ? pythonCmd() : 'node', args, onDone, opts.set || baseSet);
+      t.py ? pythonCmd() : 'node', args, onDone, set0);
   return { ok: true };
 }
 
@@ -1067,8 +1072,20 @@ const fmtLeft = (sec) => {
   return m >= 60 ? `${Math.floor(m / 60)} ч ${m % 60} мин` : `${m} мин`;
 };
 const hhmm = (t) => new Date(t).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+/**
+ * Число из формы: пустое поле — это «не задано», а не ноль.
+ *
+ * Раньше пустая строка превращалась в ноль (Number('') === 0) и зажималась в
+ * минимум: очистил «сек между письмами» — и аккаунт начинал писать раз в 3
+ * секунды вместо 180, очистил «писем за заход» — и уходило по одному письму.
+ * Молчаливая подмена в самую опасную сторону: минимум здесь — это максимум
+ * скорости. Теперь пустое (и null/undefined) берёт значение по умолчанию,
+ * а ноль, введённый руками, по-прежнему зажимается в минимум.
+ */
 const num = (v, d, min, max) => {
-  const n = Math.round(Number(v));
+  const s = String(v ?? '').trim();
+  if (!s) return d;
+  const n = Math.round(Number(s));
   return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : d;
 };
 
@@ -1229,7 +1246,10 @@ function pickJob(left, id) {
 
   // отлёжка: свежий аккаунт сутки не делает вообще ничего — ни проверок,
   // ни сообщений. Это единственный способ не потерять его в первый же день.
-  if (auto.warm && w && w.resting) {
+  // Значение берём у СВОЕГО режима (auto.opts[set].warm): у «по номерам» и
+  // «по чатам» настройка независимая, и снятая галочка на одной вкладке больше
+  // не снимает отлёжку аккаунтам другого, уже идущего прогона.
+  if (o.warm !== false && w && w.resting) {
     const s = auto.per.get(id);
     if (s && s.note !== 'отлёжка') {
       s.note = 'отлёжка';
@@ -1505,8 +1525,16 @@ function autoTick() {
   // 16.10 — месяц), и никто бы его не увидел. Им — только «смотрит ответы», в конце очереди
   const held = auto.ids.filter((id) => auto.per.get(id)?.stopped && auto.per.get(id).quarantine && byId.has(id));
   const queue = (auto.serial
-    ? [...live].sort((x, y) => (auto.per.get(x).lastAt || 0) - (auto.per.get(y).lastAt || 0))
-    : live).concat(held);
+    ? [...live].sort((x, y) => (auto.per.get(x)?.lastAt || 0) - (auto.per.get(y)?.lastAt || 0))
+    : live).concat(held)
+    // Режим мог закончиться прямо в этом же тике — finishSet() выше удаляет его
+    // аккаунты из auto.per и гасит auto.live[набор]. В `live` они ещё лежат
+    // (список снят раньше), и раньше это роняло весь тик: сортировка очереди по
+    // «кто дольше не работал» читала auto.per.get(x).lastAt у уже удалённого
+    // аккаунта. Наружу это выглядело так: запуск второго режима (по чатам, когда
+    // уже идут номера) отвечал ошибкой «Cannot read properties of undefined» —
+    // ровно в тот момент, когда второй набор оказывался пустым и завершался сам.
+    .filter((id) => auto.per.has(id) && auto.live[setOf(id)]);
   // параллель на общем IP — запуски разводим по времени (см. launchHold)
   const spread = !auto.serial && !ownProxyEach();
 
@@ -1574,7 +1602,8 @@ function autoTick() {
     const r = start(job.name, {
       account: id, limit: job.limit, delay: job.delay, set,
       delayMax: job.delayMax, hold: job.hold, holdMax: job.holdMax,
-      warm: auto.warm,
+      // «беречь новые аккаунты» — у каждого режима своё (см. auto.opts[set].warm)
+      warm: o.warm !== false,
       // параллель с одного IP: без разноса аккаунты уходят залпом в одну
       // секунду (14.10 так и было) — по очереди этого не бывает
       sendGap: job.name === 'drafts' && !auto.serial && !ownProxyEach(),
@@ -1888,6 +1917,17 @@ function autoStart(o) {
       : 'ни один из выбранных аккаунтов не вошёл или все они «только прогрев»' };
   }
   const mode = ['full', 'check', 'write'].includes(o.mode) ? o.mode : 'full';
+  // «Только проверить» бывает только у набора номеров: по чатам люди уже в
+  // Telegram, контакты там не добавляются, и проверок у набора чатов нет вовсе.
+  // Режим приезжал из общей формы вкладки номеров, а признака «проверять нечего»
+  // нигде не было: прогон стартовал, считал остаток по несуществующему
+  // chats/numbers.csv, получал ноль работы и в ту же секунду заканчивался
+  // «база пройдена» — не отправив ни одного письма. Лучше сказать словами.
+  if (mode === 'check' && set === 'chats') {
+    return { ok: false, reason: '«Только проверить» — это про номера: по чатам проверять нечего. ' +
+      'Поставь на вкладке «Рассылка по номерам» режим «проверить и написать» или «только написать» — ' +
+      'и запускай чаты.' };
+  }
   // аккаунт с ограничением в рассылку не берём вовсе: он всё равно упрётся
   // в карантин на первой же пачке, только потратит заход
   if (mode !== 'check' && held.length) {
@@ -1941,6 +1981,10 @@ function autoStart(o) {
   auto.opts[set] = {
     mode, voice,
     funnel: !!o.funnel,
+    // «беречь новые аккаунты» — настройка РЕЖИМА, а не панели: иначе снятая
+    // галочка на одной вкладке снимала отлёжку и у второго, уже идущего режима
+    // (было `auto.warm && o.warm !== false` — общий тумблер на оба прогона)
+    warm: o.warm !== false,
     send: !!o.send && !voice && mode !== 'check',
     check: { limit: num(o.checkLimit, 20, 1, 500), delay: num(o.checkDelay, 15, 5, 3600) },
     // пауза между людьми и пауза между «завёл контакт» и «написал» — обе
@@ -1960,19 +2004,33 @@ function autoStart(o) {
 
   // Прокси один на оба режима, поэтому очередь, работа по одному за раз и
   // смена IP — общие. Если второй режим просит строже, берём строже.
+  //
+  // wasOn снимаем ДО Object.assign: внутри литерала auto.on ещё старое значение
+  // (свойства вычисляются до присваивания), а после него — уже true, поэтому
+  // проверка «прогон только начался» должна смотреть на снимок.
+  const wasOn = auto.on;
   Object.assign(auto, {
     on: true,
     serial: (auto.on && auto.serial) || !!o.serial || !!rotate || (shared && !o.parallel),
     rotate: rotate || (auto.on ? auto.rotate : ''),
     rotateWait: num(o.rotateWait, warmup.rotateWait || 10, 3, 600),
-    fresh: false, holdUntil: 0, rotateFails: 0,
-    warm: auto.on ? (auto.warm && o.warm !== false) : o.warm !== false,
+    // fresh/holdUntil/rotateFails — состояние МОДЕМА, а не режима. Пока прогон
+    // идёт, второй запуск не должен их трогать: сброс holdUntil обрывал паузу
+    // после смены IP (задача уходила в момент переподключения и падала), а
+    // сброс rotateFails обнулял счётчик «три неудачи — останавливаемся», и
+    // порог мог не сработать. Свежий старт — по-прежнему с чистого листа.
+    ...(wasOn ? {} : { fresh: false, holdUntil: 0, rotateFails: 0 }),
+    // верхнеуровневый warm — для старых экранов и ручных задач; сам режим
+    // работает по своему значению в auto.opts[set].warm
+    warm: o.warm !== false,
     // ограниченных Telegram держим в прогоне, но стоящими: когда срок
     // ограничения пройдёт, autoTick вернёт их в работу сам
     ids: [...new Set([...(auto.on ? auto.ids : []), ...ids])],
     since: auto.on ? auto.since : Date.now(),
   });
-  if (!auto.on) auto.per = new Map();
+  // Свежий старт — состояние аккаунтов с нуля. Проверка была мёртвой: строкой
+  // выше auto.on уже присвоено true, и карта не сбрасывалась никогда.
+  if (!wasOn) auto.per = new Map();
   for (const id of ids) auto.per.set(id, autoPer(mode !== 'check' && held.some((a) => a.id === id)));
   restoreRest(ids, auto.opts[set]);   // недавно писавшие досыпают свою паузу
   // поля верхнего уровня держим в согласии с последним запуском: на них
@@ -2019,7 +2077,7 @@ function autoStart(o) {
     warmSave();
   }
   if (!auto.timer) auto.timer = setInterval(autoTick, AUTO_TICK);
-  autoRemember(set, o);
+  autoRemember();                 // параметры режимов — в auto-run.json / auto-last.json
   autoTick();
   return { ok: true };
 }
@@ -3659,9 +3717,14 @@ async function handler(req, res) {
 
     if (u.pathname === '/api/start' && req.method === 'POST') {
       const { name, account, accounts: many, limit, delay, delayMax, hold, holdMax,
-              send, voice, warm: w, chat, folder, again, onlyUser, join, phone, list, days } = await body(req);
+              send, voice, warm: w, chat, folder, again, onlyUser, join, phone, list, days,
+              set } = await body(req);
+      // set — по какой вкладке запускают ручной заход. Раньше его не присылали
+      // и не принимали, и ручная рассылка шла по глобальному baseSet, даже если
+      // человек стоял на вкладке чатов. Неизвестный/пустой набор — как раньше.
       const opts = { limit, delay, delayMax, hold, holdMax, send, voice, warm: w,
-                     chat, folder, again, onlyUser, join, phone, list, days };
+                     chat, folder, again, onlyUser, join, phone, list, days,
+                     ...(SETS.includes(set) ? { set } : {}) };
       // список аккаунтов -> запускаем задачу на каждом СРАЗУ: они делят базу
       // бронями и идут параллельно. Одиночный account — как раньше.
       if (Array.isArray(many) && many.length) return json(res, 200, startMany(name, many, opts));

@@ -16,7 +16,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-const API = 'https://api.asocks.com/';
+// ASOCKS_API/ASOCKS_KEY — только для песочницы (поддельный Asocks); на сервере не заданы
+const API = process.env.ASOCKS_API || 'https://api.asocks.com/';
 export const ASOCKS_EVERY = 30 * 60_000;    // как часто снимаем баланс и итог трафика
 
 export function makeAsocks({ dir }) {
@@ -25,6 +26,7 @@ export function makeAsocks({ dir }) {
   const PORTS = path.join(dir, 'asocks-ports.json');    // расход по портам — последний снимок
 
   const key = () => {
+    if (process.env.ASOCKS_KEY) return process.env.ASOCKS_KEY;
     try { return String(JSON.parse(fs.readFileSync(KEY_FILE, 'utf8')).apiKey || '').trim(); }
     catch { return ''; }
   };
@@ -108,5 +110,18 @@ export function makeAsocks({ dir }) {
     };
   }
 
-  return { snapshot, summary, enabled: () => !!key() };
+  /**
+   * Готовые мобильные сессии страны (v2/proxy/search): строки
+   * http://логин:пароль@шлюз:порт, у каждой свой логин и обычно свой IP.
+   * Ничего не создаёт и не стоит денег — платим только за трафик.
+   */
+  async function search(country = 'KZ') {
+    if (!key()) throw new Error('Asocks не подключён: на сервере нет ключа API');
+    const j = await get(`v2/proxy/search?country=${encodeURIComponent(country)}&types[]=mobile&limit=5000`);
+    const list = (Array.isArray(j) ? j : (j.message || j.data || [])).filter((x) => typeof x === 'string');
+    if (!list.length) throw new Error(`Asocks не отдал ни одной мобильной сессии для ${country}`);
+    return list;
+  }
+
+  return { snapshot, summary, search, enabled: () => !!key() };
 }

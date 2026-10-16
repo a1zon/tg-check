@@ -173,7 +173,7 @@ function paintAccounts() {
       <span class="nm"><b class="acc-name">${esc(a.name || a.title)} ${accBadge(a)} ${
           accReady(a) ? rolePill(a) : ''} ${where(a)}</b>
         <span class="${accReady(a) ? 'on' : 'off'}">${accSub(a)}</span>
-        <span>${a.proxy ? 'прокси ' + esc(String(a.proxyLabel).replace(/\s*\(.*\)$/, '')) : 'без прокси'} · написал ${a.sent}${
+        <span>${a.ownIp ? 'свой IP ' + esc(a.ownIp) : a.proxy ? 'прокси ' + esc(String(a.proxyLabel).replace(/\s*\(.*\)$/, '')) : 'без прокси'} · написал ${a.sent}${
           a.dailyCap ? ` · свой предел ${a.dailyCap} в день` : ''}${
           a.channelOn && a.channel ? ` · в профиле канал @${esc(a.channel)}` : ''}</span>
         <span class="warm ${a.quarantine || (a.warm && a.warm.resting) ? 'off' : ''}">${warmLine(a)}</span></span>
@@ -1655,6 +1655,21 @@ $('#b-prxall').onclick = async () => {
   const r = await post('/api/accounts/proxy', {proxy: p, all: true});
   if (!r.ok) alert(r.reason || 'не у всех получилось');
   if (r.warn) alert(r.warn);
+  accsRaw = ''; loop();
+};
+
+// Свой IP каждому: отдельная мобильная сессия Asocks на аккаунт (проверяется перед выдачей)
+$('#b-ownip').onclick = async () => {
+  const how = prompt('Свой IP каждому аккаунту — отдельная мобильная сессия Asocks (Казахстан).\n\n' +
+    'Каждую сессию панель сначала проверит: отвечает, IP не скачет, пускает к Telegram, ' +
+    'такого IP нет у другого аккаунта. Прежний прокси сохранится в proxyPrev.\n' +
+    'Платим, как и раньше, только за трафик. Аккаунты пойдут параллельно ' +
+    '(не больше 6 задач разом).\n\n' +
+    '  1 — всем вошедшим аккаунтам\n  2 — только тем, у кого прокси общий или сейчас лежит\n\nВведи 1 или 2:', '2');
+  if (how === null) return;
+  const r = await post('/api/proxy/own', {down: how.trim() !== '1'});
+  if (!r.ok) { alert(r.reason || 'не вышло'); return; }
+  alert(`Раздаю свой IP ${r.n} акк. — это несколько минут, ход и итог видно в журнале.`);
   accsRaw = ''; loop();
 };
 

@@ -53,6 +53,7 @@ import { makeProxyGuard } from './server/proxyguard.mjs';
 import * as desktop from './server/desktop.mjs';
 import { buildKit, buildPult, kitProxy } from './server/kit.mjs';
 import { makeAsocks, ASOCKS_EVERY } from './server/asocks.mjs';
+import { makeOwnProxy, ASOCKS_GATEWAY } from './server/ownproxy.mjs';
 import * as vercel from './server/vercel.mjs';
 
 // Код один на всех, данные у каждого профиля свои.
@@ -212,6 +213,42 @@ const { warm, doneToday, doneTodayAll, setMaxCap, getMaxCap, getPlan,
 // поэтому снимки баланса и трафика пишет только основной профиль (его папка —
 // папка кода), второй читает тот же файл. Ключ — asocks.json рядом с кодом.
 const asocks = makeAsocks({ dir: CODE });
+
+/**
+ * Потолок одновременных задач. Пока у аккаунтов один прокси на всех, задачи и
+ * так идут по одной. Со своим IP у каждого они пойдут параллельно, а сервер
+ * маленький (2 ГБ, задача Python ~60–80 МБ): без потолка 18 аккаунтов разом
+ * съели бы всю память. TG_MAX_PARALLEL — поменять без правки кода.
+ */
+const MAX_RUNNING = Math.max(1, Number(process.env.TG_MAX_PARALLEL) || 6);
+
+/** Строки прокси аккаунтов СОСЕДНИХ профилей: чужую сессию Asocks не выдаём. */
+function otherProfilesProxies() {
+  const files = [];
+  if (DIR !== CODE) files.push(path.join(CODE, 'accounts.json'));
+  try {
+    for (const d of fs.readdirSync(path.join(CODE, 'profiles'))) {
+      const f = path.join(CODE, 'profiles', d, 'accounts.json');
+      if (path.dirname(f) !== DIR) files.push(f);
+    }
+  } catch {}
+  const out = [];
+  for (const f of files) {
+    try { for (const a of JSON.parse(fs.readFileSync(f, 'utf8'))) if (a.proxy) out.push(a.proxy); } catch {}
+  }
+  return out;
+}
+const ownProxy = makeOwnProxy({
+  dir: DIR, asocks,
+  gateway: process.env.TG_ASOCKS_GATEWAY || ASOCKS_GATEWAY,
+  listAccounts: () => accounts.list(),
+  otherProxies: otherProfilesProxies,
+  setProxy: (id, raw, prev) => {
+    accounts.setProxy(id, raw);
+    accounts.setField(id, { proxyPrev: prev, proxyOwn: true });
+  },
+  note: (a, got) => push(`   «${a.title}» → свой IP ${got.ip} (${got.org || got.country})`),
+});
 if (DIR === CODE) {
   let lastErr = '';
   const asocksTick = () => asocks.snapshot().then(() => { lastErr = ''; }).catch((e) => {
@@ -803,6 +840,7 @@ function warmTick() {
   const order = [...live].sort((x, y) => rank(x) - rank(y));
 
   for (const acc of order) {
+    if (running.size >= MAX_RUNNING) return;     // сервер маленький — больше разом не пускаем
     if (running.has(acc.id)) continue;
     if (proxyGuard.down(acc.proxy)) continue;
     // полный отдых после заморозки — не трогаем вовсе; «без рассылки» — греем
@@ -1598,6 +1636,7 @@ function autoTick() {
   const spread = !auto.serial && !ownProxyEach();
 
   for (const id of queue) {
+    if (running.size >= MAX_RUNNING) break;      // потолок одновременных задач (см. MAX_RUNNING)
     if (running.has(id) || accessBusy.has(id)) continue;
     if (proxyGuard.down(proxyOf(id))) continue;
     // полный отдых после заморозки: ни писем, ни «смотрит ответы» — ни одного
@@ -2728,6 +2767,7 @@ async function handler(req, res) {
         tally.set(r.account, t);
       }
       const today = doneTodayAll(drafted);
+      const own = ownProxy.assigned();      // свой IP аккаунта (раздача сессий Asocks)
       return json(res, 200, accounts.list().map((a) => ({
         id: a.id, title: a.title,
         // время аватарки — для адреса картинки: сменили фото — браузер возьмёт новое
@@ -2736,6 +2776,8 @@ async function handler(req, res) {
         authed: accounts.isAuthed(a),
         proxy: a.proxy || '',
         proxyLabel: accounts.proxyLabel(a.proxy),
+        // шлюз у всех своих сессий один — в строке показываем сам IP, иначе не отличить от общего
+        ownIp: a.proxyOwn ? (own[a.id]?.ip || '') : '',
         drafts: tally.get(a.id)?.drafts || 0,
         sent: tally.get(a.id)?.sent || 0,
         busy: running.get(a.id)?.title || '',
@@ -3295,6 +3337,29 @@ async function handler(req, res) {
       } catch (e) {
         return json(res, 200, { ok: false, reason: e.message });
       }
+    }
+
+    // «Свой IP каждому»: отдельная мобильная сессия Asocks на аккаунт (server/ownproxy.mjs).
+    // down — только тем, у кого прокси сейчас лежит или ещё общий. Идёт в фоне:
+    // каждая сессия проверяется (IP, страна, доступ к Telegram) — это минуты.
+    if (u.pathname === '/api/proxy/own' && req.method === 'POST') {
+      const { ids, down, country } = await body(req);
+      if (!asocks.enabled()) return json(res, 200, { ok: false, reason: 'Asocks не подключён: на сервере нет ключа API' });
+      if (ownProxy.busy()) return json(res, 200, { ok: false, reason: 'раздача уже идёт — дождись её' });
+      let list = accounts.list().filter((a) => accounts.hasSession(a));
+      if (Array.isArray(ids) && ids.length) list = list.filter((a) => ids.includes(a.id));
+      if (down) list = list.filter((a) => !a.proxyOwn || proxyGuard.down(a.proxy));
+      if (!list.length) return json(res, 200, { ok: false, reason: down ? 'у всех уже свой живой IP' : 'нет вошедших аккаунтов' });
+      const cc = /^[A-Z]{2}$/.test(String(country || '')) ? country : 'KZ';
+      push(`\n🌐 свой IP каждому: ${list.length} акк., мобильные сессии Asocks (${cc}) — проверяю по одной`);
+      ownProxy.assign({ ids: list.map((a) => a.id), country: cc }).then((r) => {
+        const ok = r.filter((x) => x.ok).length;
+        push(`🌐 готово: свой IP у ${ok} из ${r.length}` + (ok < r.length
+          ? '. Не вышло: ' + r.filter((x) => !x.ok).map((x) => `${x.id} — ${x.why}`).join('; ') : '') +
+          (ok && auto.on && auto.serial ? '. Прогон всё ещё идёт по одному — перезапусти его, чтобы пошёл параллельно' : ''));
+        events.note('🌐', `свой IP получили ${ok} из ${r.length} аккаунтов`);
+      }).catch((e) => push(`🌐 раздача не удалась: ${e.message}`));
+      return json(res, 200, { ok: true, n: list.length });
     }
 
     if (u.pathname === '/api/accounts/rename' && req.method === 'POST') {

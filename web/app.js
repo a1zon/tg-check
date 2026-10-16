@@ -174,7 +174,8 @@ function paintAccounts() {
           accReady(a) ? rolePill(a) : ''} ${where(a)}</b>
         <span class="${accReady(a) ? 'on' : 'off'}">${accSub(a)}</span>
         <span>${a.proxy ? 'прокси ' + esc(String(a.proxyLabel).replace(/\s*\(.*\)$/, '')) : 'без прокси'} · написал ${a.sent}${
-          a.dailyCap ? ` · свой предел ${a.dailyCap} в день` : ''}</span>
+          a.dailyCap ? ` · свой предел ${a.dailyCap} в день` : ''}${
+          a.channelOn && a.channel ? ` · в профиле канал @${esc(a.channel)}` : ''}</span>
         <span class="warm ${a.quarantine || (a.warm && a.warm.resting) ? 'off' : ''}">${warmLine(a)}</span></span>
       <span class="accbtns">${
         accReady(a) ? '' : item('code', a.id, 'Войти по коду')}${
@@ -185,6 +186,8 @@ function paintAccounts() {
           <span class="accmenu-list">
             ${item('tgname', a.id, 'Имя в Telegram')}
             ${item('tguser', a.id, '@ник')}
+            ${item('tgabout', a.id, 'Описание профиля')}
+            ${item('tgchan', a.id, a.channelOn && a.channel ? `Канал в профиле (@${esc(a.channel)})` : 'Канал-прокладка в профиль')}
             ${item('tgpic', a.id, 'Аватарка')}
             ${item('desk', a.id, 'Открыть в Desktop')}
             ${item('chk', a.id, 'Проверить прокси')}
@@ -263,6 +266,55 @@ function paintAccounts() {
     if (u === null || !u.trim()) return;
     const r = await post('/api/accounts/profile', {id: a.id, username: u.trim().replace(/^@/, '')});
     if (!r.ok) alert(r.reason || 'не удалось'); else alert('Меняю @ — результат смотри в журнале.');
+    state();
+  });
+
+  // «О себе»: без премиума — до 70 знаков, ссылки в нём не кликаются
+  document.querySelectorAll('[data-tgabout]').forEach(b => b.onclick = async (e) => {
+    e.preventDefault();
+    const a = accs.find(x => x.id === b.dataset.tgabout);
+    const t = prompt(`Описание «о себе» для «${esc(a.title)}» — до 70 знаков.\n\n` +
+      'Без премиума ссылки в описании не нажимаются — ссылку на канал лучше дать каналом-прокладкой.',
+      a.about || '');
+    if (t === null) return;
+    if (t.length > 70 && !confirm(`${t.length} знаков: без премиума Telegram примет только 70. Всё равно отправить?`)) return;
+    const r = await post('/api/accounts/profile', {id: a.id, about: t.trim()});
+    if (!r.ok) alert(r.reason || 'не удалось'); else state();
+  });
+
+  // Канал-прокладка: свой маленький публичный канал аккаунта в профиле (это бесплатно
+  // всем, но только СВОЙ канал), в нём закреплённый пост со ссылкой на основной канал
+  document.querySelectorAll('[data-tgchan]').forEach(b => b.onclick = async (e) => {
+    e.preventDefault();
+    const a = accs.find(x => x.id === b.dataset.tgchan);
+    if (a.channelOn && a.channel) {
+      const what = prompt(`В профиле «${esc(a.title)}» стоит канал @${a.channel}.\n\n` +
+        '  1 — новый пост / поменять название или ник\n  2 — убрать канал из профиля\n\nВведи 1 или 2:', '1');
+      if (what === null) return;
+      if (what.trim() === '2') {
+        const r = await post('/api/accounts/channel', {id: a.id, off: true});
+        if (!r.ok) alert(r.reason || 'не удалось'); else state();
+        return;
+      }
+    }
+    const title = prompt('Название канала-прокладки (его видно в профиле):',
+      a.channelTitle || 'Недвижимость Екатеринбурга');
+    if (title === null || !title.trim()) return;
+    const suggest = a.channel || ('ekb_' + String(a.username || a.id).toLowerCase().replace(/[^a-z0-9_]/g, '') + '_notes');
+    const uname = prompt('Публичный @ник канала — латиница, цифры и _, 5–32 знака.\n' +
+      'В профиль Telegram ставит только публичный канал.', suggest);
+    if (uname === null || !uname.trim()) return;
+    let saved = '';
+    try { saved = localStorage.getItem('tg-bridge-post') || ''; } catch {}
+    const text = prompt('Текст закреплённого поста со ссылкой на основной канал.\n\n' +
+      'Лучше своя ссылка-приглашение на каждый аккаунт (в основном канале: Управление → ' +
+      'Пригласительные ссылки) — тогда видно, кто сколько привёл.' +
+      (a.channel ? '\nПусто — пост не меняем.' : ''),
+      saved || 'Подборки квартир и разборы сделок в Екатеринбурге — в канале: ссылка');
+    if (text === null) return;
+    try { if (text.trim()) localStorage.setItem('tg-bridge-post', text.trim()); } catch {}
+    const r = await post('/api/accounts/channel', {id: a.id, title: title.trim(), username: uname.trim(), post: text.trim()});
+    if (!r.ok) alert(r.reason || 'не удалось'); else alert('Делаю — что вышло, смотри в журнале.');
     state();
   });
 

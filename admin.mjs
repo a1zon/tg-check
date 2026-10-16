@@ -2744,6 +2744,9 @@ async function handler(req, res) {
         // кто это на самом деле — панель показывает рядом с названием,
         // иначе после добавления видно только придуманное имя
         name: a.name || '', username: a.username || '', phone: a.phone || '',
+        // профиль в Telegram: «о себе» и канал-прокладка (пишет profile.py)
+        about: a.about || '', channel: a.channel || '', channelTitle: a.channelTitle || '',
+        channelOn: !!a.channelOn,
         held: held.filter((h) => h.account === a.id).reduce((s, h) => s + h.n, 0),
         warm: accounts.hasSession(a) ? warm(a, today.get(a.id) || 0) : null,
         dailyCap: Number(a.dailyCap) || 0,   // ручной предел на аккаунт (0 — авто)
@@ -2863,6 +2866,30 @@ async function handler(req, res) {
       // чужие фотографии прежнего хозяина: новая аватарка их не отменяет
       if (dropPhotos) args.push('--drop-photos');
       run(id, acc.title, `Профиль — ${acc.title}`, pythonCmd(), args);
+      return json(res, 200, { ok: true });
+    }
+
+    // Канал-прокладка: свой публичный канал аккаунта в профиле, в нём закреплённый
+    // пост со ссылкой на основной канал. off — убрать канал из профиля.
+    if (u.pathname === '/api/accounts/channel' && req.method === 'POST') {
+      const { id, title, username, post, off } = await body(req);
+      const acc = accounts.list().find((a) => a.id === id);
+      if (!acc) return json(res, 200, { ok: false, reason: 'аккаунт не найден' });
+      if (running.has(id)) return json(res, 200, { ok: false, reason: 'аккаунт сейчас занят — попробуй через минуту' });
+      if (!accounts.hasSession(acc)) return json(res, 200, { ok: false, reason: 'аккаунт не вошёл' });
+      const uname = String(username || '').trim().replace(/^@/, '');
+      if (uname && !/^[A-Za-z][A-Za-z0-9_]{4,31}$/.test(uname)) {
+        return json(res, 200, { ok: false, reason: 'ник канала: 5–32 знака, латиница, цифры и _, первая — буква' });
+      }
+      const args = [path.join(CODE, 'profile.py'), '--account', id];
+      if (off) args.push('--channel-off');
+      else {
+        if (!acc.channelId && !String(title || '').trim()) return json(res, 200, { ok: false, reason: 'нужно название канала' });
+        if (String(title || '').trim()) args.push('--channel-title', String(title).trim().slice(0, 128));
+        if (uname) args.push('--channel-username', uname);
+        if (String(post || '').trim()) args.push('--channel-post', String(post).trim().slice(0, 4000));
+      }
+      run(id, acc.title, `Канал в профиле — ${acc.title}`, pythonCmd(), args);
       return json(res, 200, { ok: true });
     }
 

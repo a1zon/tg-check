@@ -56,7 +56,8 @@ def _chat(w, cid, me_uid):
     c = w["chats"][str(cid)]
     joined = me_uid in c.get("members", [])
     return SimpleNamespace(id=int(c["id"]), title=c.get("title", ""), username=c.get("username"),
-                           megagroup=True, broadcast=False, left=not joined,
+                           megagroup=not c.get("broadcast"), broadcast=bool(c.get("broadcast")),
+                           left=not joined,
                            default_banned_rights=None, slowmode_enabled=bool(c.get("slowmode")))
 
 
@@ -115,6 +116,9 @@ class FakeClient:
     async def disconnect(self):
         return None
 
+    async def download_profile_photo(self, *a, **kw):
+        return None
+
     def action(self, entity, action):
         self.calls.append(f"action:{action}")
         return FakeAction()
@@ -122,6 +126,10 @@ class FakeClient:
     # ------------------------------------------------------------- сущности
     def _resolve(self, w, x):
         """→ ('user', uid) | ('chat', cid)"""
+        if hasattr(x, "channel_id") and not isinstance(x, SimpleNamespace):    # types.PeerChannel
+            if str(x.channel_id) not in w["chats"]:
+                raise ValueError("Could not find the input entity for PeerChannel")
+            return "chat", int(x.channel_id)
         if isinstance(x, SimpleNamespace):
             if hasattr(x, "megagroup"):
                 return "chat", int(x.id)
@@ -261,6 +269,49 @@ class FakeClient:
         if name in ("SendReactionRequest", "SendVoteRequest", "SetTypingRequest",
                     "DeleteContactsRequest"):
             self._count(name)
+            return SimpleNamespace()
+        if name == "CreateChannelRequest":
+            cid = max([int(k) for k in w["chats"]] + [1000]) + 1
+            w["chats"][str(cid)] = {"id": cid, "title": req.title, "broadcast": bool(req.broadcast),
+                                    "members": [self.me_uid], "messages": [], "owner": self.acc["id"]}
+            save(w)
+            self._count(name, B_ENTITY * 2)
+            return SimpleNamespace(chats=[_chat(w, cid, self.me_uid)])
+        if name == "CheckUsernameRequest":
+            taken = {(c.get("username") or "").lower() for c in w["chats"].values()} | \
+                    {(u.get("username") or "").lower() for u in w["users"].values()}
+            self._count(name)
+            return req.username.lower() not in taken
+        if name == "UpdateUsernameRequest" and hasattr(req, "channel"):
+            kind, i = self._resolve(w, req.channel)
+            w["chats"][str(i)]["username"] = req.username
+            save(w)
+            self._count(name)
+            return True
+        if name == "EditTitleRequest":
+            kind, i = self._resolve(w, req.channel)
+            w["chats"][str(i)]["title"] = req.title
+            save(w)
+            self._count(name)
+            return SimpleNamespace()
+        if name == "UpdatePinnedMessageRequest":
+            kind, i = self._resolve(w, req.peer)
+            w["chats"][str(i)]["pinned"] = req.id
+            save(w)
+            self._count(name)
+            return SimpleNamespace()
+        if name == "UpdatePersonalChannelRequest":
+            ch = req.channel
+            w.setdefault("personal", {})[self.acc["id"]] = (
+                None if type(ch).__name__ == "InputChannelEmpty" else self._resolve(w, ch)[1])
+            save(w)
+            self._count(name)
+            return True
+        if name == "UpdateProfileRequest":
+            if getattr(req, "about", None) is not None:
+                w["accounts"][self.acc["id"]]["about"] = req.about
+                save(w)
+            self._count(name, B_ENTITY)
             return SimpleNamespace()
         if name == "ImportContactsRequest":
             self._count(name, B_ENTITY)

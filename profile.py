@@ -14,12 +14,87 @@
     python profile.py --account a1 --photo /путь/avatar.jpg
     python profile.py --account a1 --drop-photos        # убрать все старые фото
     python profile.py --account a1                       # просто показать, что сейчас
+
+Канал-прокладка — свой маленький публичный канал аккаунта, поставленный в профиль
+(«канал в профиле» бесплатен всем, но только СВОЙ канал). В нём закреплённый пост со
+ссылкой на основной канал: человек открыл профиль → видит пост → переходит.
+
+    python profile.py --account a1 --channel-title "Недвижимость Екб" \
+        --channel-username ekb_notes_a1 --channel-post "Разборы квартир — t.me/+AbC"
+    python profile.py --account a1 --channel-post "новый текст"   # тот же канал, новый пост
+    python profile.py --account a1 --channel-off                  # убрать канал из профиля
 """
 import asyncio
 from pathlib import Path
 
 import tglib
 from tglib import say
+
+
+async def bridge_channel(client, acc, title, username, post):
+    """
+    Канал-прокладка: создать (или взять уже созданный этим аккаунтом), дать
+    публичный ник, выложить и закрепить пост со ссылкой, поставить в профиль.
+    Повторный вызов с одним постом — тот же канал, новый закреплённый пост.
+    """
+    from telethon import functions, types
+    from telethon.errors import (UsernameOccupiedError, UsernameInvalidError, UserRestrictedError,
+                                 ChannelsAdminPublicTooMuchError, ChannelsTooMuchError, FloodWaitError)
+    ch = None
+    if acc.get("channelId"):
+        try:
+            ch = await client.get_entity(types.PeerChannel(int(acc["channelId"])))
+        except Exception:
+            ch = None
+            say("прежний канал аккаунта не нашёлся — создам новый")
+    try:
+        if ch is None:
+            if not title:
+                say("✗ канала ещё нет — нужно название (--channel-title)")
+                return False
+            res = await client(functions.channels.CreateChannelRequest(
+                title=title, about="", broadcast=True))
+            ch = res.chats[0]
+            tglib.set_field(acc["id"], channelId=ch.id, channelTitle=title)
+            say(f"✓ канал создан: «{title}»")
+        elif title and title != acc.get("channelTitle"):
+            await client(functions.channels.EditTitleRequest(channel=ch, title=title))
+            tglib.set_field(acc["id"], channelTitle=title)
+            say(f"✓ название канала: «{title}»")
+
+        if username and username.lstrip("@") != (getattr(ch, "username", None) or acc.get("channel") or ""):
+            u = username.lstrip("@")
+            if not await client(functions.channels.CheckUsernameRequest(channel=ch, username=u)):
+                say(f"✗ @{u} занят или не подходит — канал остался без ника, в профиль не ставлю")
+                return True
+            await client(functions.channels.UpdateUsernameRequest(channel=ch, username=u))
+            tglib.set_field(acc["id"], channel=u)
+            say(f"✓ ник канала: @{u}")
+        if not (getattr(ch, "username", None) or tglib.resolve(acc["id"]).get("channel")):
+            say("✗ у канала нет публичного ника — в профиль Telegram ставит только публичный")
+            return True
+
+        if post:
+            m = await client.send_message(ch, post, link_preview=True)
+            await client(functions.messages.UpdatePinnedMessageRequest(peer=ch, id=m.id, silent=True))
+            say("✓ пост выложен и закреплён")
+
+        await client(functions.account.UpdatePersonalChannelRequest(channel=ch))
+        tglib.set_field(acc["id"], channelOn=True, channelAt=tglib.now_iso())
+        say("✓ канал стоит в профиле: открыли профиль — видят пост")
+        return True
+    except UserRestrictedError:
+        say("✗ Telegram не даёт создавать каналы, пока аккаунт под ограничением SpamBot — "
+            "сделай это после снятия")
+    except ChannelsAdminPublicTooMuchError:
+        say("✗ у аккаунта уже предел публичных каналов — освободи ник у старого")
+    except ChannelsTooMuchError:
+        say("✗ у аккаунта предел каналов и групп")
+    except (UsernameOccupiedError, UsernameInvalidError):
+        say(f"✗ ник @{username} не подошёл: 5–32 знака, латиница, цифры и _, не занят")
+    except FloodWaitError:
+        raise
+    return False
 
 
 async def main():
@@ -30,6 +105,10 @@ async def main():
     username = tglib.arg("username")
     photo = tglib.arg("photo")
     drop_photos = tglib.flag("drop-photos")
+    ch_title = tglib.arg("channel-title")
+    ch_user = tglib.arg("channel-username")
+    ch_post = tglib.arg("channel-post")
+    ch_off = tglib.flag("channel-off")
 
     from telethon import functions, types
     from telethon.errors import (UsernameOccupiedError, UsernameInvalidError,
@@ -54,6 +133,8 @@ async def main():
                 kw["about"] = about
             await client(functions.account.UpdateProfileRequest(**kw))
             say("✓ имя/описание обновлены")
+            if about is not None:
+                tglib.set_field(acc["id"], about=about)     # панель покажет его в меню
             changed = True
 
         if username is not None:
@@ -91,6 +172,14 @@ async def main():
                 await client(functions.photos.UploadProfilePhotoRequest(file=f))
                 say(f"✓ аватарка поставлена ({p.name})")
                 changed = True
+
+        if ch_off:
+            await client(functions.account.UpdatePersonalChannelRequest(channel=types.InputChannelEmpty()))
+            tglib.set_field(acc["id"], channelOn=False)
+            say("✓ канал убран из профиля (сам канал остался)")
+            changed = True
+        elif ch_title or ch_user or ch_post:
+            changed = await bridge_channel(client, acc, ch_title, ch_user, ch_post) or changed
 
         if changed:
             me = await client.get_me()

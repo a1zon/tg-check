@@ -54,6 +54,14 @@ def now_iso():
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
+def extras_for(extras, row):
+    """Строка из таблицы кастомных полей (extras.csv) для этого человека, или {}."""
+    key = (row.get("phone") or "").strip()
+    user = row.get("username") or ""
+    return (extras.get(key) or extras.get(key.lstrip("@"))
+            or extras.get("@" + user) or extras.get(user) or {})
+
+
 def compose(tpl, row, extras=None, extra_cols=None):
     """
     Текст письма для конкретного человека.
@@ -78,9 +86,7 @@ def compose(tpl, row, extras=None, extra_cols=None):
               .replace("{username}", f"@{user}" if user else "")
               .replace("{LINK}", link).replace("{link}", link))
     if extras and extra_cols:
-        key = (row.get("phone") or "").strip()
-        ex = (extras.get(key) or extras.get(key.lstrip("@"))
-              or extras.get("@" + user) or extras.get(user) or {})
+        ex = extras_for(extras, row)
         for c in extra_cols:
             out = out.replace("{" + c + "}", ex.get(c, ""))
     return out
@@ -198,39 +204,6 @@ async def main():
     if moved:
         say(f"лог черновиков переведён на новый формат ({moved} строк)")
 
-    # одному человеку пишем один раз — с любого из аккаунтов. Неудачные попытки
-    # (ok=false) не считаются: до них дело не дошло, номер вернётся в очередь.
-    # Голосовое учитываем тоже: уже написанному или озвученному повторно не шлём.
-    log = tglib.read_csv(tglib.DRAFTS)
-    # skip — давно не заходил в Telegram: решено навсегда, как и «написали»
-    already = {r["phone"] for r in log
-               if r.get("ok") in ("true", "skip") or r.get("sent") == "true"}
-    # номер, который не вышло обработать MAX_TRIES раз, откладываем: иначе
-    # автопрогон брал бы его снова и снова и стоял бы на месте
-    tries = tglib.tries_by_phone(log, already)
-    queue = [r for r in tglib.read_csv(tglib.RESULTS)
-             if r.get("tg") == "true" and r["phone"] not in already
-             and tries.get(r["phone"], 0) < MAX_TRIES
-             and tglib.can_write(r, acc["id"])]
-    # сначала — те, кого этот аккаунт сам нашёл и держит в контактах: им писать
-    # без новой траты квоты, и держать их в книжке дольше незачем
-    # дальше — люди из самых близких к теме чатов (ипотека, недвижимость,
-    # инвестиции), потом из чатов ЖК, остальное — в конце (chat-priority.txt)
-    rank, chat_of_all = tglib.chat_rank_fn(), tglib.chat_of_members() if tglib.SET == "chats" else {}
-    queue.sort(key=lambda r: (not (r.get("kept") == "1" and r.get("by") == acc["id"]),
-                              rank(chat_of_all.get(r["phone"], "")) if chat_of_all else 0))
-    mine = set(claims.take(acc["id"], "draft", [r["phone"] for r in queue], limit))
-    todo = [r for r in queue if r["phone"] in mine]
-
-    atexit.register(lambda: claims.release_all(acc["id"], "draft"))
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        signal.signal(sig, lambda *_: sys.exit(1))
-
-    tglib.ensure_head(tglib.DRAFTS, tglib.DRAFTS_HEAD)
-    say(f"черновиков к раскладке: {len(todo)}")
-    if not todo:
-        tglib.state(done=0, left=len(queue))
-        return
     # сборный текст важнее одиночного: включили блоки — значит, письма должны
     # общий текст может вовсе отсутствовать (кампания только «по чатам» — у неё
     # свой message-chat.txt). Тогда tpl пустой, а собранным из чатов уйдёт их текст.
@@ -249,17 +222,78 @@ async def main():
         pass
     if tpl_chat:
         say("для собранных из чатов — отдельный текст (база из файла получает свой)")
-    # название чата, где нашли человека, — для подстановки {chat}
-    chat_of = tglib.chat_of_members() if "{chat}" in (tpl_chat or tpl) else {}
     # кастомные поля из таблицы ({brand}, {lpr}…) — extras.csv рядом с данными
     extras, extra_cols = tglib.extras_of()
     if extra_cols:
         say(f"кастомные поля для подстановки: {', '.join('{' + c + '}' for c in sorted(extra_cols))}")
+    # запасной текст для чатов — тем, у кого нет полей таблицы для основного
+    tpl_plain = ""
+    if tglib.MESSAGE_CHAT_PLAIN.exists():
+        tpl_plain = tglib.fix_placeholders(tglib.MESSAGE_CHAT_PLAIN.read_text("utf-8").strip())
+    # колонки таблицы, на которых держится текст для чатов ({brand}…): нет их у
+    # человека — уходит запасной текст, а нет и его — такому не пишем вовсе,
+    # чтобы не ушло «Нашёл  на маркетплейсе» с дыркой вместо бренда
+    need_cols = [c for c in (extra_cols or ()) if "{" + c + "}" in tpl_chat]
+
+    def pick_tpl(row):
+        """Какой текст уйдёт этому человеку; \"\" — писать ему нечем."""
+        if not (tpl_chat and not tglib.is_phone(row["phone"])):
+            return tpl
+        if need_cols:
+            ex = extras_for(extras, row)
+            if not all(ex.get(c) for c in need_cols):
+                return tpl_plain
+        return tpl_chat
+
+    # название чата, где нашли человека, — для подстановки {chat}
+    chat_of = (tglib.chat_of_members()
+               if any("{chat}" in t for t in (tpl_chat or tpl, tpl_plain)) else {})
+
+    # одному человеку пишем один раз — с любого из аккаунтов. Неудачные попытки
+    # (ok=false) не считаются: до них дело не дошло, номер вернётся в очередь.
+    # Голосовое учитываем тоже: уже написанному или озвученному повторно не шлём.
+    log = tglib.read_csv(tglib.DRAFTS)
+    # skip — давно не заходил в Telegram: решено навсегда, как и «написали»
+    already = {r["phone"] for r in log
+               if r.get("ok") in ("true", "skip") or r.get("sent") == "true"}
+    # номер, который не вышло обработать MAX_TRIES раз, откладываем: иначе
+    # автопрогон брал бы его снова и снова и стоял бы на месте
+    tries = tglib.tries_by_phone(log, already)
+    queue = [r for r in tglib.read_csv(tglib.RESULTS)
+             if r.get("tg") == "true" and r["phone"] not in already
+             and tries.get(r["phone"], 0) < MAX_TRIES
+             and tglib.can_write(r, acc["id"])]
+    nothing = sum(1 for r in queue if not pick_tpl(r))
+    if nothing:
+        say(f"без текста (нет бренда и нет запасного текста для чатов): {nothing} — им не пишу")
+        queue = [r for r in queue if pick_tpl(r)]
+    # сначала — те, кого этот аккаунт сам нашёл и держит в контактах: им писать
+    # без новой траты квоты, и держать их в книжке дольше незачем
+    # дальше — люди из самых близких к теме чатов (ипотека, недвижимость,
+    # инвестиции), потом из чатов ЖК, остальное — в конце (chat-priority.txt)
+    rank, chat_of_all = tglib.chat_rank_fn(), tglib.chat_of_members() if tglib.SET == "chats" else {}
+    # самые первые — из списка «писать в первую очередь» (queue-first.txt), в его порядке
+    first = tglib.queue_first()
+    queue.sort(key=lambda r: (first.get(r["phone"].lower(), len(first)),
+                              not (r.get("kept") == "1" and r.get("by") == acc["id"]),
+                              rank(chat_of_all.get(r["phone"], "")) if chat_of_all else 0))
+    mine = set(claims.take(acc["id"], "draft", [r["phone"] for r in queue], limit))
+    todo = [r for r in queue if r["phone"] in mine]
+
+    atexit.register(lambda: claims.release_all(acc["id"], "draft"))
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(sig, lambda *_: sys.exit(1))
+
+    tglib.ensure_head(tglib.DRAFTS, tglib.DRAFTS_HEAD)
+    say(f"черновиков к раскладке: {len(todo)}")
+    if not todo:
+        tglib.state(done=0, left=len(queue))
+        return
 
     # Подстановку, которой рассылка не знает, человек получил бы как есть — с
     # фигурными скобками. Такой текст не шлём вовсе: проверяем те шаблоны, что
     # уйдут в этот заход, до подключения к Telegram
-    used = {tpl_chat if (tpl_chat and not tglib.is_phone(r["phone"])) else tpl for r in todo}
+    used = {pick_tpl(r) for r in todo}
     bad = sorted({b for t in used for b in tglib.bad_placeholders(t, tglib.PH_KNOWN + tuple(extra_cols or ()))})
     if bad:
         say("стоп: в тексте письма непонятные подстановки: " + ", ".join(bad) +
@@ -329,7 +363,7 @@ async def main():
             phone = row["phone"]                      # ключ: номер, @username или id:
             label = phone[-10:] if tglib.is_phone(phone) else phone
             # база из xlsx (номер) — общий текст; собранные из чатов — свой, если задан
-            use_tpl = tpl_chat if (tpl_chat and not tglib.is_phone(phone)) else tpl
+            use_tpl = pick_tpl(row)
             text = ""
             good, sent_flag = False, ""
             imported = False          # клали ли контакт в адресную книгу

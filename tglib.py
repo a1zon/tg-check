@@ -50,6 +50,10 @@ WARM_LIST = DIR / "warm-list.json"           # куда прогрев их во
 WARM_LIST_DEFAULT = CODE / "warm-list.default.json"  # образец, приезжает с кодом
 MESSAGE = DIR / "message.txt"
 MESSAGE_CHAT = DIR / "message-chat.txt"  # отдельный текст для собранных из чатов
+# запасной текст для чатов — тем, у кого нет полей таблицы, на которых держится
+# основной (нет бренда для {brand}): иначе ушло бы «Нашёл  на маркетплейсе»
+MESSAGE_CHAT_PLAIN = DIR / "message-chat-plain.txt"
+QUEUE_FIRST = DIR / "queue-first.txt"   # кому писать раньше всех: ключ на строку, по порядку
 EXTRAS = DIR / "extras.csv"   # кастомные поля под сообщение: ключ человека → колонки
 PARTS = DIR / "message-parts.json"   # сборный текст: приветствие + суть + призыв
 MIRROR = DIR / "mirror.json"         # текущий субдомен-зеркало для {LINK}
@@ -1111,6 +1115,20 @@ def chat_rank_fn():
         low = str(title or "").lower()
         return next((i for i, words in enumerate(levels) if any(hit(w, low) for w in words)), len(levels))
     return rank
+
+
+def queue_first():
+    """Кому писать раньше всех (queue-first.txt): ключ без регистра → место в списке."""
+    try:
+        lines = QUEUE_FIRST.read_text("utf-8").splitlines()
+    except Exception:
+        return {}
+    out = {}
+    for ln in lines:
+        k = ln.split("#", 1)[0].strip().lower()
+        if k and k not in out:
+            out[k] = len(out)
+    return out
 
 
 def chat_of_members():

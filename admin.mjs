@@ -3349,6 +3349,8 @@ async function handler(req, res) {
       const file = path.join(DIR,
         u.searchParams.get('second') ? 'message2.txt'
         : aud === 'chat' ? 'message-chat.txt'
+        // запасной для чатов — тем, у кого нет полей таблицы (бренда) для основного
+        : aud === 'chat-plain' ? 'message-chat-plain.txt'
         : 'message.txt');
       if (req.method !== 'POST') {
         return json(res, 200, { text: fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '' });
@@ -3356,14 +3358,15 @@ async function handler(req, res) {
       const { text } = await body(req);
       const clean = fixPlaceholders(String(text ?? '').replace(/\r\n/g, '\n')).trim();
       // текст для чатов можно очистить — это значит «слать им общий текст»
-      if (!clean && aud !== 'chat') return json(res, 200, { ok: false, reason: 'текст не может быть пустым' });
+      if (!clean && aud !== 'chat' && aud !== 'chat-plain') return json(res, 200, { ok: false, reason: 'текст не может быть пустым' });
       // предел одного сообщения в Telegram — 4096 символов; с запасом на подстановки
       if (clean.length > 3900) {
         return json(res, 200, { ok: false, reason: `слишком длинно: ${clean.length} символов, можно до 3900` });
       }
       fs.writeFileSync(file, clean ? clean + '\n' : '');
       const label = u.searchParams.get('second') ? 'второго письма'
-        : aud === 'chat' ? 'сообщения для собранных из чатов' : 'сообщения';
+        : aud === 'chat' ? 'сообщения для собранных из чатов'
+        : aud === 'chat-plain' ? 'запасного сообщения для чатов (без бренда)' : 'сообщения';
       push(`\n✎ текст ${label} изменён (${clean.length} символов)`);
       return json(res, 200, { ok: true, text: clean });
     }

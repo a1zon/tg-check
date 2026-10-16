@@ -2,7 +2,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Telegram — панель</title>
-<link rel="stylesheet" href="/app.css?v=r90">
+<link rel="stylesheet" href="/app.css?v=r91">
 <div class="app">
 
   <!-- ЛЕВАЯ ПАНЕЛЬ РЕЖИМОВ -->
@@ -475,6 +475,17 @@
                 <span id="msg-chat-note" class="hint"></span>
               </div>
             </div>
+            <div class="fieldset" style="margin-top:12px" id="msg-plain-box">
+              <div class="fh">✍️ Тем, у кого нет бренда</div>
+              <p class="hint" style="margin:0 0 10px">Если в тексте выше есть поле из таблицы ({brand} и т.п.), а у человека его нет —
+                уйдёт этот текст. Пусто — таким людям не пишем вовсе. Подстановки {name} {username} {chat} {LINK}.</p>
+              <textarea id="msg-plain" spellcheck="true"
+                placeholder="{Здравствуйте|Добрый день}! Увидел вас в чате «{chat}». …"></textarea>
+              <div class="msgbar">
+                <button class="ghost mini" id="msg-plain-save">Сохранить запасной текст</button>
+                <span id="msg-plain-note" class="hint"></span>
+              </div>
+            </div>
       </div>
 
       <div class="card" style="margin-top:14px">
@@ -644,4 +655,4 @@
 
   </main>
 </div>
-<script src="/app.js?v=r90"></script>
+<script src="/app.js?v=r91"></script>

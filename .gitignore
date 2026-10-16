@@ -85,3 +85,5 @@ asocks.json
 asocks-usage.jsonl
 traffic.csv
 asocks-ports.json
+message-chat-plain.txt
+queue-first.txt

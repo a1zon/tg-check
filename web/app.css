@@ -168,10 +168,10 @@ th{color:var(--mut);font-weight:500;font-size:12px}
 .st-no{background:var(--no);color:#fff}
 .st-run{background:var(--acc)}
 
-#msg,#msg-chat{width:100%;box-sizing:border-box;min-height:96px;resize:vertical;padding:10px 12px;
+#msg,#msg-chat,#msg-plain{width:100%;box-sizing:border-box;min-height:96px;resize:vertical;padding:10px 12px;
      border:1px solid var(--line);border-radius:10px;background:rgba(8,16,40,.4);color:var(--ink);
      font:13px/1.6 -apple-system,system-ui,"Segoe UI",Roboto,sans-serif}
-#msg:focus,#msg-chat:focus{outline:0;border-color:var(--acc)}
+#msg:focus,#msg-chat:focus,#msg-plain:focus{outline:0;border-color:var(--acc)}
 .aud-tag{display:inline-block;margin:0 0 8px;font-size:12px;font-weight:600;padding:4px 11px;
   border-radius:20px;background:rgba(90,162,255,.14);color:#cfe1ff;border:1px solid var(--glass-brd)}
 .aud-tag.chat{background:rgba(70,209,138,.14);color:#a8ecc8;border-color:rgba(70,209,138,.32)}

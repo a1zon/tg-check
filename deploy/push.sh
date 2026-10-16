@@ -85,6 +85,7 @@ EXCLUDES=(
   './chats.json' './base.json' './replies.json' './stats-cache.json'
   './voice.ogg' './voice.json' './followup.csv' './warmup.csv' './warmup.json'
   './message-parts.json' './message.txt' './message2.txt' './message-chat.txt'
+  './message-chat-plain.txt' './queue-first.txt'
   './warm-list.json' './chat-priority.txt'
   './leads.json' './leads-log.csv' './leads-tpl.txt' './lead-chats.txt' './leads-sheet.txt'
   './mirror.json' './mirror-names.txt'
@@ -105,7 +106,7 @@ DATA_GUARD=(
   accounts.json auth.json claims.json claims.lock cloud.json
   numbers.csv results.csv drafts.csv members.csv chats.json base.json replies.json
   stats-cache.json voice.ogg voice.json followup.csv warmup.csv warmup.json
-  message-parts.json message.txt message2.txt message-chat.txt
+  message-parts.json message.txt message2.txt message-chat.txt message-chat-plain.txt queue-first.txt
   warm-list.json chat-priority.txt
   leads.json leads-log.csv leads-tpl.txt lead-chats.txt leads-sheet.txt
   mirror.json mirror-names.txt profiles.json router.json

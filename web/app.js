@@ -767,10 +767,22 @@ const message = async () => {
     // отдельный текст для собранных из чатов (может быть пустым)
     try { const dc = await (await fetch('/api/message?aud=chat')).json();
           if ($('#msg-chat')) $('#msg-chat').value = (dc.text || '').trim(); } catch {}
+    // запасной текст для чатов — тем, у кого нет бренда
+    try { const dp = await (await fetch('/api/message?aud=chat-plain')).json();
+          if ($('#msg-plain')) $('#msg-plain').value = (dp.text || '').trim(); } catch {}
     msgLoaded = true;
     msgPreview();
   } catch {}
 };
+
+$('#msg-plain-save')?.addEventListener('click', async () => {
+  const r = await post('/api/message?aud=chat-plain', {text: $('#msg-plain').value});
+  const note = $('#msg-plain-note');
+  if (!r.ok) { if (note) note.textContent = r.reason || 'не удалось сохранить'; return; }
+  $('#msg-plain').value = r.text;
+  if (note) note.textContent = 'сохранено в ' + new Date().toTimeString().slice(0, 5) +
+    ((r.text || '').trim() ? '' : ' · пусто — людям без бренда не пишем');
+});
 
 $('#msg-chat-save')?.addEventListener('click', async () => {
   const r = await post('/api/message?aud=chat', {text: $('#msg-chat').value});

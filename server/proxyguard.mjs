@@ -26,7 +26,9 @@ const EVERY_OK = 10 * 60_000;  // прокси жив — проверяем р�
 const EVERY_DOWN = 30_000;     // лежит — чаще, чтобы не прозевать подъём
 const DOWN_AFTER = 2;          // столько неудач подряд — значит лежит, а не моргнул
 const REVIVE_EVERY = 5 * 60_000;
-const PROBE_URL = 'http://api.ipify.org';
+// ipinfo по http: кроме IP отдаёт страну — по ней панель замечает, что своя строка «уехала»
+// из Казахстана (16.10 одна такая сессия вышла из Колумбии)
+const PROBE_URL = 'http://ipinfo.io/json';
 const PROBE_TIMEOUT = 15;
 
 /** Что значит ответ шлюза — словами, которые помогают понять, куда смотреть. */
@@ -68,9 +70,21 @@ export function makeProxyGuard({ parseProxy, label, proxies, rotateLink, rotateI
       c.on('close', (exit) => {
         const lines = out.trim().split('\n');
         const [code, connect] = (lines.pop() || '').split(' ');
-        const ip = lines.join('').trim();
-        if (exit === 0 && code === '200' && /^[\d.:a-f]+$/i.test(ip)) return done({ ok: true, ip });
-        // по http ошибку шлюза (502/407) прокси отдаёт кодом ответа, а не CONNECT
+        const body = lines.join('').trim();
+        let ip = '', country = '';
+        try { const j = JSON.parse(body); ip = String(j.ip || ''); country = String(j.country || ''); } catch { ip = body; }
+        // Падение — это когда не достучались до САМОГО прокси: curl не завершился
+        // (таймаут/отказ), шлюз не принял логин (407) или модем не в сети (502/503).
+        // А вот если сайт ОТВЕТИЛ любым кодом (в т.ч. 429 rate-limit по общему
+        // мобильному IP) — прокси работает, его трогать нельзя (иначе встанет
+        // прогон и сторож зря сменит строку). IP/страну берём только из 200+JSON.
+        const GW_DOWN = ['407', '502', '503', '504'];   // шлюз/модем прокси не отработал
+        const proxyBad = exit !== 0 || GW_DOWN.includes(connect) || GW_DOWN.includes(code) || code === '000';
+        // сайт ответил нормальным кодом (200, а также 429 rate-limit, 403, 404…) —
+        // значит прокси ДОВЁЛ запрос, он живой; IP/страну берём только из 200+JSON
+        if (!proxyBad && /^[234]\d\d$/.test(code || '')) {
+          return done(code === '200' && /^[\d.:a-f]+$/i.test(ip) ? { ok: true, ip, country } : { ok: true });
+        }
         done({ ok: false, reason: why(connect && connect !== '000' ? connect : code, exit) });
       });
     });
@@ -92,7 +106,9 @@ export function makeProxyGuard({ parseProxy, label, proxies, rotateLink, rotateI
           const lay = Math.round((Date.now() - s.since) / 60_000);
           note('✅', `прокси снова работает (IP ${r.ip}) — лежал ${lay} мин, продолжаю`);
         }
-        Object.assign(s, { down: false, fails: 0, ip: r.ip, reason: '', since: Date.now() });
+        // при «живой, но без свежего IP» (сайт отдал 429) прежние ip/страну не теряем
+        Object.assign(s, { down: false, fails: 0, reason: '', since: Date.now() });
+        if (r.ip) { s.ip = r.ip; s.country = r.country || ''; s.ipAt = Date.now(); }
         return true;
       }
       s.fails++;
@@ -135,6 +151,8 @@ export function makeProxyGuard({ parseProxy, label, proxies, rotateLink, rotateI
     check,
     /** Лежит ли прокси этого аккаунта прямо сейчас. */
     down: (raw) => !!raw && !!st.get(raw)?.down,
+    /** Что сторож видел на этом прокси последним: IP и страна выхода. */
+    info: (raw) => { const s = raw && st.get(raw); return s ? { ip: s.ip, country: s.country || '', down: !!s.down, ipAt: s.ipAt || 0 } : {}; },
     /** Для шапки панели: без паролей. */
     summary: () => [...new Set(proxies())].map((raw) => {
       const s = stateOf(raw);

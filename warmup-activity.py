@@ -701,8 +701,11 @@ async def main():
         return
 
     # одобренный в панели комментарий уже посчитан (когда встал в очередь) —
-    # отправляем его первым делом, мимо суточного предела
-    approved = ccfg["on"] and comments.has_approved(acc["id"])
+    # отправляем его первым делом, мимо суточного предела. НО только если
+    # комментарии этому аккаунту вообще положены сейчас (cap>0): иначе
+    # аккаунт, получивший ограничение после постановки в очередь, опубликовал
+    # бы одобренный комментарий в обход запрета.
+    approved = ccfg["on"] and cap.get("comment", 0) > 0 and comments.has_approved(acc["id"])
     if approved and want in ("", "comment"):
         want = "comment"
         left["comment"] = max(1, left.get("comment", 0))

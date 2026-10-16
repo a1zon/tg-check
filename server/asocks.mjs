@@ -123,5 +123,25 @@ export function makeAsocks({ dir }) {
     return list;
   }
 
-  return { snapshot, summary, search, enabled: () => !!key() };
+  /**
+   * Основа для своих строк: логин кабинета (часть до «-pool»), пароль и порт —
+   * из шаблона любого порта; id регионов страны — из справочника. Из этого
+   * собирается строка «страна + регион + своя сессия» (server/ownproxy.mjs).
+   */
+  async function sessionBase(country = 'KZ') {
+    if (!key()) throw new Error('Asocks не подключён: на сервере нет ключа API');
+    const pr = await get('v2/proxy/ports');
+    const t = ((pr.message || {}).proxies || []).map((x) => x.template).find((s) => /-pool-/.test(s || ''));
+    const m = t && /^\w+:\/\/([^:]+?)-pool[^:]*:([^@]+)@[^:]+:(\d+)/.exec(t);
+    if (!m) throw new Error('в кабинете Asocks нет ни одного порта — не из чего собрать строку');
+    const cs = await get('v2/dir/countries');
+    const list = Array.isArray(cs) ? cs : (cs.countries || cs.message || []);
+    const c = (Array.isArray(list) ? list : []).find((x) => String(x.code || '').toUpperCase() === country);
+    if (!c) throw new Error(`Asocks не знает страну ${country}`);
+    const st = await get(`v2/dir/states?countryId=${c.id}`);
+    const states = (Array.isArray(st) ? st : (st.states || st.message || [])).filter((x) => x && x.id && x.name);
+    return { user: m[1], password: m[2], port: m[3], country, states: states.map((x) => ({ id: x.id, name: x.name })) };
+  }
+
+  return { snapshot, summary, search, sessionBase, enabled: () => !!key() };
 }

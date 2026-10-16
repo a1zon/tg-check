@@ -53,7 +53,7 @@ import { makeProxyGuard } from './server/proxyguard.mjs';
 import * as desktop from './server/desktop.mjs';
 import { buildKit, buildPult, kitProxy } from './server/kit.mjs';
 import { makeAsocks, ASOCKS_EVERY } from './server/asocks.mjs';
-import { makeOwnProxy, ASOCKS_GATEWAY } from './server/ownproxy.mjs';
+import { makeOwnProxy, ASOCKS_GATEWAY, OWN_COUNTRY } from './server/ownproxy.mjs';
 import { makeLlmUsage, LLM_EVERY } from './server/llmusage.mjs';
 import * as vercel from './server/vercel.mjs';
 
@@ -249,7 +249,7 @@ const ownProxy = makeOwnProxy({
     accounts.setProxy(id, raw);
     accounts.setField(id, { proxyPrev: prev, proxyOwn: true });
   },
-  note: (a, got) => push(`   «${a.title}» → свой IP ${got.ip} (${got.org || got.country})`),
+  note: (a, got, region) => push(`   «${a.title}» → свой IP ${got.ip} (${region}${got.city && got.city !== region ? ', ' + got.city : ''}, ${got.org || got.country})`),
 });
 if (DIR === CODE) {
   let lastErr = '';
@@ -272,24 +272,69 @@ if (DIR === CODE) {
  * и стоял бы, пока человек не нажмёт кнопку. Теперь: лежит своя сессия дольше
  * 5 минут — панель выдаёт этому аккаунту новую (та же проверка, что у кнопки).
  */
-const OWN_DEAD_AFTER = 5 * 60_000;
-const ownDownSince = new Map();
+const OWN_DEAD_AFTER = 5 * 60_000;       // лежит столько — меняем строку
+const OWN_REPLACE_GAP = 60 * 60_000;     // не чаще раза в час на аккаунт — чтобы не гонять по кругу
+const OWN_INFO_FRESH = 15 * 60_000;      // данные сторожа считаем свежими столько (проверка раз в 10 мин)
+const ownDownSince = new Map();          // id -> когда впервые увидели, что лежит
+const ownLastReplace = new Map();        // id -> когда последний раз меняли (анти-флап)
+const ownDupSince = new Map();           // id -> с какого момента держится дубль IP (нужно 2 проверки подряд)
 setInterval(() => {
   if (!asocks.enabled() || ownProxy.busy()) return;
-  const dead = [];
+  const own = accounts.list().filter((a) => a.proxyOwn && accounts.hasSession(a));
+  if (own.length < 2) return;
+  // Если лежит больше половины своих строк — это сбой самого шлюза Asocks или
+  // кончился баланс, а не 9 отдельных поломок. Менять всё разом нельзя: после
+  // подъёма шлюза Telegram увидел бы, как все сессии разом переехали. Ждём.
+  const downN = own.filter((a) => proxyGuard.down(a.proxy)).length;
+  if (downN > own.length / 2) return;   // тихо ждём: шлюз/баланс, а не 9 поломок
+  const now = Date.now();
+  const bad = new Map();                               // id -> почему меняем
+  const canReplace = (id) => now - (ownLastReplace.get(id) || 0) >= OWN_REPLACE_GAP;
+  // 1) лежит дольше OWN_DEAD_AFTER
   for (const a of accounts.list()) {
     if (!a.proxyOwn || !accounts.hasSession(a) || !proxyGuard.down(a.proxy)) { ownDownSince.delete(a.id); continue; }
-    if (!ownDownSince.has(a.id)) ownDownSince.set(a.id, Date.now());
-    else if (Date.now() - ownDownSince.get(a.id) >= OWN_DEAD_AFTER) dead.push(a);
+    if (!ownDownSince.has(a.id)) ownDownSince.set(a.id, now);
+    else if (now - ownDownSince.get(a.id) >= OWN_DEAD_AFTER && canReplace(a.id)) bad.set(a.id, 'лежит 5+ минут');
   }
-  if (!dead.length) return;
-  push(`\n🌐 своя сессия Asocks лежит 5+ минут у ${dead.map((a) => a.title).join(', ')} — выдаю новую`);
-  ownProxy.assign({ ids: dead.map((a) => a.id), country: 'KZ' }).then((r) => {
-    for (const x of r) ownDownSince.delete(x.id);
+  // 2) жива, но «уехала» из страны — по СВЕЖИМ данным сторожа
+  for (const a of own) {
+    const i = proxyGuard.info(a.proxy);
+    if (i.down || !i.ip || now - (i.ipAt || 0) > OWN_INFO_FRESH) continue;
+    if (i.country && i.country !== OWN_COUNTRY && canReplace(a.id)) bad.set(a.id, `выход из ${i.country}`);
+  }
+  // 3) тот же IP, что у соседа — только если у ОБОИХ данные свежие и дубль держится
+  //    две проверки подряд (мобильный CGNAT даёт короткие случайные совпадения)
+  const byIp = new Map();
+  for (const a of own) {
+    const i = proxyGuard.info(a.proxy);
+    if (i.down || !i.ip || now - (i.ipAt || 0) > OWN_INFO_FRESH) continue;
+    if (byIp.has(i.ip)) {
+      const b = byIp.get(i.ip);
+      const key = [a.id, b.id].sort().join('|');
+      if (!ownDupSince.has(key)) ownDupSince.set(key, now);
+      else if (now - ownDupSince.get(key) >= 60_000) {   // держится ≥ минуты (2 тика)
+        if (canReplace(a.id)) bad.set(a.id, `тот же IP, что у ${b.title}`);
+      }
+    } else byIp.set(i.ip, a);
+  }
+  // чистим ключи дублей, которых больше нет
+  const liveIps = new Set(own.map((a) => proxyGuard.info(a.proxy).ip).filter(Boolean));
+  for (const key of [...ownDupSince.keys()]) {
+    const [x, y] = key.split('|');
+    const ix = proxyGuard.info((own.find((a) => a.id === x) || {}).proxy).ip;
+    const iy = proxyGuard.info((own.find((a) => a.id === y) || {}).proxy).ip;
+    if (!ix || ix !== iy || !liveIps.has(ix)) ownDupSince.delete(key);
+  }
+  if (!bad.size) return;
+  const list = own.filter((a) => bad.has(a.id));
+  push(`\n🌐 своя строка Asocks под замену: ${list.map((a) => `${a.title} (${bad.get(a.id)})`).join(', ')}`);
+  for (const a of list) ownLastReplace.set(a.id, now);   // ставим ДО запуска, чтобы не задвоить
+  ownProxy.assign({ ids: list.map((a) => a.id), country: OWN_COUNTRY }).then((r) => {
+    for (const x of r) { ownDownSince.delete(x.id); if (!x.ok) ownLastReplace.delete(x.id); }
     const ok = r.filter((x) => x.ok).length;
-    events.note('🌐', `замена умерших сессий Asocks: ${ok} из ${r.length}` +
-      (ok < r.length ? ' — ' + r.filter((x) => !x.ok).map((x) => x.why).join('; ') : ''));
-  }).catch((e) => push(`🌐 замена сессии не удалась: ${e.message}`));
+    events.note('🌐', `замена своих строк Asocks: ${ok} из ${r.length} (${[...new Set(list.map((a) => bad.get(a.id)))].join('; ')})` +
+      (ok < r.length ? ' — не вышло: ' + r.filter((x) => !x.ok).map((x) => x.why).join('; ') : ''));
+  }).catch((e) => push(`🌐 замена строки не удалась: ${e.message}`));
 }, 60_000);
 
 // «За что ушёл трафик»: каждая задача пишет свой объём в traffic.csv (tglib).
@@ -3352,7 +3397,7 @@ async function handler(req, res) {
         for (const one of ids) {
           // строка у всех одна, поэтому первая же ошибка — общая: незачем
           // повторять её столько раз, сколько заведено аккаунтов
-          try { accounts.setProxy(one, proxy); }
+          try { accounts.setProxy(one, proxy); accounts.setField(one, { proxyOwn: false }); }
           catch (e) { return json(res, 200, { ok: false, reason: e.message }); }
         }
         push(`⚙ прокси ${accounts.proxyLabel(proxy)} поставлен всем аккаунтам (${ids.length})`);
@@ -3362,6 +3407,9 @@ async function handler(req, res) {
       }
       try {
         const ok = accounts.setProxy(id, proxy);
+        // руками поставили строку — она больше не «своя» от раздачи: сторож
+        // не должен её возвращать, и откат на общий прокси так работает
+        if (ok) accounts.setField(id, { proxyOwn: false });
         const acc = accounts.list().find((a) => a.id === id);
         const warn = accounts.proxyWarning(acc.proxy);
         if (ok) push(`⚙ «${acc.title}» ходит через: ${accounts.proxyLabel(acc.proxy)}`);
@@ -3381,10 +3429,11 @@ async function handler(req, res) {
       if (ownProxy.busy()) return json(res, 200, { ok: false, reason: 'раздача уже идёт — дождись её' });
       let list = accounts.list().filter((a) => accounts.hasSession(a));
       if (Array.isArray(ids) && ids.length) list = list.filter((a) => ids.includes(a.id));
-      if (down) list = list.filter((a) => !a.proxyOwn || proxyGuard.down(a.proxy));
+      // «2»: общий прокси, лежит или своя строка старого вида (готовая сессия без «-session-»)
+      if (down) list = list.filter((a) => !a.proxyOwn || proxyGuard.down(a.proxy) || !/-session-/.test(a.proxy || ''));
       if (!list.length) return json(res, 200, { ok: false, reason: down ? 'у всех уже свой живой IP' : 'нет вошедших аккаунтов' });
       const cc = /^[A-Z]{2}$/.test(String(country || '')) ? country : 'KZ';
-      push(`\n🌐 свой IP каждому: ${list.length} акк., мобильные сессии Asocks (${cc}) — проверяю по одной`);
+      push(`\n🌐 свой IP каждому: ${list.length} акк., своя постоянная строка Asocks (${cc}, регион + своя сессия) — проверяю по одной`);
       ownProxy.assign({ ids: list.map((a) => a.id), country: cc }).then((r) => {
         const ok = r.filter((x) => x.ok).length;
         push(`🌐 готово: свой IP у ${ok} из ${r.length}` + (ok < r.length

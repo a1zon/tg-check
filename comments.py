@@ -63,12 +63,13 @@ MIN_LEN = 15                   # короче — реакции и «ок», о
 READ_LIMIT = 40                # больше новых сообщений чата за заход не тянем
 SHINGLE_DUP = 0.5              # похожесть на прошлые комментарии, выше — повтор
 
-AD_RE = re.compile(r"(https?://|www\.|t\.me/|telegram\.me|@[a-z0-9_]{4,}|\+?\d[\d\s()-]{9,}\d)", re.I)
+DOMAIN = r"[a-z0-9\u0430-\u044f-]+\.(?:kz|ru|\u0440\u0444|com|net|org|me|io|info|biz|su|uz|app|site|online|store|pro)\b"
+AD_RE = re.compile(r"(https?://|www\.|t\.me/|telegram\.me|@[a-z0-9_]{4,}|\+?\d[\d\s()-]{9,}\d|" + DOMAIN + ")", re.I)
 PROMO_RE = re.compile(r"(подпис|канал|в лс|в личк|пишите мне|напишите мне|обращайтесь|звоните|"
                       r"мой номер|наш агент|скидк|акци[яи]|реклам|переходите)", re.I)
 CLICHE_RE = re.compile(r"^(отличный вопрос|хороший вопрос|полностью согласен|как ии|как языковая модель|"
                        r"я не могу|извините, но|к сожалению, я|надеюсь, помог|рекомендую обратиться)", re.I)
-LINK_RE = re.compile(r"(https?://|www\.|t\.me/|telegram\.me|@[a-z0-9_]{4,})", re.I)
+LINK_RE = re.compile(r"(https?://|www\.|t\.me/|telegram\.me|@[a-z0-9_]{4,}|" + DOMAIN + ")", re.I)
 EMOJI_RE = re.compile("[\U0001F300-\U0001FAFF\u2600-\u27BF]")
 PENDING_MAX = 10               # столько неразобранных в панели — новых не плодим
 
@@ -533,6 +534,12 @@ async def visit(client, acc, u, st, cfg, own_ids, system, recent, allow_join, re
 async def send_approved(client, acc, plan, cfg):
     """Одобренное в панели — отправить (если сообщение ещё свежее)."""
     for it, fresh in approved_for(acc["id"], float(cfg["max_age_hours"])):
+        text, why = check_reply(it["reply"], it.get("their", ""), recent_texts())
+        if not text:
+            mark_item(it["id"], "rejected")
+            log_row(acc["id"], it["chat"], it["msg_id"], "", "rejected", it["reply"], "правка не прошла: " + str(why))
+            continue
+        it = dict(it, reply=text)
         if not fresh:
             mark_item(it["id"], "expired")
             log_row(acc["id"], it["chat"], it["msg_id"], "", "expired", it["reply"], it.get("their"))

@@ -625,7 +625,9 @@ function paintAccRun(id, set) {
     const here = a.run === set;
     // «сейчас» панель считает на сервере: отдыхает до…, на сегодня всё,
     // ночь, ограничен, квота. Пусто — значит прогон не идёт
+    const pickedOther = crewOf(other).has(a.id);   // уже отмечен в соседнем режиме
     const st = elsewhere ? `работает ${other === 'chats' ? 'по чатам' : 'по номерам'}`
+      : pickedOther ? `выбран ${other === 'chats' ? 'по чатам' : 'по номерам'}`
       : busy ? esc(a.busy)
       : a.quarantine ? 'ограничен Telegram'
       : here ? (esc(a.now || '') || 'ждёт очереди')
@@ -636,10 +638,10 @@ function paintAccRun(id, set) {
     // Не выбирается только занятый СОСЕДНИМ режимом: аккаунт работает в одном
     // наборе за раз. «Только прогрев» отмечать можно — панель переведёт его в
     // рассылку сама, когда будешь запускать (и спросит перед этим).
-    const lock = elsewhere;
-    return `<label class="r ${busy ? 'work' : ''} ${onlyWarm || elsewhere ? 'off' : ''}">
+    const lock = elsewhere || pickedOther;
+    return `<label class="r ${busy ? 'work' : ''} ${onlyWarm || lock ? 'off' : ''}">
       <input type="checkbox" data-pick="${a.id}" data-set="${set}"
-             ${sel.has(a.id) ? 'checked' : ''} ${lock ? 'disabled' : ''}>
+             ${sel.has(a.id) && !pickedOther ? 'checked' : ''} ${lock ? 'disabled' : ''}>
       <span class="nm">${esc(a.name || a.title)}</span>
       <span class="cnt">${cnt}</span>
       ${onlyWarm ? '<span class="tag">только греется — возьмём в рассылку</span>' : ''}
@@ -650,7 +652,9 @@ function paintAccRun(id, set) {
   el.innerHTML = html;
   el.querySelectorAll('[data-pick]').forEach((c) => { c.onchange = () => {
     const s = crew[c.dataset.set];
-    c.checked ? s.add(c.dataset.pick) : s.delete(c.dataset.pick);
+    const otherSet = c.dataset.set === 'chats' ? 'phones' : 'chats';
+    if (c.checked) { s.add(c.dataset.pick); crewOf(otherSet).delete(c.dataset.pick); }
+    else s.delete(c.dataset.pick);
     // Состояние режима берём свежее: обработчик живёт дольше, чем та
     // перерисовка, на которой его повесили, и запомненное в ней
     // «не запущено» давно устарело бы.

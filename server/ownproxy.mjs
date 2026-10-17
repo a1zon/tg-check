@@ -27,7 +27,15 @@ import { spawn } from 'node:child_process';
 export const ASOCKS_GATEWAY = '190.2.137.56:9999';
 export const OWN_COUNTRY = 'KZ';
 // регионы с самым большим мобильным пулом; аккаунты раскладываются по ним по кругу
-export const OWN_REGIONS = (process.env.TG_ASOCKS_REGIONS || 'Almaty,Astana').split(',').map((s) => s.trim()).filter(Boolean);
+// проверенные регионы KZ с живым мобильным пулом (16.10 прогон по всем 21:
+// Astana в тот момент без IP, East Kazakhstan выходил из Германии — их тут нет).
+// Аккаунты раскладываются по этим городам по кругу → разные операторы/узлы, совпадений IP почти нет.
+const KZ_REGIONS = ['Almaty', 'Shymkent', 'Karaganda', 'Pavlodar Region', 'Qostanay Oblysy',
+  'Atyrau Oblysy', "Aktyubinskaya Oblast'", 'North Kazakhstan', 'Zhambyl Oblysy', "Mangistauskaya Oblast'",
+  'Qyzylorda Oblysy', 'Abai Region'];
+export const OWN_REGIONS = (process.env.TG_ASOCKS_REGIONS
+  ? process.env.TG_ASOCKS_REGIONS.split(',').map((s) => s.trim()).filter(Boolean)
+  : KZ_REGIONS);
 const TG_DC = '149.154.167.51:443';       // DC2: прокси должен пускать к нему (MTProto)
 const BASE_TTL = 24 * 3600_000;           // логин/пароль/регионы кабинета перечитываем раз в сутки
 const PROBE_URL = 'http://ipinfo.io/json'; // http, без TLS: ~1 КБ трафика на проверку

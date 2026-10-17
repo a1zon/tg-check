@@ -491,6 +491,26 @@ async def aclose(client):
         pass
 
 
+def _exit_country(proxy_raw):
+    """Код страны выхода через прокси (ipinfo по http, ~1 КБ). None — не определили."""
+    try:
+        p = parse_proxy(proxy_raw)
+    except SystemExit:
+        return None
+    if not p:
+        return None
+    kind, host, port = p[0], p[1], p[2]
+    cred = f"{p[4]}:{p[5]}@" if len(p) > 4 and p[4] else ""
+    url = f"{kind}://{cred}{host}:{port}"
+    import subprocess
+    try:
+        out = subprocess.run(["curl", "-s", "-m", "15", "-x", url, "http://ipinfo.io/json"],
+                             capture_output=True, text=True, timeout=20).stdout
+        return (json.loads(out) or {}).get("country") or None
+    except Exception:
+        return None
+
+
 async def connect(acc, **kw):
     """
     Подключение с проверкой живости. Мёртвый ключ помечаем в реестре: панель
@@ -509,6 +529,22 @@ async def connect(acc, **kw):
     if rest > 0:
         raise SystemExit(f"«{acc.get('title', acc['id'])}» на полном отдыхе после заморозки ещё "
                          f"{rest // 3600} ч {rest % 3600 // 60} мин — к Telegram не подключаю")
+
+    # Защита от входа из чужой страны. Мобильный пул иногда выпускает «казахстанский»
+    # прокси через другую страну (видели выход из Марокко/Колумбии/Германии), а
+    # скачки страны между входами Telegram считает угоном и сбрасывает сессию.
+    # Поэтому ПЕРЕД подключением к Telegram проверяем страну выхода: не KZ — не
+    # подключаемся вовсе (Telegram не увидит аккаунт из-за границы). Если страну
+    # не определили (прокси молчит/429) — не блокируем, это решит сторож.
+    # Выключается TG_REQUIRE_COUNTRY=off.
+    need = os.environ.get("TG_REQUIRE_COUNTRY", "KZ")
+    if need and need != "off" and acc.get("proxy"):
+        c = _exit_country(acc.get("proxy"))
+        if c and c != need:
+            set_field(acc["id"], driftCountry=c, driftAt=now_iso())
+            raise SystemExit(f"прокси сейчас выходит из {c}, а не {need} — не подключаю "
+                             f"«{acc.get('title', acc['id'])}» (чтобы Telegram не увидел вход из-за границы). "
+                             "Сменить IP и повторить.")
 
     quiet_telethon()
     client = make_client(acc, **kw)

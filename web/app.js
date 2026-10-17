@@ -166,6 +166,21 @@ function paintAccounts() {
   // редкие действия — в меню «⋯», на виду только то, что нужно часто
   const item = (attr, id, text, busy = true) =>
     `<button class="ghost mini" data-${attr}="${id}"${busy ? ' data-busy' : ''}>${text}</button>`;
+  // сколько аккаунтов делят один выходной IP — чтобы подсветить дубли
+  const ipCount = {};
+  for (const a of accs) if (a.exitIp) ipCount[a.exitIp] = (ipCount[a.exitIp] || 0) + 1;
+  // строка про IP/прокси: показываем реальный выходной адрес и страну, красным —
+  // если IP повторяется у другого аккаунта или выход не из Казахстана
+  const ipLine = (a) => {
+    if (a.exitIp) {
+      const warn = (a.exitCountry && a.exitCountry !== 'KZ') ? ` <span style="color:var(--no)">⚠ ${esc(a.exitCountry)}</span>` : '';
+      const dup = ipCount[a.exitIp] > 1 ? ' <span style="color:var(--no)">⚠ дубль IP</span>' : '';
+      const ok = !warn && !dup ? ' <span style="color:var(--acc)">✓</span>' : '';
+      return `IP ${esc(a.exitIp)}${a.exitCountry ? ' ' + esc(a.exitCountry) : ''}${warn}${dup}${ok}`;
+    }
+    if (a.proxy) return 'прокси ' + esc(String(a.proxyLabel).replace(/\s*\(.*\)$/, '')) + ' <span class="hint">(IP проверяется…)</span>';
+    return '<span style="color:var(--no)">без прокси</span>';
+  };
   const html = accs.map(a => `
     <div class="acc ${a.id === cur ? 'sel' : ''}">
       ${a.avatar ? `<img class="ava" src="/api/avatar?id=${a.id}&v=${a.avatar}" alt="">`
@@ -173,9 +188,10 @@ function paintAccounts() {
       <span class="nm"><b class="acc-name">${esc(a.name || a.title)} ${accBadge(a)} ${
           accReady(a) ? rolePill(a) : ''} ${where(a)}</b>
         <span class="${accReady(a) ? 'on' : 'off'}">${accSub(a)}</span>
-        <span>${a.ownIp ? 'свой IP ' + esc(a.ownIp) : a.proxy ? 'прокси ' + esc(String(a.proxyLabel).replace(/\s*\(.*\)$/, '')) : 'без прокси'} · написал ${a.sent}${
+        <span>${ipLine(a)} · написал ${a.sent}${
           a.dailyCap ? ` · свой предел ${a.dailyCap} в день` : ''}${
           a.channelOn && a.channel ? ` · в профиле канал @${esc(a.channel)}` : ''}</span>
+        <span class="hint" title="Отпечаток устройства — чем аккаунт представляется Telegram">🖥 ${esc(a.fp || '')}</span>
         <span class="warm ${a.quarantine || (a.warm && a.warm.resting) ? 'off' : ''}">${warmLine(a)}</span></span>
       <span class="accbtns">${
         accReady(a) ? '' : item('code', a.id, 'Войти по коду')}${
@@ -1673,6 +1689,12 @@ $('#b-ownip').onclick = async () => {
   accsRaw = ''; loop();
 };
 
+document.addEventListener('change', async (e) => {
+  if (!e.target.matches('[data-warmcrew]')) return;
+  const ids = [...document.querySelectorAll('#warm-crew [data-warmcrew]:checked')].map(c => c.dataset.warmcrew);
+  try { await post('/api/warmup/crew', {ids}); } catch {}
+});
+
 $('#b-rotate').onclick = async () => {
   const url = $('#rotate').value.trim();
   if (!url) { alert('Вставь ссылку смены IP из личного кабинета прокси'); return; }
@@ -2111,6 +2133,17 @@ const warmup = async () => {
      * галочкой и пускают в работу. Иначе готовый аккаунт висел бы на прогреве,
      * пока про него не вспомнят.
      */
+    // Кого греть — галочки по всем аккаунтам (пусто/все = греем всех)
+    const cb = $('#warm-crew');
+    if (cb && !cb.contains(document.activeElement)) {
+      const only = new Set(w.only || []);
+      const allOn = only.size === 0;
+      cb.innerHTML = accs.filter(a => a.session).map(a => {
+        const on = allOn || only.has(a.id);
+        return `<label class="crewitem"><input type="checkbox" data-warmcrew="${a.id}"${on ? ' checked' : ''}>` +
+          `<span>${esc(a.name || a.title)}</span></label>`;
+      }).join('') || '<span class="hint">нет вошедших аккаунтов</span>';
+    }
     const grown = w.accounts.filter(a => a.day >= a.fullDay && !a.resting);
     const warming = w.accounts.filter(a => !(a.day >= a.fullDay && !a.resting));
     const grownLine = grown.length

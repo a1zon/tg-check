@@ -474,3 +474,8 @@ details.fieldset[open] > summary.fh::before{content:'▾'}
 .cmt-item .cmt-their{color:var(--mut);font-size:13px;margin:4px 0 6px;overflow-wrap:anywhere}
 .cmt-item textarea{width:100%;box-sizing:border-box;min-height:52px;resize:vertical;font:inherit;font-size:14px}
 .cmt-item .frow{margin-top:6px;gap:8px;flex-wrap:wrap}
+
+/* выбор аккаунтов для прогрева */
+.crewgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:4px 12px}
+.crewitem{display:flex;align-items:center;gap:7px;font-size:14px;cursor:pointer;padding:3px 0}
+.crewitem input{margin:0}

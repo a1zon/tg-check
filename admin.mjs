@@ -737,6 +737,10 @@ const rnd = (a, b) => Math.round(a + Math.random() * (b - a));
 const warmup = { on: false, per: new Map(), timer: null,
                  rotate: '', rotateWait: 10, fresh: false, holdUntil: 0,
                  lastId: '', pending: '',
+                 // кого греем: список id. Пусто — всех вошедших (как было). Галочки
+                 // на вкладке «Прогрев» дают греть только отмеченных — удобно, когда
+                 // часть аккаунтов надо отложить/догреть отдельно.
+                 only: [],
                  // догрев между пачками рассылки — настройка профиля, по умолчанию выкл.
                  between: false };
 
@@ -803,7 +807,7 @@ function warmSave() {
     fs.writeFileSync(WARM_FILE, JSON.stringify(
       { on: warmup.on, rotate: warmup.rotate, rotateWait: warmup.rotateWait,
         maxCap: getMaxCap(), checkMax: getCheckMax(), warmDays: getWarmDays(),
-        between: warmup.between, per }, null, 2) + '\n');
+        between: warmup.between, only: warmup.only, per }, null, 2) + '\n');
   } catch {}
 }
 
@@ -816,6 +820,7 @@ function warmLoad() {
     warmup.rotate = String(d.rotate || '');
     warmup.rotateWait = Number(d.rotateWait) || 10;
     warmup.between = !!d.between;
+    warmup.only = Array.isArray(d.only) ? d.only : [];
     warmup.per = new Map(Object.entries(d.per || {}));
     setMaxCap(Number(d.maxCap ?? d.dailyCap) || 0);
     if (d.checkMax) setCheckMax(d.checkMax);
@@ -913,7 +918,8 @@ function warmTick() {
    * чужим аккаунтом (а значит, и чужим адресом) незачем, живой человек так
    * себя не ведёт.
    */
-  const live = accounts.list().filter((a) => accounts.hasSession(a) && accounts.isAuthed(a));
+  const live = accounts.list().filter((a) => accounts.hasSession(a) && accounts.isAuthed(a)
+    && (!warmup.only.length || warmup.only.includes(a.id)));
   const rank = (a) => (warmup.pending === a.id ? 0 : (warmOf(a.id).left ? 1 : 2));
   const order = [...live].sort((x, y) => rank(x) - rank(y));
 
@@ -1122,6 +1128,7 @@ function warmView() {
     maxCap: getMaxCap(), plan: getPlan(), checkMax: getCheckMax(),
     warmDays: getWarmDays(),
     between: warmup.between,
+    only: warmup.only,
     alone: !ownProxyEach() || !!warmup.rotate,
     accounts: (() => {
       // последнее действие каждого аккаунта из истории — чтобы в паузе было
@@ -2865,6 +2872,14 @@ async function handler(req, res) {
         proxyLabel: accounts.proxyLabel(a.proxy),
         // шлюз у всех своих сессий один — в строке показываем сам IP, иначе не отличить от общего
         ownIp: a.proxyOwn ? (own[a.id]?.ip || '') : '',
+        // реальный выходной IP и страна (сторож проверяет раз в 10 мин) — чтобы в
+        // панели видеть, что у всех РАЗНЫЙ IP и все в KZ, даже если прокси вставлен руками
+        exitIp: (() => { const i = proxyGuard.info(a.proxy); return i.down ? '' : (i.ip || ''); })(),
+        exitCountry: (() => { const i = proxyGuard.info(a.proxy); return i.down ? '' : (i.country || ''); })(),
+        // отпечаток устройства (чем аккаунт представляется Telegram)
+        fp: (() => { const d = a.device || {}; return d.device_model
+          ? `${d.device_model} · ${d.system_version || ''} · Telegram ${d.app_version || ''}`
+          : 'Desktop · Windows 10 · Telegram 4.9.9 (умолч.)'; })(),
         drafts: tally.get(a.id)?.drafts || 0,
         sent: tally.get(a.id)?.sent || 0,
         busy: running.get(a.id)?.title || '',
@@ -4029,6 +4044,18 @@ async function handler(req, res) {
       fs.renameSync(file + '.tmp', file);
       push(`\n💬 комментарий ${ok ? 'одобрен' : 'отклонён'} (${it.account}, ${it.chat_title || it.chat})`);
       return json(res, 200, { ok: true });
+    }
+
+    // кого греем: список id (пусто — всех). Галочки на вкладке «Прогрев».
+    if (u.pathname === '/api/warmup/crew' && req.method === 'POST') {
+      const { ids } = await body(req);
+      const all = accounts.list().map((a) => a.id);
+      const sel = Array.isArray(ids) ? ids.filter((x) => all.includes(x)) : [];
+      // отметили всех (или никого) — значит «греем всех», храним пустой список
+      warmup.only = (sel.length === 0 || sel.length === all.length) ? [] : sel;
+      warmSave();
+      push(`\n🌱 прогрев: ${warmup.only.length ? 'только ' + warmup.only.length + ' выбранных' : 'все аккаунты'}`);
+      return json(res, 200, { ok: true, only: warmup.only });
     }
 
     if (u.pathname === '/api/warmup') {

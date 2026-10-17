@@ -183,6 +183,7 @@ async def main():
     from telethon.errors.common import AuthKeyNotFound
 
     tglib.quiet_telethon()
+    tglib.ensure_device(acc)   # свой отпечаток ДО входа (если не из JSON продавца)
     client = tglib.make_client(acc)
     try:
         try:
@@ -218,6 +219,7 @@ async def main():
             raise SystemExit("Telegram не принял ключ: сессия мертва или отозвана")
         me = await client.get_me()
         name = tglib.remember(acc, me)
+        await tglib.harden_account(client, acc)   # завершить чужие сеансы
     finally:
         await tglib.aclose(client)
 

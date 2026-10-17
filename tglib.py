@@ -138,6 +138,53 @@ def device_for(acc):
     out.update(picked)
     return out
 
+
+def ensure_device(acc):
+    """
+    Закрепить СВОЙ отпечаток перед входом, если его ещё нет. Вызывается скриптами
+    входа ДО connect, чтобы новая сессия сразу завелась под уникальным (но
+    согласованным — Desktop) устройством, а не под общим умолчанием. У кого
+    device уже записан (родной от продавца или наш) — не трогаем.
+    """
+    d = acc.get("device")
+    if isinstance(d, dict) and d.get("device_model"):
+        return d
+    import random
+    taken = {(str((a.get("device") or {}).get("system_version", "")),
+              str((a.get("device") or {}).get("app_version", ""))) for a in load_accounts()}
+    free = [v for v in DESKTOP_VARIANTS if (v[1], v[2]) not in taken]
+    model, system, app = random.choice(free or DESKTOP_VARIANTS)
+    picked = {"device_model": model, "system_version": system, "app_version": app}
+    set_field(acc["id"], device=picked)
+    acc["device"] = picked
+    return picked
+
+
+async def harden_account(client, acc):
+    """
+    После входа: завершить ВСЕ прочие сессии аккаунта, кроме этой (панель —
+    единственный сеанс). Так чужой/старый вход (продавца, прежнего устройства)
+    не висит и не ловит коды, а параллельная авторизация не роняет нашу.
+    Telegram запрещает сброс в первые 24 ч жизни новой сессии — тогда тихо
+    пропускаем (панель спросит снова в следующий раз). Выключается env
+    TG_KEEP_OTHER_SESSIONS=1.
+    """
+    if os.environ.get("TG_KEEP_OTHER_SESSIONS") == "1":
+        return
+    try:
+        from telethon.tl.functions.auth import ResetAuthorizationsRequest
+    except Exception:
+        return
+    try:
+        await client(ResetAuthorizationsRequest())
+        say("✓ завершил остальные сеансы аккаунта — панель единственный вход")
+    except Exception as e:
+        name = type(e).__name__
+        if "Fresh" in name or "Forbidden" in name or "24" in str(e):
+            say("другие сеансы пока не сбросить (Telegram не даёт в первые 24 ч нового входа)")
+        else:
+            say(f"не смог завершить другие сеансы: {name}")
+
 # боевые адреса дата-центров: нужны, когда сессию собираем из голого ключа
 DC_IP = {1: "149.154.175.53", 2: "149.154.167.51", 3: "149.154.175.100",
          4: "149.154.167.91", 5: "91.108.56.130"}

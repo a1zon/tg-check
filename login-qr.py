@@ -51,6 +51,7 @@ async def main():
     dest.parent.mkdir(parents=True, exist_ok=True)
     say(f"аккаунт: {acc['title']}  |  {tglib.proxy_label(acc.get('proxy'))}  |  Telethon")
 
+    tglib.ensure_device(acc)   # свой отпечаток ДО входа
     dev = tglib.device_for(acc)
     say(f"устройство: {dev['device_model']} · {dev['system_version']} · Telegram {dev['app_version']}")
     existed = dest.exists()
@@ -97,6 +98,7 @@ async def main():
             raise SystemExit(1)
 
         name = tglib.remember(acc, user)
+        await tglib.harden_account(client, acc)   # завершить чужие сеансы
         fields = {"session": str(dest.relative_to(tglib.DIR))}
         if str(acc.get("title", "")).strip().lower().startswith("аккаунт"):
             fields["title"] = name or (f"@{user.username}" if user.username else acc["title"])

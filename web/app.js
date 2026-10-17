@@ -2276,16 +2276,12 @@ let kitAcc = null;
 
 function paintKit() {
   const a = kitAcc; if (!a) return;
-  const direct = $('#kit-direct').checked;
+  // Всегда через прокси аккаунта (тот же, что в панели): иначе Telegram увидит
+  // аккаунт из двух разных стран и сбросит сессию. Выбора «без прокси» нет.
   $('#kit-who').innerHTML = `Аккаунт <b>${esc(a.name || a.title)}</b> · выходит через ${esc(a.proxyLabel)}`;
-  // без прокси поле со своим адресом не нужно — прячем, чтобы не путало
-  $('#kit-proxy').hidden = direct;
-  $('#kit-proxy-h').textContent = direct
-    ? 'Мост не кладём: Telegram пойдёт напрямую, адрес даёт компьютер человека.'
-    : 'Пусто — поедет прокси аккаунта. Свой нужен, только если смотреть аккаунт с другого IP.';
   document.querySelectorAll('#kit-os button').forEach(b =>
     b.classList.toggle('on', b.dataset.os === kitOs));
-  const steps = direct ? KIT_STEPS_DIRECT[kitOs] : KIT_STEPS[kitOs];
+  const steps = KIT_STEPS[kitOs];
   // с отдельным входом убирать аккаунт файлами не нужно: хватит кнопки «выгнать»
   const tail = $('#kit-fresh').checked
     ? 'Убрать доступ: кнопка <b>«выгнать»</b> в списке устройств выше. Файлы у человека после этого мертвы — удалять не обязательно.'
@@ -2322,8 +2318,6 @@ function openKit(id) {
   kitAcc = accs.find(x => x.id === id);
   if (!kitAcc) { alert('Аккаунт не найден'); return; }
   $('#kit-note').textContent = '';
-  $('#kit-proxy').value = '';
-  $('#kit-direct').checked = false;
   $('#kit-devs').innerHTML = '';
   $('#kit-devs-note').textContent = '';
   paintKit();
@@ -2334,7 +2328,6 @@ document.querySelectorAll('#kit-os button').forEach(b => b.onclick = () => {
   kitOs = b.dataset.os; paintKit();
 });
 $('#kit-close').onclick = () => $('#kitdlg').close();
-$('#kit-direct').onchange = () => paintKit();
 $('#kit-fresh').onchange = () => paintKit();
 
 /** Кто сейчас имеет доступ к аккаунту: панель и все впущенные компьютеры. */
@@ -2369,10 +2362,7 @@ $('#kit-go').onclick = async () => {
   const more = [...document.querySelectorAll('#kit-more input:checked')].map(c => c.dataset.more);
   const pult = more.length > 0;      // отмечены ещё аккаунты → собираем пульт
 
-  const q = new URLSearchParams({ os: kitOs });
-  const px = $('#kit-proxy').value.trim();
-  if ($('#kit-direct').checked) q.set('proxy', 'нет');
-  else if (px) q.set('proxy', px);
+  const q = new URLSearchParams({ os: kitOs });   // прокси аккаунта зашивается всегда
   let path;
   if (pult) {
     q.set('ids', [kitAcc.id, ...more].join(','));

@@ -24,6 +24,7 @@ CFG = json.loads((HERE / "kit.json").read_text("utf-8"))
 PROXY = CFG["proxy"]
 PORT = int(CFG.get("listen", 18080))
 SOCKS = str(PROXY.get("scheme", "http")).startswith("socks")
+_rejects = 0   # сколько соединений прокси отклонил — для нераздражающей сводки
 
 
 def auth_header():
@@ -140,7 +141,15 @@ async def serve(cli_r, cli_w):
         # поднялся ли мост. Это не ошибка, и пугать ею в окне незачем
         quiet = isinstance(e, asyncio.IncompleteReadError) and not e.partial
         if not quiet:
-            print(f"  мост: не вышло соединиться — {e}", flush=True)
+            # Telegram открывает десятки соединений разом; мобильная прокси часть
+            # отклоняет (лимит на одновременные), а Telegram просто берёт те, что
+            # прошли, и работает. Поэтому не спамим на каждый отказ — сводкой, и
+            # без пугающего «не вышло».
+            global _rejects
+            _rejects += 1
+            if _rejects == 1 or _rejects % 30 == 0:
+                print(f"  прокси отклонил часть соединений — Telegram берёт остальные "
+                      f"(для мобильной прокси это норма; всего {_rejects})", flush=True)
         return
     await asyncio.gather(pipe(cli_r, up_w), pipe(up_r, cli_w))
 
@@ -172,6 +181,14 @@ async def main():
         print(f"  прокси не ответил: {e}", flush=True)
         print("  Telegram без прокси не запускаю — иначе аккаунт выйдет с твоего IP.", flush=True)
         sys.exit(2)
+    # Telegram ходит через CONNECT:443, а IP выше взят через GET:80 — проверяем и
+    # туннель, чтобы «прокси в порядке» значило то же, что нужно самому Telegram.
+    try:
+        _, w2 = await asyncio.wait_for(dial("api.ipify.org", 443), 15)
+        w2.close()
+        print("  туннель CONNECT:443 работает — так и ходит Telegram", flush=True)
+    except Exception as e:
+        print(f"  ⚠ прокси не открывает CONNECT:443 — Telegram может не подключиться: {e}", flush=True)
     server = await asyncio.start_server(serve, "127.0.0.1", PORT)
     print(f"  мост слушает 127.0.0.1:{PORT}", flush=True)
     async with server:

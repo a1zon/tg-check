@@ -115,6 +115,33 @@
                 </span>
               </details>
             </div>
+            <details class="fieldset legend" style="margin-top:14px">
+              <summary class="fh" style="cursor:pointer">❓ Что значат плашки у аккаунта</summary>
+              <div class="hint" style="line-height:1.7;margin-top:8px">
+                <p style="margin:.3em 0"><b>Вход:</b>
+                  <span class="st st-ok">вошёл</span> — сессия жива и прокси работает ·
+                  <span class="st st-no">не вошёл</span> — нет живой сессии ·
+                  <span class="st st-warn">ограничен / заморожен</span> — SpamBot придержал, писать нельзя.</p>
+                <p style="margin:.3em 0"><b>Роль (нажми — переключается):</b>
+                  <span class="daypill rolepill">✉️ рассылка</span> — греется <b>и</b> пишет людям ·
+                  <span class="daypill rolepill warm">🌱 только прогрев</span> — греется, людям <b>не</b> пишет
+                  (но на ответы тем, кому уже написал, — отвечает).</p>
+                <p style="margin:.3em 0"><b>Прогрев (идёт у всех вошедших, кроме ограниченных):</b>
+                  🌱 <b>отлёживается</b> — первые сутки новый аккаунт не трогаем ·
+                  🌱 <b>прогрев X из Y дн.</b> — идёт разгон ·
+                  🌱 <b>прогрет</b> — разгон закончен.</p>
+                <p style="margin:.3em 0"><b>После заморозки:</b>
+                  😴 <b>отдыхает</b> — в Telegram вообще не заходит ·
+                  🌿 <b>только греется</b> — заходит и греется, но людям не пишет.</p>
+                <div style="margin-top:10px;padding:9px 11px;border-left:3px solid #57b894;background:#57b89418;border-radius:6px">
+                  <b>Как сочетаются роль и прогрев:</b><br>
+                  • <b>Прогрев — у всех</b> вошедших (кроме отлёжки и заморозки), независимо от роли.<br>
+                  • <b>Письма людям</b> шлют только те, на ком стоит <span class="daypill rolepill">✉️ рассылка</span>.<br>
+                  • Поставил <span class="daypill rolepill warm">🌱 только прогрев</span> аккаунту <b>прямо во время рассылки</b> → он <b>сразу перестаёт писать новым</b> (дописывает лишь ответы тем, кому уже написал) и уходит в прогрев/догрев. Вернёшь ✉️ — снова пишет. Вход и IP при этом не меняются.<br>
+                  • «<b>прогрет</b>» + «<b>только прогрев</b>» = <b>догрев</b> (лёгкие действия: лента, реакции, пишет своим), а <b>не</b> новый разгон с нуля. Чтобы прогнать заново (например после смены IP) — нужен сброс прогрева.
+                </div>
+              </div>
+            </details>
           </div>
         </div>
       </div>
@@ -131,6 +158,11 @@
         <p class="hint" style="margin:0 0 12px">
           Аккаунты сами читают каналы, ставят реакции и переписываются друг с другом.
           Новый первые сутки отлёживается. Включи и оставь — работает по всем вошедшим.</p>
+        <p class="hint" style="margin:-6px 0 12px">
+          Прогрев идёт у всех вошедших. Кто из них ещё и пишет людям — задаётся плашкой
+          <span class="daypill rolepill" style="pointer-events:none">✉️ рассылка</span> /
+          <span class="daypill rolepill warm" style="pointer-events:none">🌱 только прогрев</span>
+          на вкладке «Аккаунты» (там же, в «❓ Что значат плашки», — все плашки и их сочетания).</p>
         <div class="runbar" id="runbar-w"></div>
         <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
           <button class="primary" id="b-warm">Включить прогрев</button>

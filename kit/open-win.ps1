@@ -165,6 +165,17 @@ if ($code -ne 0) {
        "`nПробовал три раза за минуту. Подожди пару минут и запусти снова.")
 }
 Write-Host "  прокси в порядке: $(($out | Select-Object -Last 1))"
+# Откуда Telegram ДОЛЖЕН нас видеть — на экран и в ip-log.txt рядом с комплектом.
+# Если потом в «Устройствах» новая сессия окажется из другой страны — прокси в
+# Desktop не применился (частая причина — системный VPN), аккаунт засветил адрес.
+$exip = ([regex]'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}').Match(($out | Out-String)).Value
+if ($exip) {
+  Write-Host ''
+  Write-Host "  Telegram ДОЛЖЕН видеть этот аккаунт с IP: $exip  (страна — KZ)" -ForegroundColor Cyan
+  Write-Host '  запомни адрес: после запуска сверишь его в «Устройствах» аккаунта.'
+  ("{0}  {1}  Telegram-dolzhen-videt-IP={2}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm'), $cfg.title, $exip) |
+    Out-File -FilePath (Join-Path $PSScriptRoot 'ip-log.txt') -Append -Encoding UTF8
+}
 
 $bridge = Start-Process -FilePath $self -PassThru -WindowStyle Hidden `
   -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$bridgePs`""
@@ -228,4 +239,9 @@ try {
 }
 
 Write-Host ''
-Write-Host 'Telegram закрыт, мост выключен.'
+Write-Host 'ПРОВЕРЬ СЕБЯ: в панели открой этот аккаунт → «⋯» → «Показать устройства».' -ForegroundColor Yellow
+Write-Host '   Новая сессия (Windows) ДОЛЖНА быть из KZ (тот же IP, что выше).'
+Write-Host '   Если из ДРУГОЙ страны — прокси в Telegram не применился (частая причина —'
+Write-Host '   системный VPN). Тогда выгони эту сессию кнопкой «выгнать», выключи VPN и запусти заново.'
+Write-Host ''
+Write-Host 'Telegram закрыт, мост выключен. IP записан в ip-log.txt рядом с комплектом.'

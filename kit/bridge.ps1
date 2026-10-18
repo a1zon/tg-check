@@ -123,7 +123,12 @@ function Test-Proxy($p) {
   $all = (New-Object IO.StreamReader($s)).ReadToEnd()
   $c.Close()
   if ($all -notmatch '(?m)^HTTP/1\.[01] 200') { throw "прокси ответил: $(($all -split "`r`n")[0])" }
-  return 'наружу видно IP ' + ($all -split "`r`n`r`n", 2)[-1].Trim()
+  $ip = ($all -split "`r`n`r`n", 2)[-1].Trim()
+  # Telegram ходит через CONNECT:443 (а IP выше взят через GET:80) — проверяем и
+  # туннель, чтобы «прокси в порядке» значило то же, что нужно самому Telegram.
+  try { (Connect-Upstream $p 'api.telegram.org' 443).Close() }
+  catch { throw "GET прошёл, но CONNECT:443 не открылся ($($_.Exception.Message)) — Telegram не подключится" }
+  return 'наружу видно IP ' + $ip
 }
 '@
 Invoke-Expression $helpers

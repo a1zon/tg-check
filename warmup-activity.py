@@ -213,6 +213,11 @@ def comment_cap(acc, day, rewarm, held, cfg):
     """
     if not cfg["on"]:
         return 0
+    # коммент-пул: если задан список comments.only — комментируют ТОЛЬКО эти аккаунты
+    # (отдельный пул органики, чтобы не грузить холодовиков). Пусто — все прогретые.
+    only = cfg.get("only") or []
+    if only and acc["id"] not in only:
+        return 0
     allowed_held = acc["id"] in (cfg.get("held_accounts") or [])
     # под ограничением SpamBot (любым) — только если разрешили, и только временным
     restricted = acc.get("spamOk") is False or acc.get("spamKind") in ("temp", "perm", "frozen")

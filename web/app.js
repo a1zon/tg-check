@@ -2451,7 +2451,7 @@ const loop = async () => {
   if (busy) return;
   await base(); await repliesList(); await warmup(); await funnel(); await mirror();
   await traffic();
-  if (activeView() === 'warmup') await commentsView();
+  if (activeView() === 'organic') { await organicView(); await commentsView(); }
   if (activeView() === 'chatsend') await members();
   if (activeView() === 'results') await resultsView();
 };
@@ -2460,7 +2460,7 @@ loop(); setInterval(loop, 2000);
 /* ═══════════ РЕЖИМЫ (боковая панель) ═══════════ */
 const VIEW_TITLE = {
   overview: 'Обзор', accounts: 'Аккаунты', warmup: 'Прогрев', send: 'Рассылка по номерам',
-  results: 'Результаты', chatsend: 'Рассылка по чатам', tools: 'Обслуживание',
+  results: 'Результаты', chatsend: 'Рассылка по чатам', organic: 'Органика', tools: 'Обслуживание',
 };
 // по какому набору пойдут ручные заходы из «Обслуживания» — словами, а не молча
 function paintToolsSet() {
@@ -2554,6 +2554,73 @@ $('#cmt-pending')?.addEventListener('click', async (e) => {
   } catch (err) { alert(err.message); }
   commentsRaw = ''; await commentsView(true);
 });
+
+/* ═══════════ ОРГАНИКА — пул, персоны, резерв, сбор чатов, лиды ═══════════ */
+let organicAt = 0, organicRaw = '', orgOn = false;
+async function organicView(force) {
+  if (!force && Date.now() - organicAt < 15_000) return;
+  organicAt = Date.now();
+  let d;
+  try { d = await (await fetch('/api/organic')).json(); } catch { return; }
+  const raw = JSON.stringify(d);
+  if (raw === organicRaw) return;
+  organicRaw = raw;
+  orgOn = !!d.on;
+  const tbtn = $('#org-toggle'), tst = $('#org-state');
+  if (tbtn) { tbtn.textContent = d.on ? 'Выключить комментинг' : 'Включить комментинг'; tbtn.classList.toggle('danger', d.on); }
+  if (tst) tst.textContent = d.on ? 'комментинг включён' : 'выключен — комментарии не пишутся';
+  const pool = $('#org-pool');
+  if (pool && !pool.contains(document.activeElement)) {
+    pool.innerHTML = d.accounts.map((a) => `
+      <label class="crew-i${a.authed ? '' : ' off'}">
+        <input type="checkbox" data-pool="${esc(a.id)}" ${d.poolSet ? (a.inPool ? 'checked' : '') : 'checked'} ${a.authed ? '' : 'disabled'}>
+        <span>${esc(a.name)}</span></label>`).join('') || '<div class="hint">нет аккаунтов</div>';
+  }
+  const ab = $('#org-accounts');
+  if (ab && !ab.contains(document.activeElement)) {
+    const opts = (cur) => [...new Set(['', ...d.personas, cur || ''])]
+      .map((p) => `<option value="${esc(p)}"${p === (cur || '') ? ' selected' : ''}>${p ? esc(p) : '— без персоны —'}</option>`).join('');
+    ab.innerHTML = d.accounts.map((a) => `
+      <div class="frow" data-acc="${esc(a.id)}" style="align-items:center;gap:8px;margin-bottom:6px">
+        <span style="min-width:150px">${esc(a.name)}${a.retired ? ' <span class="hint">(retired)</span>' : ''}</span>
+        <select data-persona class="ftext" style="max-width:180px">${opts(a.persona)}</select>
+        <label style="display:flex;gap:4px;align-items:center"><input type="checkbox" data-reserve ${a.reserve ? 'checked' : ''}><span>резерв</span></label>
+      </div>`).join('');
+  }
+  const sel = $('#org-disc-acc');
+  if (sel && !sel.options.length) sel.innerHTML = d.accounts.filter((a) => a.authed).map((a) => `<option value="${esc(a.id)}">${esc(a.name)}</option>`).join('');
+  const lb = $('#org-leads');
+  if (lb) lb.innerHTML = d.leads.length ? d.leads.map((l) => `<div class="trf-row"><span>@${esc(l.username || '—')} · ${esc(l.chat)}: ${esc((l.quote || '').slice(0, 80))}</span><b>${new Date(l.at).toLocaleString('ru-RU', {day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'})}</b></div>`).join('') : '<div class="hint">пока нет</div>';
+}
+$('#org-toggle')?.addEventListener('click', async (e) => {
+  e.target.disabled = true;
+  try { await post('/api/organic/comments', { on: !orgOn }); } catch (err) { alert(err.message); }
+  organicRaw = ''; await organicView(true); e.target.disabled = false;
+});
+$('#org-pool')?.addEventListener('change', async () => {
+  const ids = [...document.querySelectorAll('#org-pool input[data-pool]:checked')].map((i) => i.dataset.pool);
+  try { await post('/api/organic/pool', { ids }); } catch (err) { alert(err.message); }
+  organicRaw = '';
+});
+$('#org-accounts')?.addEventListener('change', async (e) => {
+  const row = e.target.closest('[data-acc]'); if (!row) return;
+  const body = { id: row.dataset.acc };
+  if (e.target.matches('[data-persona]')) body.persona = e.target.value;
+  if (e.target.matches('[data-reserve]')) body.reserve = e.target.checked;
+  try { const r = await post('/api/organic/account', body); if (!r.ok) alert(r.reason || 'не вышло'); } catch (err) { alert(err.message); }
+  organicRaw = '';
+});
+async function runDiscover(dry) {
+  const note = $('#org-disc-note'); if (note) note.textContent = 'запускаю…';
+  try {
+    const r = await post('/api/organic/discover', {
+      account: $('#org-disc-acc')?.value, seeds: $('#org-disc-seeds')?.value, niche: $('#org-disc-niche')?.value,
+      minSubs: $('#org-disc-subs')?.value, score: $('#org-disc-score')?.value, dry });
+    if (note) note.textContent = r.ok ? 'пошёл — смотри журнал снизу' : (r.reason || 'не вышло');
+  } catch (err) { if (note) note.textContent = err.message; }
+}
+$('#org-disc-dry')?.addEventListener('click', () => runDiscover(true));
+$('#org-disc-run')?.addEventListener('click', () => runDiscover(false));
 
 let trafficAt = 0;
 const fmtBytes = (b) => (b >= 1e9 ? (b / 1e9).toFixed(2) + ' ГБ'

@@ -183,6 +183,69 @@ function graduateWarm() {
 }
 setInterval(graduateWarm, 5 * 60_000);
 
+// ── Автозамена мёртвых аккаунтов из резерва (banned-account-replacement) ──────
+// Резерв — аккаунты с reserve:true (прогретые запасные; в работу не идут, пока
+// не активированы). Когда активный аккаунт умирает (сессия отозвана / заморозка /
+// бессрочное ограничение) и держится мёртвым дольше грейса (вдруг разморозят или
+// вернут вручную) — его роль (персона) переходит на старейший резервный: тот
+// активируется (reserve снимается, идёт в прогрев с нуля), мёртвый уходит в
+// retired. Перенос владения каналом-переходником — позже (канальной модели пока
+// нет), v1 только подменяет рабочий аккаунт.
+const RESERVE_DEAD_GRACE = 24 * 3600 * 1000;
+let reserveEmptyNoted = false;
+
+function deadReason(a) {
+  if (a.spamKind === 'frozen') return 'заморожен';
+  if (a.spamKind === 'perm') return 'бессрочное ограничение';
+  if (a.authed === false) return 'сессия отозвана';
+  return 'мёртв';
+}
+// Мёртвый РАБОЧИЙ аккаунт: входил (есть сессия), не резерв/не retired, и либо
+// сессия отозвана, либо заморозка/бессрочка. Временные ограничения (temp) сами
+// снимаются — их не заменяем.
+function isDeadActive(a) {
+  if (a.reserve || a.retired) return false;
+  if (!accounts.hasSession(a)) return false;
+  return a.authed === false || a.spamKind === 'frozen' || a.spamKind === 'perm';
+}
+
+function reserveTick() {
+  // грейс: ставим/снимаем отметку deadSince, чтобы не заменять то, что может ожить
+  for (const a of accounts.list()) {
+    const dead = isDeadActive(a);
+    if (dead && !a.deadSince) accounts.setField(a.id, { deadSince: new Date().toISOString() });
+    else if (!dead && a.deadSince) accounts.setField(a.id, { deadSince: '' });
+  }
+  const now = Date.now();
+  const toReplace = accounts.list().filter((a) => isDeadActive(a)
+    && a.deadSince && now - (Date.parse(a.deadSince) || now) >= RESERVE_DEAD_GRACE);
+  for (const d of toReplace) {
+    const spare = accounts.list().filter((a) => a.reserve === true && !a.retired
+        && accounts.hasSession(a) && accounts.isAuthed(a)
+        && a.spamKind !== 'frozen' && a.spamKind !== 'perm')
+      .sort((x, y) => (Date.parse(x.warmFrom || x.added || 0) || 0) - (Date.parse(y.warmFrom || y.added || 0) || 0))[0];
+    if (!spare) {
+      if (!reserveEmptyNoted) {
+        reserveEmptyNoted = true;
+        events.note('⚠', `нужна замена «${d.title}» (${deadReason(d)}), но резерв пуст — добавь аккаунт с reserve`);
+      }
+      break;
+    }
+    reserveEmptyNoted = false;
+    // активируем резерв: берёт роль (персону) мёртвого и идёт в прогрев с нуля
+    accounts.setField(spare.id, { reserve: false, persona: d.persona || spare.persona || '',
+      warmFrom: new Date().toISOString(), role: 'warm', graduated: false, replacedFrom: d.id,
+      note: `активирован из резерва вместо «${d.title}»` });
+    accounts.setField(d.id, { retired: true, deadSince: '', replacedBy: spare.id,
+      note: `${deadReason(d)} — заменён на «${spare.title}» из резерва` });
+    push(`\n♻ автозамена: «${d.title}» (${deadReason(d)}) → в работу из резерва «${spare.title}» (пойдёт в прогрев)`);
+    events.note('♻', `автозамена: «${d.title}» ${deadReason(d)} → активирован резерв «${spare.title}»`, spare.title);
+    // TODO: перенос владения каналом-переходником на spare — когда появится канальная модель
+  }
+}
+setTimeout(reserveTick, 8_000);            // первый проход вскоре после старта, не ждать 5 мин
+setInterval(reserveTick, 5 * 60_000);
+
 const proxyOf = (id) => accounts.list().find((a) => a.id === id)?.proxy || '';
 const proxyGuard = makeProxyGuard({
   parseProxy: accounts.parseProxy,
@@ -770,6 +833,18 @@ const commentsHeld = () => {
   const c = commentsCfg();
   return new Set(c.on ? (c.held_accounts || []) : []);
 };
+// Записать поля в раздел comments в warm-list.json, сохранив остальное (его же
+// читают задачи). Атомарно, с инвалидацией кэша commentsCfg().
+function writeCommentsCfg(patch) {
+  const file = path.join(DIR, 'warm-list.json');
+  let all = {};
+  try { all = JSON.parse(fs.readFileSync(file, 'utf8')) || {}; } catch {}
+  all.comments = { ...(all.comments || {}), ...patch };
+  fs.writeFileSync(file + '.tmp', JSON.stringify(all, null, 1) + '\n');
+  fs.renameSync(file + '.tmp', file);
+  commentsCfgCache.mtime = -1;   // перечитать при следующем commentsCfg()
+  return all.comments;
+}
 // сутки по Екатеринбургу — «между пачками на сегодня всё» живёт до полуночи
 const ekbDay = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Yekaterinburg' }).format(new Date());
 
@@ -919,6 +994,7 @@ function warmTick() {
    * себя не ведёт.
    */
   const live = accounts.list().filter((a) => accounts.hasSession(a) && accounts.isAuthed(a)
+    && !a.reserve && !a.retired
     && (!warmup.only.length || warmup.only.includes(a.id)));
   const rank = (a) => (warmup.pending === a.id ? 0 : (warmOf(a.id).left ? 1 : 2));
   const order = [...live].sort((x, y) => rank(x) - rank(y));
@@ -2100,7 +2176,8 @@ function autoStart(o) {
   // (и возобновление после перезапуска) — текущий общий
   const set = SETS.includes(o.set) ? o.set : baseSet;
   if (auto.live[set]) return { ok: false, reason: `рассылка ${setWord(set)} уже идёт` };
-  const entered = accounts.list().filter((a) => accounts.hasSession(a) && accounts.isAuthed(a));
+  const entered = accounts.list().filter((a) => accounts.hasSession(a) && accounts.isAuthed(a)
+    && !a.reserve && !a.retired);
   // аккаунты «только прогрев» в рассылку не идут, даже если их отметили
   const ready = entered.filter(accounts.inOutreach);
   const held = ready.filter(inQuarantine);
@@ -4056,6 +4133,61 @@ async function handler(req, res) {
       warmSave();
       push(`\n🌱 прогрев: ${warmup.only.length ? 'только ' + warmup.only.length + ' выбранных' : 'все аккаунты'}`);
       return json(res, 200, { ok: true, only: warmup.only });
+    }
+
+    // ─── Органика: вкладка управления коммент-движком ───────────────────────
+    if (u.pathname === '/api/organic' && req.method !== 'POST') {
+      const c = commentsCfg();
+      const only = Array.isArray(c.only) ? c.only : [];
+      let personas = [];
+      try { personas = fs.readdirSync(path.join(DIR, 'personas')).filter((f) => f.endsWith('.txt')).map((f) => f.slice(0, -4)); } catch {}
+      const leads = readRaw('comment-leads.csv').slice(-30).reverse()
+        .map((r) => ({ at: r.at, chat: r.chat, username: r.username, reason: r.reason, quote: r.quote }));
+      const accs = accounts.list().map((a) => ({
+        id: a.id, name: a.name || a.title, authed: accounts.isAuthed(a),
+        persona: a.persona || '', reserve: !!a.reserve, retired: !!a.retired,
+        inPool: only.length ? only.includes(a.id) : null,     // null — пул не задан (комментят все прогретые)
+      }));
+      return json(res, 200, { on: !!c.on, only, poolSet: only.length > 0, personas, accounts: accs, leads });
+    }
+    if (u.pathname === '/api/organic/comments' && req.method === 'POST') {
+      const { on } = await body(req);
+      writeCommentsCfg({ on: !!on });
+      push(`\n💬 комментинг ${on ? 'включён' : 'выключен'} (Органика)`);
+      return json(res, 200, { ok: true, on: !!on });
+    }
+    if (u.pathname === '/api/organic/pool' && req.method === 'POST') {
+      const { ids } = await body(req);
+      const all = accounts.list().map((a) => a.id);
+      const sel = Array.isArray(ids) ? ids.filter((x) => all.includes(x)) : [];
+      const only = (sel.length === 0 || sel.length === all.length) ? [] : sel;   // все/никто — пул не задан
+      writeCommentsCfg({ only });
+      push(`\n💬 коммент-пул: ${only.length ? only.length + ' аккаунтов' : 'все прогретые'}`);
+      return json(res, 200, { ok: true, only });
+    }
+    if (u.pathname === '/api/organic/account' && req.method === 'POST') {
+      const { id, persona, reserve } = await body(req);
+      if (!accounts.list().some((a) => a.id === id)) return json(res, 200, { ok: false, reason: 'нет такого аккаунта' });
+      const patch = {};
+      if (persona !== undefined) patch.persona = String(persona || '').trim();
+      if (reserve !== undefined) patch.reserve = !!reserve;
+      if (Object.keys(patch).length) accounts.setField(id, patch);
+      return json(res, 200, { ok: true });
+    }
+    if (u.pathname === '/api/organic/discover' && req.method === 'POST') {
+      const { account, seeds, niche, minSubs, score, limit, dry } = await body(req);
+      let acc; try { acc = accounts.resolve(account); } catch { return json(res, 200, { ok: false, reason: 'выбери аккаунт-искатель' }); }
+      if (!accounts.hasSession(acc)) return json(res, 200, { ok: false, reason: `у «${acc.title}» нет сессии` });
+      if (running.get(acc.id)) return json(res, 200, { ok: false, reason: `«${acc.title}» занят: ${running.get(acc.id).title}` });
+      if (!String(seeds || '').trim()) return json(res, 200, { ok: false, reason: 'укажи 1–3 канала-семени' });
+      if (!String(niche || '').trim()) return json(res, 200, { ok: false, reason: 'укажи нишу' });
+      const args = [path.join(CODE, 'discover-chats.py'),
+        '--account', acc.id, '--seeds', String(seeds), '--niche', String(niche),
+        '--levels', '2', '--min-subs', String(Number(minSubs) || 500),
+        '--score', String(Number(score) || 0.5), '--limit', String(Number(limit) || 200)];
+      if (dry) args.push('--dry');
+      run(acc.id, 'disc', `Сбор чатов (${acc.title})`, pythonCmd(), args);
+      return json(res, 200, { ok: true });
     }
 
     if (u.pathname === '/api/warmup') {

@@ -97,8 +97,9 @@ EXCLUDES=(
   './egrul.csv' './egrul-run.json' './egrul-*.log' './messages.csv' './chat-list.txt'
   './avatars' '.env' './.env'
   './asocks.json' './asocks-usage.jsonl' './asocks-ports.json' './asocks-sessions.json'
-  './comments.csv' './comment-plan.json*' './comments-pending.json*' './comments-decisions.json*'
+  './comments.csv' './comment-leads.csv' './comment-plan.json*' './comments-pending.json*' './comments-decisions.json*'
   './comment-persona.txt' './llm-usage.json'
+  './tgapi.json' './personas'
   '*.xlsx' '*.session' './_backup_*' './_reset_backup_*' '.DS_Store' '.send-gap.*'
 )
 
@@ -116,7 +117,8 @@ DATA_GUARD=(
   followup-runs.json followup-texts.json sent-ids.csv traffic.csv
   egrul.csv egrul-run.json messages.csv chat-list.txt extras.csv .env
   asocks.json asocks-usage.jsonl asocks-ports.json asocks-sessions.json
-  comments.csv 'comment-plan.json*' 'comments-pending.json*' 'comments-decisions.json*' comment-persona.txt llm-usage.json
+  comments.csv comment-leads.csv 'comment-plan.json*' 'comments-pending.json*' 'comments-decisions.json*' comment-persona.txt llm-usage.json
+  tgapi.json personas
   'auto-run.paused-*.json' 'egrul-*.log'
 )
 

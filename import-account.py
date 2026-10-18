@@ -153,16 +153,19 @@ async def main():
         sess = unpack(Path(src_session).expanduser(), tmp)
         dc, key, uid = read_session_file(sess)
         kind = "session"
-        # рядом с .session продавцы кладут .json с родными параметрами
-        # устройства — заходить под своими нельзя, Telegram увидит смену
-        for cand in (sess.with_suffix(".json"), *sorted(sess.parent.rglob("*.json"))):
-            dev = device_from_json(cand) if cand.exists() else {}
-            if dev.get("device_model"):
-                tglib.set_field(acc["id"], device=dev)
-                acc["device"] = dev
-                tglib.say(f"устройство из {cand.name}: {dev['device_model']} · "
-                          f"{dev.get('system_version', '?')} · Telegram {dev.get('app_version', '?')}")
-                break
+        # рядом с .session продавцы кладут .json с родными (десктопными) параметрами
+        # устройства. На ДЕСКТОПНОМ api_id (2040) берём их как есть — так честнее.
+        # В МОБИЛЬНОМ режиме (свой api_id) десктопный отпечаток продавца не годится
+        # (рассинхрон «десктоп на телефоне») — пропускаем, Android поставит ensure_device.
+        if not tglib.is_mobile(acc):
+            for cand in (sess.with_suffix(".json"), *sorted(sess.parent.rglob("*.json"))):
+                dev = device_from_json(cand) if cand.exists() else {}
+                if dev.get("device_model"):
+                    tglib.set_field(acc["id"], device=dev)
+                    acc["device"] = dev
+                    tglib.say(f"устройство из {cand.name}: {dev['device_model']} · "
+                              f"{dev.get('system_version', '?')} · Telegram {dev.get('app_version', '?')}")
+                    break
     elif src_key:
         dc, key, uid = int(tglib.arg("dc", 0)), bytes.fromhex(src_key), int(tglib.arg("user-id", 0))
         kind = "ключ"
@@ -178,6 +181,18 @@ async def main():
     dest = tglib.session_path(acc)
     existed = dest.exists()
     write_session(dest, dc, key)
+
+    # Прокси ОБЯЗАТЕЛЬНА до входа: без неё вход идёт с IP сервера (не KZ), и Telegram
+    # сбрасывает KZ-сессию (так сжигаются аккаунты). Нет прокси — покупаем свою
+    # уникальную dedicated KZ через Asocks ПЕРЕД подключением. Задать прокси заранее
+    # (вручную/скриптом) — тоже ок: тогда покупка пропускается.
+    if not acc.get("proxy"):
+        import proxy_buy
+        say("прокси не задан — покупаю свою dedicated KZ (Asocks)…")
+        s, ip = proxy_buy.buy_dedicated(proxy_buy.existing_ips())
+        tglib.set_field(acc["id"], proxy=s)
+        acc["proxy"] = s
+        say(f"куплена прокси, выход {ip}  ({tglib.proxy_label(s)})")
 
     # проверяем живьём: сессия засчитывается, только если Telegram ответил
     from telethon.errors.common import AuthKeyNotFound

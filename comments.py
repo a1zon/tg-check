@@ -36,13 +36,20 @@ from tglib import say
 PLAN = tglib.DIR / "comment-plan.json"
 LOG = tglib.DIR / "comments.csv"
 LOG_HEAD = ["at", "account", "chat", "msg_id", "reply_id", "status", "text", "their"]
+# Тёплые лиды из комментов: человек, вовлёкшийся в наш разговор (ответил на коммент).
+# Свой файл с колонками как у внешней базы лидов (leads-log.csv) — легко слить, но
+# НЕ трогаем систему лидов коллеги. Отсюда их добирают холодовики как тёплую базу.
+LEADS = tglib.DIR / "comment-leads.csv"
+LEADS_HEAD = ["at", "chat", "user_id", "username", "category", "score", "reason", "quote"]
 PENDING = tglib.DIR / "comments-pending.json"
 DECISIONS = tglib.DIR / "comments-decisions.json"
 PERSONA = tglib.DIR / "comment-persona.txt"
 PERSONA_DEFAULT = tglib.CODE / "comment-persona.default.txt"
+PERSONAS_DIR = tglib.DIR / "personas"   # свой образ на аккаунт: personas/<имя>.txt
 
 DEFAULTS = {
     "on": False,               # главный выключатель
+    "only": [],                # коммент-пул: id аккаунтов, которым можно комментить; пусто — все прогретые
     "chats": [],               # свои ссылки/ники; пусто — чаты режима «по чатам» (chats.json, с ником)
     "per_day": [1, 2],         # комментариев в сутки у аккаунта в рассылке/догреве
     "held_accounts": [],       # временно ограниченные, которым можно комментировать
@@ -192,15 +199,35 @@ def letter_chats():
     return out
 
 
-def persona(acc_id):
-    """Образ (общий для всех — кэшируется у модели) + манера этого аккаунта."""
+def _persona_text(acc):
+    """
+    Текст образа этого аккаунта. Если у аккаунта задан свой персонаж
+    (поле persona → personas/<имя>.txt) — берём его целиком (как SOUL.md у
+    референса: один шаблон может делить несколько аккаунтов). Иначе — общий образ
+    comment-persona.txt (обратная совместимость), с дефолтом из кода при отсутствии.
+    """
+    name = str(acc.get("persona") or "").strip()
+    if name:
+        f = PERSONAS_DIR / f"{name}.txt"
+        if f.exists():
+            return f.read_text("utf-8")
     if not PERSONA.exists() and PERSONA_DEFAULT.exists():
         PERSONA.write_text(PERSONA_DEFAULT.read_text("utf-8"), "utf-8")
-    text = PERSONA.read_text("utf-8") if PERSONA.exists() else PERSONA_DEFAULT.read_text("utf-8")
+    return PERSONA.read_text("utf-8") if PERSONA.exists() else PERSONA_DEFAULT.read_text("utf-8")
+
+
+def persona(acc):
+    """
+    Образ аккаунта для системного промпта: свой персонаж (если задан) + своя
+    уникальная манера. `acc` — словарь аккаунта (нужны поля id и опционально persona).
+    Манера выбирается детерминированно по id, чтобы даже аккаунты на одном шаблоне
+    не писали под копирку.
+    """
+    text = _persona_text(acc)
     head, _, tail = text.partition("## Манеры")
     manners = [ln[2:].strip() for ln in tail.splitlines() if ln.startswith("- ")]
     if manners:
-        k = int(hashlib.sha256(acc_id.encode()).hexdigest()[:8], 16) % len(manners)
+        k = int(hashlib.sha256(str(acc.get("id") or "").encode()).hexdigest()[:8], 16) % len(manners)
         head = head.rstrip() + f"\n\nТвоя манера: {manners[k]}."
     return head.strip()
 
@@ -403,6 +430,22 @@ def log_row(acc_id, chat, msg_id, reply_id, status, text, their):
                            tglib.cell(text)[:300], tglib.cell(their)[:200]], LOG_HEAD)
 
 
+def tag_lead(st, chat_title, m, reason):
+    """Пометить автора сообщения как тёплого лида (вовлёкся в наш разговор) —
+    одна строка в comment-leads.csv. Один и тот же человек в одном чате не дублируется."""
+    uid = getattr(m, "sender_id", None)
+    if not uid:
+        return
+    tagged = st.setdefault("tagged", [])
+    if uid in tagged:
+        return
+    tagged.append(uid)
+    st["tagged"] = tagged[-200:]
+    uname = getattr(getattr(m, "sender", None), "username", "") or ""
+    tglib.append_row(LEADS, [iso(now()), chat_title, uid, uname, "WARM_COMMENT", "",
+                             reason, tglib.cell(m.message or "")[:300]], LEADS_HEAD)
+
+
 async def check_deleted(client, ent, st, acc_id):
     """
     Живы ли наши прошлые комментарии в этом чате (старше двух часов, ещё не
@@ -549,6 +592,9 @@ async def visit(client, acc, u, st, cfg, own_ids, system, recent, allow_join, re
     st["comments"] = st["comments"][-30:]
     st["last_comment"] = iso(now())
     log_row(acc["id"], u, target.id, sent.id, "sent", text, target.message)
+    # человек ответил на наш коммент (идёт разговор) — тёплый лид, в comment-leads.csv
+    if target.id in replies_to_us:
+        tag_lead(st, st.get("title") or u, target, "ответил на наш комментарий")
     return "sent", f"ответил в «{st.get('title') or u}»: «{text}»"
 
 
@@ -630,7 +676,7 @@ async def do_comment(client, acc, data, joined_today, may_join=True):
     if review and undecided_count() >= PENDING_MAX:
         say(f"в панели ждут одобрения {PENDING_MAX}+ комментариев — новые не пишу, пока не разберёшь")
         return None, "none", ""
-    system = persona(acc["id"])
+    system = persona(acc)
     recent = recent_texts()
     order = sorted(mine, key=lambda u: plan[u].get("last_visit") or "")
     joins_left = (int(cfg["joins_per_day"]) - joined_today) if may_join else 0

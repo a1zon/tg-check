@@ -61,26 +61,58 @@ MIRROR = DIR / "mirror.json"         # текущий субдомен-зерк�
 VOICE = DIR / "voice.ogg"          # голосовое для рассылки (ogg/opus)
 VOICE_META = DIR / "voice.json"    # его имя и длительность
 
-# api_id/hash Telegram Desktop: то же устройство, с которого сняты купленные
-# tdata. Свои значения тут только навредят — Telegram увидит смену клиента.
-API_ID, API_HASH = 2040, "b18441a1ff607e10a989891a5462e627"
+# ── api_id/hash: ДЕСКТОП по умолчанию, МОБИЛЬНЫЙ при своём api_id ──────────────
+# 2040 — публичный api_id Telegram DESKTOP; на нём честный отпечаток — Desktop.
+# Чтобы аккаунт выглядел как ТЕЛЕФОН (мобильный прокси + мобильный отпечаток),
+# нужен СВОЙ api_id (my.telegram.org): Android-устройство на 2040 — рассинхрон
+# «десктоп на телефоне». Свой api_id кладётся в tgapi.json рядом с данными:
+#     {"apiId": 12345, "apiHash": "..."}
+# Пока его нет — всё работает на 2040/Desktop, ничего не ломается и не меняется.
+DEFAULT_API_ID, DEFAULT_API_HASH = 2040, "b18441a1ff607e10a989891a5462e627"
+API_FILE = DIR / "tgapi.json"
+
+
+def _global_api():
+    """Свой (мобильный) api_id из tgapi.json, если задан. Иначе None."""
+    try:
+        d = json.loads(API_FILE.read_text("utf-8"))
+        if d.get("apiId") and d.get("apiHash"):
+            return int(d["apiId"]), str(d["apiHash"])
+    except Exception:
+        pass
+    return None
+
+
+def api_for(acc):
+    """api_id/hash аккаунта: своё поле > общий tgapi.json > публичный 2040."""
+    if acc.get("apiId") and acc.get("apiHash"):
+        return int(acc["apiId"]), str(acc["apiHash"])
+    return _global_api() or (DEFAULT_API_ID, DEFAULT_API_HASH)
+
+
+def is_mobile(acc):
+    """Аккаунт на СВОЁМ (не 2040) api_id → отпечаток берём мобильный (Android)."""
+    return api_for(acc)[0] != DEFAULT_API_ID
+
+
+# Обратная совместимость со старым кодом, который читал модульные константы.
+API_ID, API_HASH = DEFAULT_API_ID, DEFAULT_API_HASH
+
+# Отпечаток по умолчанию (когда device ещё не закреплён, но сессия уже живая).
 DEVICE = dict(device_model="Desktop", system_version="Windows 10",
               app_version="4.9.9", lang_code="ru", system_lang_code="ru")
 
 # Под каким устройством аккаунт заходит в Telegram.
 #
-# ВАЖНО про согласованность. api_id 2040 — это Telegram DESKTOP. Отпечаток
-# должен совпадать с типом клиента: Desktop-ключ + модель телефона на Android —
-# это рассинхрон, который сам по себе подозрителен (и именно так ломал бы отпечаток
-# прежний список телефонов — он убран). Аккаунты тут приезжают из tdata Telegram
-# Desktop, поэтому их честный отпечаток — Desktop; меняем только версии системы и
-# клиента, чтобы 18 аккаунтов не были байт-в-байт одинаковыми, но все оставались
-# правдоподобным Desktop.
+# ВАЖНО про согласованность. Тип отпечатка ДОЛЖЕН совпадать с api_id:
+#   • api_id 2040 (Telegram DESKTOP) → отпечаток Desktop (DESKTOP_VARIANTS);
+#   • свой api_id (мобильное приложение) → отпечаток Android (MOBILE_VARIANTS).
+# Desktop-ключ с моделью телефона на api_id 2040 — рассинхрон «десктоп на
+# телефоне», сам по себе подозрителен. Пул выбирается по is_mobile(acc).
+# Меняем только модель/версии, чтобы аккаунты не были байт-в-байт одинаковыми.
 #
-# Применяется ТОЛЬКО при новом входе (fresh login) и закрепляется в accounts.json.
-# У живой сессии отпечаток не трогаем: для Telegram смена устройства посреди
-# сессии выглядит как «пересел на другой компьютер не выходя» — это риск сам по
-# себе. Поэтому разные отпечатки получают НОВЫЕ аккаунты, а не уже вошедшие.
+# Применяется при новом входе (fresh login) и закрепляется в accounts.json.
+# У живой сессии отпечаток сам не трогаем; принудительный перебив — repin_device().
 DESKTOP_VARIANTS = [
     ("Desktop", "Windows 10 x64", "4.16.8"),
     ("Desktop", "Windows 11 x64", "5.1.2"),
@@ -102,6 +134,55 @@ DESKTOP_VARIANTS = [
     ("Desktop", "Windows 10 x64", "5.3.0"),
 ]
 
+# Мобильный пул (Android): реальные модели + правдоподобные версии Telegram for
+# Android. Применяется ТОЛЬКО когда у аккаунта свой api_id (is_mobile) — иначе
+# был бы рассинхрон с Desktop-api_id 2040. По одному фиксированному устройству на
+# аккаунт, не вращать. Версии при необходимости обновлять (t.me/tgstable).
+MOBILE_VARIANTS = [
+    ("Samsung Galaxy S24", "Android 14", "11.4.0"),
+    ("Samsung Galaxy S23", "Android 14", "11.6.1"),
+    ("Samsung Galaxy S24 Ultra", "Android 15", "11.9.0"),
+    ("Samsung Galaxy A55", "Android 14", "11.7.0"),
+    ("Samsung Galaxy A54", "Android 14", "11.5.1"),
+    ("Samsung Galaxy S22", "Android 14", "11.8.2"),
+    ("Google Pixel 8", "Android 15", "11.9.1"),
+    ("Google Pixel 8 Pro", "Android 15", "11.11.0"),
+    ("Google Pixel 7", "Android 14", "11.6.1"),
+    ("Google Pixel 9 Pro", "Android 15", "12.0.1"),
+    ("Xiaomi 14", "Android 14", "11.7.0"),
+    ("Xiaomi 13", "Android 14", "11.5.1"),
+    ("Redmi Note 13 Pro", "Android 14", "11.8.0"),
+    ("Redmi Note 12", "Android 13", "11.4.0"),
+    ("POCO X6 Pro", "Android 14", "11.9.0"),
+    ("OnePlus 12", "Android 14", "11.10.0"),
+    ("OnePlus 11", "Android 14", "11.6.1"),
+    ("OnePlus Nord 3", "Android 14", "11.5.1"),
+    ("realme 11 Pro", "Android 14", "11.7.1"),
+    ("vivo V30", "Android 14", "11.8.1"),
+    ("OPPO Reno 11", "Android 14", "11.6.0"),
+    ("HONOR 90", "Android 14", "11.5.0"),
+    ("Samsung Galaxy S21 FE", "Android 13", "11.4.1"),
+    ("Google Pixel 7a", "Android 14", "11.10.1"),
+]
+
+
+def _variant_pool(acc):
+    """Пул отпечатков под api_id аккаунта: Android для своего api_id, иначе Desktop."""
+    return MOBILE_VARIANTS if is_mobile(acc) else DESKTOP_VARIANTS
+
+
+def _pick_variant(acc):
+    """Свободный уникальный вариант из нужного пула — не повторяем занятую пару
+    (система+версия), чтобы аккаунты не были одинаковыми."""
+    import random
+    pool = _variant_pool(acc)
+    taken = {(str((a.get("device") or {}).get("system_version", "")),
+              str((a.get("device") or {}).get("app_version", "")))
+             for a in load_accounts() if a.get("id") != acc.get("id")}
+    free = [v for v in pool if (v[1], v[2]) not in taken]
+    model, system, app = random.choice(free or pool)
+    return {"device_model": model, "system_version": system, "app_version": app}
+
 
 def device_for(acc):
     """
@@ -110,10 +191,11 @@ def device_for(acc):
     Порядок такой:
       • записаны в accounts.json — берём их (родные данные от продавца или то,
         что мы закрепили при входе);
-      • ещё не записаны, но сессия уже есть — оставляем умолчание Desktop/Windows.
-        Сессия заходила именно так; менять отпечаток живой сессии задним числом
-        опаснее, чем оставить как есть;
-      • аккаунт новый (сессии ещё нет) — выдаём свой Desktop-вариант и закрепляем.
+      • ещё не записаны, сессия живая, аккаунт десктопный (2040) — оставляем
+        умолчание Desktop: менять отпечаток живой сессии задним числом опаснее;
+      • ещё не записаны, но аккаунт мобильный (свой api_id) ИЛИ сессии ещё нет —
+        выдаём свой вариант из нужного пула и закрепляем (для мобильного Desktop-
+        умолчание было бы рассинхроном «десктоп на телефоне»).
     """
     d = acc.get("device")
     if isinstance(d, dict) and d.get("device_model"):
@@ -121,17 +203,10 @@ def device_for(acc):
         out.update({k: v for k, v in d.items() if v})
         return out
 
-    if session_path(acc).exists():
+    if session_path(acc).exists() and not is_mobile(acc):
         return dict(DEVICE)
 
-    # Вариант должен быть СВОИМ: не повторяем уже занятую пару система+версия,
-    # чтобы аккаунты не были одинаковыми.
-    import random
-    taken = {(str((a.get("device") or {}).get("system_version", "")),
-              str((a.get("device") or {}).get("app_version", ""))) for a in load_accounts()}
-    free = [v for v in DESKTOP_VARIANTS if (v[1], v[2]) not in taken]
-    model, system, app = random.choice(free or DESKTOP_VARIANTS)
-    picked = {"device_model": model, "system_version": system, "app_version": app}
+    picked = _pick_variant(acc)
     set_field(acc["id"], device=picked)
     acc["device"] = picked
     out = dict(DEVICE)
@@ -142,19 +217,27 @@ def device_for(acc):
 def ensure_device(acc):
     """
     Закрепить СВОЙ отпечаток перед входом, если его ещё нет. Вызывается скриптами
-    входа ДО connect, чтобы новая сессия сразу завелась под уникальным (но
-    согласованным — Desktop) устройством, а не под общим умолчанием. У кого
-    device уже записан (родной от продавца или наш) — не трогаем.
+    входа ДО connect, чтобы новая сессия сразу завелась под уникальным и
+    согласованным с api_id устройством (Desktop или Android по is_mobile), а не
+    под общим умолчанием. У кого device уже записан (родной/наш) — не трогаем.
     """
     d = acc.get("device")
     if isinstance(d, dict) and d.get("device_model"):
         return d
-    import random
-    taken = {(str((a.get("device") or {}).get("system_version", "")),
-              str((a.get("device") or {}).get("app_version", ""))) for a in load_accounts()}
-    free = [v for v in DESKTOP_VARIANTS if (v[1], v[2]) not in taken]
-    model, system, app = random.choice(free or DESKTOP_VARIANTS)
-    picked = {"device_model": model, "system_version": system, "app_version": app}
+    picked = _pick_variant(acc)
+    set_field(acc["id"], device=picked)
+    acc["device"] = picked
+    return picked
+
+
+def repin_device(acc):
+    """
+    Принудительно закрепить НОВЫЙ уникальный отпечаток из нужного пула — даже если
+    device уже стоит и сессия живая. Для планового перебива (напр. перевод старых
+    аккаунтов на мобильный api_id). Для Telegram это обновление метки устройства
+    существующей авторизации, а не новый вход.
+    """
+    picked = _pick_variant(acc)
     set_field(acc["id"], device=picked)
     acc["device"] = picked
     return picked
@@ -391,7 +474,8 @@ def make_client(acc, **kw):
     if os.environ.get("TG_NO_UPDATES") == "1":
         opts["receive_updates"] = False
     opts.update(kw)
-    return TelegramClient(str(path.with_suffix("")), API_ID, API_HASH,
+    api_id, api_hash = api_for(acc)
+    return TelegramClient(str(path.with_suffix("")), api_id, api_hash,
                           proxy=parse_proxy(acc.get("proxy")),
                           connection_retries=3, timeout=20, **opts)
 

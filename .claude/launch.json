@@ -1,0 +1,38 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "panel-dev",
+      "runtimeExecutable": "node",
+      "runtimeArgs": [
+        "/private/tmp/claude-502/-Users-Geyger-Andrey-Projects-tg-check/2b794ed8-81e1-43e8-85f2-737c631c90e4/scratchpad/dev/run.mjs"
+      ],
+      "port": 8898
+    },
+    {
+      "name": "panel-dev-admin",
+      "runtimeExecutable": "node",
+      "runtimeArgs": [
+        "/private/tmp/claude-502/-Users-Geyger-Andrey-Projects-tg-check/2b794ed8-81e1-43e8-85f2-737c631c90e4/scratchpad/dev/run.mjs",
+        "admin"
+      ],
+      "port": 8898
+    },
+    {
+      "name": "panel-sandbox",
+      "runtimeExecutable": "/usr/bin/env",
+      "runtimeArgs": [
+        "ASOCKS_API=http://127.0.0.1:18997/",
+        "ASOCKS_KEY=sandbox",
+        "TG_ASOCKS_GATEWAY=127.0.0.1:18998",
+        "TG_PANEL_DIR=/private/tmp/claude-502/-Users-Geyger-Andrey-Projects-tg-check/f6eeded2-81ae-435d-8c3f-6eebca54b308/scratchpad/sbx",
+        "node",
+        "/Users/Geyger.Andrey/Projects/tg-check/admin.mjs",
+        "--port",
+        "8899",
+        "--no-open"
+      ],
+      "port": 8899
+    }
+  ]
+}

@@ -18,6 +18,7 @@
       <a class="nav-i" data-view="chatsend"><span class="ni step">4</span> Рассылка по чатам</a>
       <a class="nav-i" data-view="results"><span class="ni">▦</span> Результаты</a>
       <div class="nav-sep">Отдельно</div>
+      <a class="nav-i" data-view="organic"><span class="ni">💬</span> Органика</a>
       <a class="nav-i" data-view="tools"><span class="ni">⚙</span> Обслуживание</a>
     </nav>
     <div class="side-foot">
@@ -171,6 +172,47 @@
         </div>
         <div id="warm-list" style="margin-top:12px"></div>
       </div>
+    </section>
+
+    <!-- ═══════════ ОРГАНИКА (коммент-движок) ═══════════ -->
+    <section class="view" data-view="organic">
+      <div class="card">
+        <div class="cardtitle">Комментинг</div>
+        <p class="hint" style="margin:0 0 10px">Отдельный пул аккаунтов комментит в нишевых чатах и льёт людей в канал. Холодовиков сюда не добавляй — у них своя работа.</p>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <button class="primary" id="org-toggle">—</button>
+          <span id="org-state" class="hint"></span>
+        </div>
+        <div class="fieldset" style="margin-top:12px">
+          <div class="fh">Коммент-пул — кто комментит</div>
+          <p class="hint" style="margin:0 0 8px">Отметь аккаунты-комментаторы. Все отмечены (или никого) = комментят все прогретые.</p>
+          <div id="org-pool" class="crewgrid"></div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:14px">
+        <div class="cardtitle">Персоны и резерв</div>
+        <p class="hint" style="margin:0 0 10px">Персона — характер для комментов (файл personas/&lt;имя&gt;.txt). Резерв — запасной аккаунт: в работу не идёт, автозамена подставит его вместо забаненного.</p>
+        <div id="org-accounts"></div>
+      </div>
+
+      <div class="card" style="margin-top:14px">
+        <div class="cardtitle">Сбор чатов</div>
+        <p class="hint" style="margin:0 0 10px">От каналов-семян находит похожие по рекомендациям Telegram, оставляет только с группой обсуждения и по нише, дописывает в список чатов. Прогресс — в журнале снизу.</p>
+        <div class="frow"><span style="min-width:130px">Аккаунт-искатель</span><select id="org-disc-acc" class="ftext" style="max-width:220px"></select></div>
+        <div class="frow"><span style="min-width:130px">Каналы-семена</span><input id="org-disc-seeds" class="ftext" placeholder="@канал1, @канал2"></div>
+        <div class="frow"><span style="min-width:130px">Ниша</span><input id="org-disc-niche" class="ftext" placeholder="недвижимость Екатеринбурга"></div>
+        <div class="frow">
+          <span style="min-width:130px">Фильтры</span>
+          <input id="org-disc-subs" type="number" value="500" style="max-width:90px"><span>мин. подписчиков</span>
+          <input id="org-disc-score" type="number" value="0.5" step="0.1" min="0" max="1" style="max-width:70px"><span>порог ниши</span>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
+          <button class="ghost" id="org-disc-dry">Собрать пробно</button>
+          <button class="primary" id="org-disc-run">Собрать и записать</button>
+          <span id="org-disc-note" class="hint"></span>
+        </div>
+      </div>
 
       <div class="card" id="cmt-card" style="margin-top:14px">
         <div class="cardtitle">Комментарии в чатах</div>
@@ -185,6 +227,12 @@
         <div id="cmt-pending"></div>
         <div class="trf-h" style="margin-top:14px">Последние отправленные</div>
         <div id="cmt-recent"></div>
+      </div>
+
+      <div class="card" style="margin-top:14px">
+        <div class="cardtitle">Тёплые лиды из комментов</div>
+        <p class="hint" style="margin:0 0 10px">Кто ответил на наш комментарий — кандидаты для холодовиков (файл comment-leads.csv).</p>
+        <div id="org-leads"></div>
       </div>
     </section>
 

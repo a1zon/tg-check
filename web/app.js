@@ -2154,6 +2154,19 @@ const warmup = async () => {
       ? `<p class="hint" style="margin:10px 0 0">Прогреты: <b>${grown.length}</b>` +
         ` — ${grown.map(a => esc(a.title)).join(', ')}</p>`
       : '';
+    // простой журнал: последнее действие каждого аккаунта, свежие сверху
+    if ($('#warm-log')) {
+      const nm = new Map(accs.map(a => [a.id, a.name || a.title]));
+      const ekbT = (ts) => new Date(ts).toLocaleTimeString('ru-RU',
+        { timeZone: 'Asia/Yekaterinburg', hour: '2-digit', minute: '2-digit' });
+      const rows = w.accounts.filter(a => a.act)
+        .map(a => ({ id: a.id, title: a.title, act: a.act, busy: a.busy, ts: a.actAt || Date.now() }))
+        .sort((x, y) => y.ts - x.ts);
+      $('#warm-log').innerHTML = rows.length
+        ? rows.map(a => `<div class="ev"><b style="color:var(--mut)">${ekbT(a.ts)}${a.busy ? ' ●' : ''}</b> ` +
+            `${esc(nm.get(a.id) || a.title)} — ${esc(a.act)}</div>`).join('')
+        : '<span class="hint">пока тихо — действия появятся, когда аккаунт проснётся</span>';
+    }
     $('#warm-list').innerHTML = (warming.length ? warming.map(a => {
       // человеческий статус: что с аккаунтом прямо сейчас
       let now = '';

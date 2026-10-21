@@ -151,7 +151,12 @@ button:disabled{opacity:.4;cursor:default}
 .ev-t,.ev-who{color:var(--mut)}
 .ev-warn{background:rgba(255,107,107,.08)}
 .ev-empty{display:block;padding:10px 12px;color:var(--mut);font-size:13px}
-@media (max-width:700px){.ev{grid-template-columns:78px 20px 1fr}.ev-who{display:none}}
+/* Журнал прогрева кладёт в .ev только два элемента (время + «имя — действие»),
+   а не четыре, как общая лента — поэтому своя сетка, иначе имя валится во
+   вторую узкую колонку и переносится по буквам */
+#warm-log .ev{grid-template-columns:max-content 1fr}
+@media (max-width:700px){.ev{grid-template-columns:78px 20px 1fr}.ev-who{display:none}
+  #warm-log .ev{grid-template-columns:max-content 1fr}}
 #log{background:rgba(4,10,26,.7);color:#c9d6f5;border-radius:12px;padding:12px;height:220px;
      overflow:auto;font:12px/1.6 ui-monospace,Menlo,monospace;white-space:pre-wrap;
      border:1px solid var(--line);margin-top:10px}

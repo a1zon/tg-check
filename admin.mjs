@@ -251,7 +251,10 @@ const proxyGuard = makeProxyGuard({
   parseProxy: accounts.parseProxy,
   label: accounts.proxyLabel,
   proxies: () => accounts.list().filter((a) => accounts.hasSession(a)).map((a) => a.proxy).filter(Boolean),
-  rotateLink: () => warmup.rotate || auto.rotate || '',
+  // личная ссылка перезапуска модема ИМЕННО этого порта (у мобильного
+  // dedicated бэкенд-устройство отваливается поштучно и порт отвечает «404 not
+  // found in region»); не нашли — общий линк смены IP, как раньше
+  rotateLink: async (raw) => (raw ? await asocks.refreshLinkFor(raw) : '') || warmup.rotate || auto.rotate || '',
   rotateIp: (url) => rotateIp(url),
   note: (icon, text) => events.note(icon, text),
   // Пока мы сами переключаем модем, прокси и должен не отвечать. Без этого
@@ -1198,15 +1201,9 @@ function warmActPhrase(r) {
 /** Что показывать в панели про прогрев. */
 function warmView() {
   const now = Date.now();
-  return {
-    on: warmup.on,
-    rotate: warmup.rotate, rotateWait: warmup.rotateWait,
-    maxCap: getMaxCap(), plan: getPlan(), checkMax: getCheckMax(),
-    warmDays: getWarmDays(),
-    between: warmup.between,
-    only: warmup.only,
-    alone: !ownProxyEach() || !!warmup.rotate,
-    accounts: (() => {
+  const h = workHour();
+  const inWindow = h >= LIVELY_FROM && h < LIVELY_TO;   // окно прогрева по Екб
+  const accs = (() => {
       // последнее действие каждого аккаунта из истории — чтобы в паузе было
       // видно, что прогрев реально что-то делал, а не «отдыхает» в пустоту
       const lastAct = new Map();
@@ -1217,9 +1214,14 @@ function warmView() {
       const busy = /Прогрев/.test(rc?.title || '');
       const lr = lastAct.get(a.id);
       const w = warm(a);
+      // прокси аккаунта лежит — прогрев по нему СТОИТ (warmTick его пропускает).
+      // Это и есть «идёт или не идёт»: без этого панель рисовала бы прогресс и
+      // «последнее действие» у аккаунта, который на деле сутками не работает.
+      const proxyDown = !!a.proxy && proxyGuard.down(a.proxy);
       return {
         id: a.id, title: a.title,
         busy,
+        proxyDown,
         // что делает прямо сейчас (живьём из процесса) или сделал в прошлый заход
         act: busy ? (rc?.state?.act || 'работает') : (lr ? warmActPhrase(lr) : (st.act || '')),
         actAt: busy ? 0 : (lr ? (Date.parse(lr.at) || 0) : 0),
@@ -1238,7 +1240,24 @@ function warmView() {
         spam: a.spam || '', spamOk: a.spamOk !== false, spamAt: a.spamAt || '',
       };
     });
-    })(),
+    })();
+  const downN = accs.filter((a) => a.proxyDown).length;
+  return {
+    on: warmup.on,
+    rotate: warmup.rotate, rotateWait: warmup.rotateWait,
+    maxCap: getMaxCap(), plan: getPlan(), checkMax: getCheckMax(),
+    warmDays: getWarmDays(),
+    between: warmup.between,
+    only: warmup.only,
+    alone: !ownProxyEach() || !!warmup.rotate,
+    // честный признак простоя: прогрев включён, сейчас рабочее окно, но у части
+    // (или всех) аккаунтов лежит прокси — значит по ним НЕ идёт, и панель должна
+    // сказать это прямо, а не рисовать прогресс
+    inWindow,
+    down: downN,
+    stalled: warmup.on && inWindow && downN > 0 && downN >= accs.length,
+    partStalled: warmup.on && inWindow && downN > 0 && downN < accs.length,
+    accounts: accs,
   };
 }
 

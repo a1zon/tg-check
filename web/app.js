@@ -2120,7 +2120,29 @@ const warmup = async () => {
       : (w.rotate ? 'ссылка задана — IP меняется между аккаунтами' : '');
     $('#b-warm').textContent = warmOn ? 'Выключить прогрев' : 'Включить прогрев';
     $('#b-warm').className = warmOn ? 'ghost' : 'primary';
-    $('#warm-state').textContent = warmOn ? `работает по ${w.accounts.length} акк.` : '';
+    $('#warm-state').textContent = !warmOn ? ''
+      : w.stalled ? '⛔ простой — прокси недоступны'
+      : w.partStalled ? `работает, но ${w.down} из ${w.accounts.length} стоят (прокси)`
+      : `работает по ${w.accounts.length} акк.`;
+    // Честный баннер простоя: когда прогрев включён и окно открыто, но прокси
+    // лежат — прямо говорим, что НЕ идёт, а не рисуем прогресс в пустоту.
+    const stall = $('#warm-stall');
+    if (stall) {
+      if (warmOn && w.stalled) {
+        stall.hidden = false;
+        stall.style.cssText = 'margin:8px 0;padding:9px 12px;border-radius:8px;font-size:13px;' +
+          'background:rgba(220,60,60,.12);color:var(--no);border:1px solid rgba(220,60,60,.4)';
+        stall.innerHTML = `⛔ <b>Прогрев стоит: прокси недоступны у всех ${w.down} акк.</b> ` +
+          'Действия сейчас не идут — прогресс ниже заморожен, это не рост. ' +
+          'Панель сама перезапускает модемы (раз в 5 мин); если за 10–15 мин не поднимется — проверь кабинет Asocks.';
+      } else if (warmOn && w.partStalled) {
+        stall.hidden = false;
+        stall.style.cssText = 'margin:8px 0;padding:9px 12px;border-radius:8px;font-size:13px;' +
+          'background:rgba(230,170,40,.12);color:#c98a00;border:1px solid rgba(230,170,40,.4)';
+        stall.innerHTML = `⚠ <b>Частичный простой: прокси лежат у ${w.down} из ${w.accounts.length} акк.</b> ` +
+          'По ним прогрев не идёт (помечены в списке ⛔). Остальные работают. Модемы перезапускаются сами.';
+      } else { stall.hidden = true; stall.innerHTML = ''; }
+    }
     // догрев между пачками рассылки («Живой день») — видно прямо тут, включён ли
     $('#warm-between').innerHTML = !warmOn
       ? '<span style="color:var(--mut)">Догрев между пачками рассылки тоже не идёт — он работает только при включённом прогреве.</span>'
@@ -2172,6 +2194,8 @@ const warmup = async () => {
       let now = '';
       const nextTxt = a.dayLeft <= 0 ? 'на сегодня всё' : `дальше через ${fmtWarmWait(a.wait)}`;
       if (!warmOn) now = '';
+      // прокси лежит — прогрев по аккаунту СТОИТ: не делаем вид, что «дальше через…»
+      else if (a.proxyDown) now = '⛔ прокси недоступен — прогрев по нему стоит';
       else if (a.busy) now = `● сейчас: ${a.act || 'работает'}`;
       else if (a.resting) now = `на отлёжке — старт через ${fmtWarmWait(a.restLeft)}`;
       else if (a.act) {
@@ -2181,12 +2205,14 @@ const warmup = async () => {
       else if (a.dayLeft <= 0) now = 'на сегодня всё, продолжит завтра';
       else if (a.wait <= 0) now = 'ждёт очереди…';
       else now = `следующий заход через ${fmtWarmWait(a.wait)}`;
-      const col = a.busy ? 'var(--ok)' : 'var(--mut)';
+      const col = a.proxyDown ? 'var(--no)' : (a.busy ? 'var(--ok)' : 'var(--mut)');
       // полоса прогресса прогрева
       const pct = Math.max(0, Math.min(100, a.pct || 0));
       const done = a.day >= a.fullDay;
       const barCls = a.resting ? 'rest' : (done ? 'full' : '');
-      const barLbl = a.resting
+      const barLbl = a.proxyDown
+        ? `⛔ прокси недоступен — прогресс стоит (день ${a.day})`
+        : a.resting
         ? `отлёжка · старт через ${fmtWarmWait(a.restLeft)}`
         : done
           ? `прогрет · день ${a.day}`

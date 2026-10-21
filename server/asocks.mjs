@@ -143,5 +143,45 @@ export function makeAsocks({ dir }) {
     return { user: m[1], password: m[2], port: m[3], country, states: states.map((x) => ({ id: x.id, name: x.name })) };
   }
 
-  return { snapshot, summary, search, sessionBase, enabled: () => !!key() };
+  /**
+   * Личная ссылка перезапуска модема (refresh) для строки прокси этого порта.
+   *
+   * Зачем. У мобильного dedicated-порта закреплённое устройство иногда уходит
+   * из сети, и порт начинает отвечать «404 Proxy not found in your region» —
+   * шлюз жив, а бэкенда под портом нет. refresh переназначает порту живое
+   * устройство. Раньше сторож прокси дёргал один ОБЩИЙ линк смены IP (наследие
+   * единого пула); для своих портов он пустой, поэтому мёртвый порт мог лежать
+   * сутками, а прогон и прогрев — стоять. Теперь у каждого порта своя ссылка:
+   * id порта находим по логину (он есть в строке прокси и уникален на порт),
+   * а ссылку собираем с ключом кабинета.
+   *
+   * Индекс портов кэшируем на 5 минут: сторож зовёт это только по лежащему
+   * прокси и не чаще раза в 5 минут, лишний раз кабинет не дёргаем.
+   */
+  let portIdx = { at: 0, byKey: new Map() };
+  async function portIndex() {
+    if (portIdx.byKey.size && Date.now() - portIdx.at < 5 * 60_000) return portIdx.byKey;
+    try {
+      const pr = await get('v2/proxy/ports?per_page=500');
+      const m = new Map();
+      for (const x of ((pr.message || {}).proxies || [])) {
+        if (x.login) m.set(String(x.login), x.id);     // по логину — основной путь
+        if (x.proxy) m.set(String(x.proxy), x.id);     // по «шлюз:порт» — запасной
+      }
+      if (m.size) portIdx = { at: Date.now(), byKey: m };
+    } catch {}
+    return portIdx.byKey;
+  }
+  async function refreshLinkFor(raw) {
+    const k = key();
+    if (!k || !raw) return '';
+    const mLogin = /:\/\/([^:/@]+):/.exec(String(raw));   // http://ЛОГИН:пароль@…
+    const mHp = /@([^@/]+:\d+)/.exec(String(raw));        // @шлюз:порт
+    const idx = await portIndex();
+    const id = (mLogin && idx.get(decodeURIComponent(mLogin[1])))
+            || (mHp && idx.get(mHp[1])) || '';
+    return id ? `${API}v2/proxy/refresh/${id}?apiKey=${encodeURIComponent(k)}` : '';
+  }
+
+  return { snapshot, summary, search, sessionBase, refreshLinkFor, enabled: () => !!key() };
 }

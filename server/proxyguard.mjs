@@ -124,8 +124,13 @@ export function makeProxyGuard({ parseProxy, label, proxies, rotateLink, rotateI
   }
 
   async function revive(raw, s) {
-    const link = rotateLink();
-    if (!link || Date.now() - s.revivedAt < REVIVE_EVERY) return;
+    // интервал проверяем ДО поиска ссылки: у своих портов ссылка личная и
+    // достаётся запросом в кабинет (с кэшем) — незачем дёргать его каждый тик
+    if (Date.now() - s.revivedAt < REVIVE_EVERY) return;
+    // личная ссылка перезапуска именно этого порта (у мобильного dedicated
+    // бэкенд отваливается поштучно); если её нет — общий линк смены IP
+    const link = await rotateLink(raw);
+    if (!link) return;
     s.revivedAt = Date.now();
     const r = await rotateIp(link);
     note('🔄', r.ok ? 'попросил провайдера перезапустить модем — жду, проверю через 30 с'

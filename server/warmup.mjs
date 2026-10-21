@@ -107,7 +107,7 @@ export function regDateFromId(userId) {
  * объём. Пороги (мес. → дней) легко менять; результат в тех же рамках, что и
  * ручная настройка (WARM_DAYS_MIN..MAX). null — если возраст не определить.
  */
-const WARM_BY_AGE = [[3, 18], [6, 15], [12, 12], [20, 10], [36, 7]];
+const WARM_BY_AGE = [[3, 12], [8, 10], [18, 8], [36, 7]];
 export function warmDaysForAge(userId, now = Date.now()) {
   const d = regDateFromId(userId);
   if (d == null) return null;

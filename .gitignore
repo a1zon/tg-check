@@ -96,3 +96,4 @@ tests/sandbox/profile/
 
 # аудио звонков не держим в git (крупный бинарь, ценность — в расшифровке)
 transcripts/*.wav
+transcripts/

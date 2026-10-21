@@ -2210,13 +2210,16 @@ const warmup = async () => {
       const pct = Math.max(0, Math.min(100, a.pct || 0));
       const done = a.day >= a.fullDay;
       const barCls = a.resting ? 'rest' : (done ? 'full' : '');
+      // простой (лёг прокси, паузы) зрелость не двигает — показываем, сколько
+      // суток не засчитано, чтобы «день N» не выглядел липовым ростом
+      const idleTxt = a.idleDays > 0 ? ` · ${a.idleDays} дн. простоя не в счёт` : '';
       const barLbl = a.proxyDown
         ? `⛔ прокси недоступен — прогресс стоит (день ${a.day})`
         : a.resting
         ? `отлёжка · старт через ${fmtWarmWait(a.restLeft)}`
         : done
           ? `прогрет · день ${a.day}`
-          : `прогрев ${pct}% · день ${a.day} из ${a.fullDay}`;
+          : `прогрев ${pct}% · день ${a.day} из ${a.fullDay}${idleTxt}`;
       return `
       <div class="arow">
         <b>${esc(a.title)}</b>

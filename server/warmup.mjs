@@ -182,6 +182,43 @@ export function makeWarmup({ readCsv, accounts }) {
   }
 
   /**
+   * РЕАЛЬНЫЕ ДНИ ПРОГРЕВА — в какие даты аккаунт правда что-то делал.
+   *
+   * Зачем. Зрелость прогрева раньше считалась по календарю: «прошли сутки —
+   * +1 день, полоса растёт». Но если аккаунт простоял (лёг прокси, пауза),
+   * он за эти сутки не сделал ничего, а полоса всё равно росла — панель
+   * показывала «день 3», когда аккаунт только-только начал. Честно считать
+   * прогресс по ДНЯМ С ДЕЙСТВИЕМ: дата с хотя бы одним успешным действием
+   * прогрева (warmup.csv, note=ok) или отправленным/черновиком письма
+   * (drafts.csv). Пустой день прогресс не двигает.
+   *
+   * Дату берём по Екб (UTC+5), чтобы «день» совпадал с окном прогрева.
+   * Кэш на 30с: список аккаунтов панель опрашивает каждые 2с, а гранулярность
+   * тут суточная — чаще пересчитывать весь журнал незачем.
+   */
+  // карта: id -> набор Екб-дат, когда аккаунт реально что-то делал. Фильтр
+  // «с начала прогрева» делаем в warm() (там знаем warmFrom), а строим карту раз.
+  // Сторож кэша по времени построения (не по map.size): пустую карту тоже кэшируем,
+  // иначе на старте кампании (журналы ещё без успехов) warm() строил бы её на
+  // КАЖДЫЙ аккаунт при опросе раз в 2с. readCsv здесь = readAll — оба набора.
+  let activeCache = { at: 0, map: null };
+  function activeDaysMap() {
+    if (activeCache.map && Date.now() - activeCache.at < 30_000) return activeCache.map;
+    const map = new Map();
+    const add = (id, iso) => {
+      const t = Date.parse(iso || '');
+      if (!id || !t) return;
+      const d = new Date(t + 5 * 3600_000).toISOString().slice(0, 10);   // дата по Екб
+      let s = map.get(id); if (!s) map.set(id, s = new Set());
+      s.add(d);
+    };
+    for (const r of readCsv('warmup.csv')) if (r.note === 'ok') add(r.account, r.at);
+    for (const r of readCsv('drafts.csv')) if (r.ok === 'true' || r.sent === 'true') add(r.account, r.at);
+    activeCache = { at: Date.now(), map };
+    return map;
+  }
+
+  /**
    * С какого момента считать возраст. Ставим один раз и запоминаем в реестре.
    * Аккаунт, который успел поработать до появления прогрева, в отлёжку не
    * загоняем — он своё «детство» прожил, ему засчитываем зрелый возраст.
@@ -193,7 +230,11 @@ export function makeWarmup({ readCsv, accounts }) {
     const from = worked
       ? new Date(Date.now() - 10 * 864e5).toISOString()
       : (acc.added || new Date().toISOString());
-    accounts.setField(acc.id, { warmFrom: from });
+    // prewarmed — «пришёл уже поработавшим»: зрелость такому считаем по
+    // календарю, а не по активным дням (у него их в наших журналах может и не
+    // быть). Без флага он завис бы на ранней ступени и не выпускался.
+    accounts.setField(acc.id, { warmFrom: from, prewarmed: worked });
+    acc.warmFrom = from; acc.prewarmed = worked;   // текущий вызов warm() уже видит
     return Date.parse(from);
   }
 
@@ -205,7 +246,26 @@ export function makeWarmup({ readCsv, accounts }) {
   function warm(acc, done) {
     const from = warmFrom(acc);
     const age = (Date.now() - from) / 864e5;   // возраст в сутках, дробный
-    const day = Math.floor(age);
+    const calDay = Math.floor(age);            // по календарю (как было)
+    const restDone = age >= 1;                 // отлёжка — ровно сутки по часам
+    // РЕАЛЬНЫЙ день прогрева: сколько РАЗНЫХ дней аккаунт правда что-то делал —
+    // но только С НАЧАЛА ТЕКУЩЕГО прогрева (даты >= warmFrom). Простой (лёг
+    // прокси, пауза) зрелость не двигает; а сброс warmFrom (активация резерва,
+    // ручной возврат) честно начинает счёт заново — старая история не засчитывается.
+    const fromDate = new Date(from + 5 * 3600_000).toISOString().slice(0, 10);   // дата warmFrom по Екб
+    const set = activeDaysMap().get(acc.id);
+    const active = set ? [...set].filter((d) => d >= fromDate).length : 0;
+    // ЗРЕЛЫЙ аккаунт — уже в рассылке (role=send), выпущен (graduated) или пришёл
+    // поработавшим (prewarmed): зрелость по активным дням НЕ пересчитываем, иначе
+    // бурстовая отправка, работа в другом наборе или простой прокси задним числом
+    // срезали бы дневной лимит с плато до ступени разгона. Ему — календарный день.
+    const mature = acc.graduated === true || acc.role === 'send' || acc.prewarmed === true;
+    // греющийся — по реальным дням активности, но НЕ опережая календарь (защита от
+    // «двух дат за сутки» на границе полуночи); зрелый — по календарю.
+    const day = !restDone ? 0
+      : mature ? calDay
+      : Math.min(calDay, Math.max(active || 1, 0));
+    const idleDays = mature ? 0 : Math.max(0, calDay - day);   // сколько суток простоя не в счёт
     const steps = plan();
     let step = steps[0];
     for (const p of steps) if (day >= p.day) step = p;
@@ -232,11 +292,12 @@ export function makeWarmup({ readCsv, accounts }) {
     if (perAcc > 0 && !resting) cap = perAcc;
     const manual = !resting && (perAcc > 0 || (maxCap > 0 && step === lastStep));
     return {
-      day, age, fullDay, cap, resting, manual, atMax: step === lastStep,
+      day, age, calDay, idleDays, fullDay, cap, resting, manual, atMax: step === lastStep,
       note: perAcc > 0 && !resting ? `тест: ${cap} в сутки` : step.note,
-      // общий прогресс прогрева, 0..100: от покупки до «прогрет»
-      pct: Math.min(100, Math.round((age / fullDay) * 100)),
-      restLeft: resting ? Math.max(0, Math.ceil((from + 864e5 - Date.now()) / 1000)) : 0,
+      // прогресс прогрева, 0..100 — по РЕАЛЬНЫМ дням (day), а не по календарю:
+      // в простое полоса стоит, как и день
+      pct: Math.min(100, Math.round((day / fullDay) * 100)),
+      restLeft: !restDone ? Math.max(0, Math.ceil((from + 864e5 - Date.now()) / 1000)) : 0,
       left: Math.max(0, cap - (done ?? doneToday(acc.id))),
     };
   }

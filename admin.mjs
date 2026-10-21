@@ -1234,6 +1234,8 @@ function warmView() {
         // и сколько ещё лежать до старта (для отлёжки)
         day: w.day, dayLeft: w.left, resting: w.resting, restLeft: w.restLeft || 0,
         cap: w.cap, fullDay: w.fullDay, idleDays: w.idleDays || 0,
+        // примерная дата регистрации (по TG-id) и откуда длина прогрева
+        regDate: w.regDate, daysSrc: w.daysSrc,
         // ЕДИНАЯ шкала для всех: общий прогон от покупки до «прогрет» (fullDay суток).
         // Отлёжка — это первые сутки, т.е. первые ~10% полосы, поэтому у лежащих
         // аккаунтов полоса короткая — так и должно быть, они в самом начале.

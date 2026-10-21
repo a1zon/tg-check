@@ -57,6 +57,66 @@ export function planFor(days) {
 }
 
 /**
+ * Примерная дата регистрации аккаунта по его Telegram-id.
+ *
+ * Зачем. Свежий аккаунт Telegram морозит на первом же холодном касании, а
+ * старый на том же IP отделывается временным лимитом (проверено: id ~8.6 млрд =
+ * 2025 морозятся, id ~7.3 млрд = 2024 — только temp). Значит, длину прогрева
+ * лучше ставить от ВОЗРАСТА аккаунта, а возраст виден по id: Telegram выдаёт
+ * номера почти по порядку, чем позже регистрация — тем больше число.
+ *
+ * Точную формулу Telegram не публикует, поэтому оцениваем кусочно-линейной
+ * интерполяцией по опорным точкам (id → примерная дата). Это ОЦЕНКА ±пара
+ * месяцев — её хватает, чтобы отнести аккаунт к нужной «корзине» прогрева.
+ * Опорные точки держать монотонными; при желании уточнить — правятся здесь.
+ */
+const ID_ANCHORS = [
+  [  200_000_000, Date.parse('2017-06-01')],
+  [  800_000_000, Date.parse('2020-10-01')],
+  [1_500_000_000, Date.parse('2022-02-01')],
+  [2_500_000_000, Date.parse('2022-10-01')],
+  [4_000_000_000, Date.parse('2023-06-01')],
+  [5_500_000_000, Date.parse('2023-12-01')],
+  [6_500_000_000, Date.parse('2024-03-01')],
+  [7_300_000_000, Date.parse('2024-07-01')],
+  [8_200_000_000, Date.parse('2025-01-01')],
+  [8_600_000_000, Date.parse('2025-06-01')],
+  [9_200_000_000, Date.parse('2025-12-01')],
+];
+export function regDateFromId(userId) {
+  const id = Number(userId);
+  if (!Number.isFinite(id) || id <= 0) return null;
+  const A = ID_ANCHORS;
+  // до первой опоры — берём первую дату; дальше — линейная интерполяция, за
+  // последней опорой экстраполируем по наклону последнего отрезка
+  if (id <= A[0][0]) return A[0][1];
+  for (let i = 1; i < A.length; i++) {
+    if (id <= A[i][0]) {
+      const [x0, t0] = A[i - 1], [x1, t1] = A[i];
+      return t0 + (t1 - t0) * (id - x0) / (x1 - x0);
+    }
+  }
+  const [x0, t0] = A[A.length - 2], [x1, t1] = A[A.length - 1];
+  return t0 + (t1 - t0) * (id - x0) / (x1 - x0);
+}
+
+/**
+ * Рекомендованная длина прогрева (дней) по возрасту аккаунта.
+ *
+ * Свежий греем дольше (его и морозят), старый доверенный — быстрее выходит на
+ * объём. Пороги (мес. → дней) легко менять; результат в тех же рамках, что и
+ * ручная настройка (WARM_DAYS_MIN..MAX). null — если возраст не определить.
+ */
+const WARM_BY_AGE = [[3, 18], [6, 15], [12, 12], [20, 10], [36, 7]];
+export function warmDaysForAge(userId, now = Date.now()) {
+  const d = regDateFromId(userId);
+  if (d == null) return null;
+  const months = (now - d) / (2629800000);   // ≈30.44 суток
+  for (const [m, days] of WARM_BY_AGE) if (months < m) return days;
+  return 5;   // старше последнего порога — минимальное доверие по умолчанию
+}
+
+/**
  * РАЗГОН РАССЫЛКИ по дню кампании (не по возрасту прогрева): день 0 — первый день
  * реальных сообщений аккаунта. Даже прогретый аккаунт, впервые пошедший в рассылку,
  * стартует с 2/сутки — иначе PEER_FLOOD на запуске. Совпадает с web/app.js:OUTREACH_PLAN.
@@ -266,7 +326,16 @@ export function makeWarmup({ readCsv, accounts }) {
       : mature ? calDay
       : Math.min(calDay, Math.max(active || 1, 0));
     const idleDays = mature ? 0 : Math.max(0, calDay - day);   // сколько суток простоя не в счёт
-    const steps = plan();
+    // ДЛИНА ПРОГРЕВА от возраста аккаунта: свежий (его и морозят на холодном
+    // касании) греем дольше, старый доверенный — быстрее. Ручная настройка
+    // аккаунта (acc.warmDays) главнее всего; у зрелых берём общий срок, чтобы
+    // расширение не сдвинуло их плато и не срезало дневной лимит задним числом.
+    const regDate = regDateFromId(acc.user_id);
+    const autoDays = warmDaysForAge(acc.user_id);
+    const effDays = Number(acc.warmDays) > 0 ? Number(acc.warmDays)
+      : mature ? warmDays
+      : (autoDays || warmDays);
+    const steps = planFor(effDays);
     let step = steps[0];
     for (const p of steps) if (day >= p.day) step = p;
     const resting = step.cap === 0;
@@ -293,6 +362,10 @@ export function makeWarmup({ readCsv, accounts }) {
     const manual = !resting && (perAcc > 0 || (maxCap > 0 && step === lastStep));
     return {
       day, age, calDay, idleDays, fullDay, cap, resting, manual, atMax: step === lastStep,
+      // примерная дата регистрации (по TG-id) и откуда взялась длина прогрева —
+      // для показа в панели; auto=по возрасту, manual=ручная, default=общий срок
+      regDate: regDate ? new Date(regDate).toISOString() : null,
+      daysSrc: Number(acc.warmDays) > 0 ? 'manual' : (!mature && autoDays ? 'auto' : 'default'),
       note: perAcc > 0 && !resting ? `тест: ${cap} в сутки` : step.note,
       // прогресс прогрева, 0..100 — по РЕАЛЬНЫМ дням (day), а не по календарю:
       // в простое полоса стоит, как и день

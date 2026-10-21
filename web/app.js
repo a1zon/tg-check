@@ -2213,13 +2213,19 @@ const warmup = async () => {
       // простой (лёг прокси, паузы) зрелость не двигает — показываем, сколько
       // суток не засчитано, чтобы «день N» не выглядел липовым ростом
       const idleTxt = a.idleDays > 0 ? ` · ${a.idleDays} дн. простоя не в счёт` : '';
+      // примерная дата регистрации (по TG-id) — объясняет длину прогрева:
+      // свежий аккаунт греем дольше (его и морозит на холодном касании)
+      const regTxt = a.regDate
+        ? ` · рег ~${new Date(a.regDate).toLocaleDateString('ru-RU', { month: '2-digit', year: 'numeric' })}`
+        + (a.daysSrc === 'auto' ? ` → ${a.fullDay} дн.` : a.daysSrc === 'manual' ? ' (срок вручную)' : '')
+        : '';
       const barLbl = a.proxyDown
         ? `⛔ прокси недоступен — прогресс стоит (день ${a.day})`
         : a.resting
-        ? `отлёжка · старт через ${fmtWarmWait(a.restLeft)}`
+        ? `отлёжка · старт через ${fmtWarmWait(a.restLeft)}${regTxt}`
         : done
-          ? `прогрет · день ${a.day}`
-          : `прогрев ${pct}% · день ${a.day} из ${a.fullDay}${idleTxt}`;
+          ? `прогрет · день ${a.day}${regTxt}`
+          : `прогрев ${pct}% · день ${a.day} из ${a.fullDay}${idleTxt}${regTxt}`;
       return `
       <div class="arow">
         <b>${esc(a.name || a.title)}</b>

@@ -1220,6 +1220,8 @@ function warmView() {
       const proxyDown = !!a.proxy && proxyGuard.down(a.proxy);
       return {
         id: a.id, title: a.title,
+        // имя как на вкладке «Аккаунты» — чтобы везде звать аккаунт одинаково
+        name: a.name || a.title,
         busy,
         proxyDown,
         // что делает прямо сейчас (живьём из процесса) или сделал в прошлый заход

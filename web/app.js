@@ -1722,7 +1722,7 @@ document.querySelectorAll('button[data-t]').forEach(b => b.onclick = async () =>
   const voiceMode = drafts && $('#voicemode').checked;
 
   // кто участвует: для проверки/рассылки — набор work, иначе выбранный (cur)
-  const chosen = accs.filter(a => work.has(a.id) && accReady(a)).map(a => a.title);
+  const chosen = accs.filter(a => work.has(a.id) && accReady(a)).map(a => a.name || a.title);
   if (multi && !chosen.length) { alert('Отметь хотя бы один вошедший аккаунт'); return; }
   const whoList = chosen.join(', ');
   const per = drafts ? $('#dlimit').value : $('#limit').value;
@@ -1776,7 +1776,7 @@ $('#send').onchange = () => {
 };
 
 $('#b-reset').onclick = async () => {
-  const who = accs.map(a => a.title).join(', ');
+  const who = accs.map(a => a.name || a.title).join(', ');
   if (!confirm(
       'Выйти из всех аккаунтов и очистить панель?\n\n' +
       (who ? `Выйдут: ${who}.\n\n` : '') +
@@ -2174,7 +2174,7 @@ const warmup = async () => {
     const warming = w.accounts.filter(a => !(a.day >= a.fullDay && !a.resting));
     const grownLine = grown.length
       ? `<p class="hint" style="margin:10px 0 0">Прогреты: <b>${grown.length}</b>` +
-        ` — ${grown.map(a => esc(a.title)).join(', ')}</p>`
+        ` — ${grown.map(a => esc(a.name || a.title)).join(', ')}</p>`
       : '';
     // простой журнал: последнее действие каждого аккаунта, свежие сверху
     if ($('#warm-log')) {
@@ -2222,7 +2222,7 @@ const warmup = async () => {
           : `прогрев ${pct}% · день ${a.day} из ${a.fullDay}${idleTxt}`;
       return `
       <div class="arow">
-        <b>${esc(a.title)}</b>
+        <b>${esc(a.name || a.title)}</b>
         <span style="color:${a.spam && !a.spamOk ? 'var(--no)' : 'var(--mut)'};font-size:12px">${
           esc(a.spam ? a.spam.slice(0, 70) : 'SpamBot ещё не спрашивали')}${
           warmOn ? ` · сегодня осталось ${Math.max(0, a.dayLeft)}` : ''}</span>

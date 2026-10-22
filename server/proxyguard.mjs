@@ -28,6 +28,7 @@ const EVERY_OK = 4 * 60_000;   // прокси жив — переопрашив
 const EVERY_DOWN = 30_000;     // лежит — чаще, чтобы не прозевать подъём
 const DOWN_AFTER = 2;          // столько неудач подряд — значит лежит, а не моргнул
 const REVIVE_EVERY = 2 * 60_000;   // лежит — дёргаем refresh раз в 2 минуты
+const DEDUP_GAP = 3 * 60_000;      // дубль IP — рефрешим лишний не чаще раза в 3 мин
 // ipinfo по http: кроме IP отдаёт страну — по ней панель замечает, что своя строка «уехала»
 // из Казахстана (16.10 одна такая сессия вышла из Колумбии)
 const PROBE_URL = 'http://ipinfo.io/json';
@@ -145,6 +146,39 @@ export function makeProxyGuard({ parseProxy, label, proxies, rotateLink, rotateI
                     : `перезапустить модем не вышло: ${r.reason}`);
   }
 
+  /**
+   * Дедуп выходных IP. Два ЖИВЫХ прокси на одном адресе = связка для Telegram.
+   * Появляется так: у мёртвого порта refresh берёт из тонкого мобильного пула
+   * первое свободное устройство — иногда то же, что уже у соседа. Поэтому сразу
+   * после подъёма проверяем: если IP совпал с соседним живым — рефрешим ЛИШНИЙ
+   * (не первый в группе) ещё раз, на другой IP. Так дубль живёт секунды, а не
+   * до следующего прогона внешнего дедупа.
+   *
+   * ВАЖНО: только dedicated-порты. Строки общего пула (`-pool-…-mode-query`)
+   * рефрешить нельзя — их refresh крутит ОДИН порт на всех аккаунтах.
+   * Кулдаун DEDUP_GAP на прокси и общий с revive revivedAt — чтобы не дёргать,
+   * пока новый IP ещё устаканивается, и чтобы revive не рефрешил повторно.
+   */
+  async function dedup() {
+    const byIp = new Map();
+    for (const raw of new Set(proxies())) {
+      const s = st.get(raw);
+      if (!s || s.down || !s.ip || /-pool-/.test(raw)) continue;
+      let g = byIp.get(s.ip); if (!g) byIp.set(s.ip, g = []); g.push([raw, s]);
+    }
+    for (const group of byIp.values()) {
+      if (group.length < 2) continue;
+      for (const [raw, s] of group.slice(1)) {        // первый остаётся
+        if (Date.now() - (s.dedupAt || 0) < DEDUP_GAP) continue;
+        const link = await rotateLink(raw);
+        if (!link) continue;                           // пул/неизвестный порт — не трогаем
+        s.dedupAt = s.revivedAt = Date.now();
+        note('🔀', `${label(raw)} вышел с тем же IP ${s.ip}, что и сосед — меняю, чтобы не было связки`);
+        await rotateIp(link);
+      }
+    }
+  }
+
   async function tick() {
     const now = Date.now();
     // идёт смена IP — модем сейчас и не должен отвечать, это не падение
@@ -157,6 +191,7 @@ export function makeProxyGuard({ parseProxy, label, proxies, rotateLink, rotateI
       await check(raw);
       if (s.down) await revive(raw, s);
     }
+    await dedup();
   }
 
   return {

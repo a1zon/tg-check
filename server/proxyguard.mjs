@@ -79,13 +79,19 @@ export function makeProxyGuard({ parseProxy, label, proxies, rotateLink, rotateI
         // мобильному IP) — прокси работает, его трогать нельзя (иначе встанет
         // прогон и сторож зря сменит строку). IP/страну берём только из 200+JSON.
         const GW_DOWN = ['407', '502', '503', '504'];   // шлюз/модем прокси не отработал
-        const proxyBad = exit !== 0 || GW_DOWN.includes(connect) || GW_DOWN.includes(code) || code === '000';
+        // Мёртвый мобильный порт Asocks отвечает 404 «Proxy not found in your
+        // region» — это ПАДЕНИЕ порта (бэкенд отвалился), а не ответ сайта. По
+        // коду 404 неотличимо от реального 404 сайта, поэтому ловим по телу: иначе
+        // сторож считает порт живым и самолечение (refresh) не запускается.
+        const asocksDead = /not found in your region|proxy not found/i.test(body);
+        const proxyBad = exit !== 0 || asocksDead || GW_DOWN.includes(connect) || GW_DOWN.includes(code) || code === '000';
         // сайт ответил нормальным кодом (200, а также 429 rate-limit, 403, 404…) —
         // значит прокси ДОВЁЛ запрос, он живой; IP/страну берём только из 200+JSON
         if (!proxyBad && /^[234]\d\d$/.test(code || '')) {
           return done(code === '200' && /^[\d.:a-f]+$/i.test(ip) ? { ok: true, ip, country } : { ok: true });
         }
-        done({ ok: false, reason: why(connect && connect !== '000' ? connect : code, exit) });
+        done({ ok: false, reason: asocksDead ? 'порт Asocks без бэкенда (404 not found in region) — нужен refresh'
+                                             : why(connect && connect !== '000' ? connect : code, exit) });
       });
     });
   }

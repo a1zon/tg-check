@@ -28,7 +28,15 @@ const EVERY_OK = 4 * 60_000;   // прокси жив — переопрашив
 const EVERY_DOWN = 30_000;     // лежит — чаще, чтобы не прозевать подъём
 const DOWN_AFTER = 2;          // столько неудач подряд — значит лежит, а не моргнул
 const REVIVE_EVERY = 2 * 60_000;   // лежит — дёргаем refresh раз в 2 минуты
-const DEDUP_GAP = 3 * 60_000;      // дубль IP — рефрешим лишний не чаще раза в 3 мин
+const DEDUP_GAP = 90_000;          // дубль IP — рефрешим лишний не чаще раза в 1.5 мин
+// Тонкий KZ-пул отдаёт горстку «ходовых» адресов (176.64.5.x и т.п.) чаще
+// прочих, поэтому refresh лишнего порта иногда СНОВА садится на тот же IP, что у
+// соседа. Без предела дедуп гонял бы такой порт по кругу — менял IP аккаунту
+// каждые DEDUP_GAP и зря, пул всё равно возвращает тот же адрес. Поэтому: столько
+// рефрешей подряд не развели дубль — порт залип, отступаем надолго (пул сам
+// подкинет другой адрес позже), чтобы не дёргать живой аккаунт впустую.
+const STUCK_AFTER = 3;
+const STUCK_COOLDOWN = 30 * 60_000;
 // ipinfo по http: кроме IP отдаёт страну — по ней панель замечает, что своя строка «уехала»
 // из Казахстана (16.10 одна такая сессия вышла из Колумбии)
 const PROBE_URL = 'http://ipinfo.io/json';
@@ -166,12 +174,28 @@ export function makeProxyGuard({ parseProxy, label, proxies, rotateLink, rotateI
       if (!s || s.down || !s.ip || /-pool-/.test(raw)) continue;
       let g = byIp.get(s.ip); if (!g) byIp.set(s.ip, g = []); g.push([raw, s]);
     }
+    // IP уникален — дубля на порте нет: сбрасываем счётчик залипания, чтобы
+    // прошлая серия неудач не мешала развести новый дубль на этом же порте
+    for (const [, s] of st) {
+      if (!s.down && s.ip && (byIp.get(s.ip)?.length || 0) < 2) { s.dedupTries = 0; s.stuckUntil = 0; }
+    }
     for (const group of byIp.values()) {
       if (group.length < 2) continue;
       for (const [raw, s] of group.slice(1)) {        // первый остаётся
+        // отступ после серии неудач истёк — даём порту свежую серию попыток
+        if (s.stuckUntil && Date.now() >= s.stuckUntil) { s.stuckUntil = 0; s.dedupTries = 0; }
+        if (s.stuckUntil) continue;                    // ещё в отступе — не трогаем
         if (Date.now() - (s.dedupAt || 0) < DEDUP_GAP) continue;
+        // дошли сюда с дублём снова — прошлый refresh (если был) не развёл
+        s.dedupTries = (s.dedupTries || 0) + 1;
+        if (s.dedupTries > STUCK_AFTER) {
+          s.stuckUntil = Date.now() + STUCK_COOLDOWN;
+          note('🧊', `${label(raw)} ${STUCK_AFTER} раза подряд вышел на тот же IP ${s.ip} — пул KZ ` +
+            'держит один адрес, refresh не разводит. Отступаю на полчаса, чтобы не менять IP аккаунту зря');
+          continue;
+        }
         const link = await rotateLink(raw);
-        if (!link) continue;                           // пул/неизвестный порт — не трогаем
+        if (!link) { s.dedupTries--; continue; }        // пул/неизвестный порт — не трогаем, попытку не считаем
         s.dedupAt = s.revivedAt = Date.now();
         note('🔀', `${label(raw)} вышел с тем же IP ${s.ip}, что и сосед — меняю, чтобы не было связки`);
         await rotateIp(link);

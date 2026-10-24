@@ -17,7 +17,11 @@ import json, re, subprocess, collections, urllib.request, time, sys, os
 from datetime import datetime, timezone, timedelta
 
 CODE = os.path.dirname(os.path.abspath(__file__))
-ROUNDS = 4
+# 2, не 4: больше 2 попыток за один прогон = холостая смена IP аккаунту, если
+# тонкий KZ-пул держит один «ходовой» адрес (refresh возвращает тот же IP).
+# Развести реальный дубль обычно хватает 1-2 попыток; залипший на популярном IP
+# подождёт следующего cron — к тому времени пул чаще подкидывает другой адрес.
+ROUNDS = 2
 PROFILES = [("prod", "accounts.json"),
             ("vtoroy", "profiles/vtoroy/accounts.json")]
 

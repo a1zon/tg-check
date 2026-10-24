@@ -108,8 +108,12 @@ function start(p) {
   const token = crypto.randomBytes(24).toString('hex');
   const child = spawn(process.execPath, [path.join(CODE, 'admin.mjs'), '--port', String(p.port), '--no-open'], {
     cwd: CODE,
+    // регионы Asocks у профиля свои (profiles.json → regions): так prod и
+    // vtoroy выходят из РАЗНЫХ регионов KZ и не делят один пул модемов —
+    // «Свой IP каждому» раскладывает аккаунты только по этим регионам
     env: { ...process.env, TG_PANEL_DIR: dir, TG_PANEL_TOKEN: token,
-           TG_PROFILE: p.title || p.id, TG_PROFILE_ADMIN: p.admin ? '1' : '' },
+           TG_PROFILE: p.title || p.id, TG_PROFILE_ADMIN: p.admin ? '1' : '',
+           TG_ASOCKS_REGIONS: p.regions || process.env.TG_ASOCKS_REGIONS || '' },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const kid = { port: p.port, token, child, dir, title: p.title || p.id, admin: !!p.admin, tries: 0 };

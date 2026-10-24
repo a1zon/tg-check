@@ -432,9 +432,11 @@ def parse_proxy(raw):
     elif len(parts) == 2:
         host, port = parts
     else:
-        raise SystemExit(f"не разобрал прокси «{s}» — нужно host:port")
+        raise SystemExit("не разобрал прокси — нужно host:port, host:port:логин:пароль"
+                         " или схема://логин:пароль@host:port")
     if not host or not port.isdigit():
-        raise SystemExit(f"не разобрал прокси «{s}» — нужно host:port")
+        raise SystemExit("не разобрал прокси — нужно host:port, host:port:логин:пароль"
+                         " или схема://логин:пароль@host:port")
     kind = "socks5" if "socks5" in scheme else "socks4" if "socks4" in scheme else "http"
     if user:
         return (kind, host, int(port), True, user, password or "")

@@ -192,9 +192,9 @@ export function parseProxy(raw) {
   }
   const parts = rest.split(':');
   if (parts.length === 4) { user = parts[2]; pass = parts[3]; }
-  else if (parts.length !== 2) throw new Error(`не разобрал прокси «${s}» — нужно host:port`);
+  else if (parts.length !== 2) throw new Error('не разобрал прокси — нужно host:port, host:port:логин:пароль или схема://логин:пароль@host:port');
   const [host, port] = parts;
-  if (!host || !/^\d{1,5}$/.test(port)) throw new Error(`не разобрал прокси «${s}» — нужно host:port`);
+  if (!host || !/^\d{1,5}$/.test(port)) throw new Error('не разобрал прокси — нужно host:port, host:port:логин:пароль или схема://логин:пароль@host:port');
   return { server: `${scheme}://${host}:${port}`, ...(user ? { username: user, password: pass } : {}) };
 }
 

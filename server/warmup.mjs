@@ -7,6 +7,8 @@
  * потом наращивает объём постепенно.
  */
 
+import { createHash } from 'node:crypto';
+
 /**
  * Сколько человек в сутки можно писать с аккаунта, по его возрасту.
  *
@@ -68,7 +70,9 @@ export function planFor(days) {
  * Точную формулу Telegram не публикует, поэтому оцениваем кусочно-линейной
  * интерполяцией по опорным точкам (id → примерная дата). Это ОЦЕНКА ±пара
  * месяцев — её хватает, чтобы отнести аккаунт к нужной «корзине» прогрева.
- * Опорные точки держать монотонными; при желании уточнить — правятся здесь.
+ * Опорные точки держать монотонными; при желании уточнить — правятся здесь
+ * И в warmup-activity.py (ID_ANCHORS, WARM_BY_AGE): по ним идут сами действия
+ * прогрева, срок у панели и у прогрева должен совпадать.
  */
 const ID_ANCHORS = [
   [  200_000_000, Date.parse('2017-06-01')],
@@ -114,6 +118,41 @@ export function warmDaysForAge(userId, now = Date.now()) {
   const months = (now - d) / (2629800000);   // ≈30.44 суток
   for (const [m, days] of WARM_BY_AGE) if (months < m) return days;
   return 5;   // старше последнего порога — минимальное доверие по умолчанию
+}
+
+/**
+ * ЗРЕЛЫЙ аккаунт — уже в рассылке (role=send), выпущен из прогрева (graduated)
+ * или пришёл поработавшим (prewarmed). Ему день по календарю, общий срок и без
+ * сдвига ступеней. То же определение — mature() в warmup-activity.py.
+ */
+export function isMature(acc) {
+  return acc?.graduated === true || acc?.role === 'send' || acc?.prewarmed === true;
+}
+
+/**
+ * ЗАЩИЩЁННЫЙ — старый аккаунт хозяина: только явный acc.protect === true (список
+ * хозяина). Зрелость не в счёт: выпускник прогрева (graduated) остаётся в кругу
+ * покупных. Прогрев не связывает защищённого перепиской с остальными: они ему не
+ * пишут, он — им, круги собеседников внутри своей группы. То же — protected() в
+ * warmup-activity.py.
+ */
+export function isProtected(acc) {
+  return acc?.protect === true;
+}
+
+/**
+ * РАЗНОС ПАРТИИ: на сколько активных дней (0–2) у аккаунта сдвинуты ступени
+ * прогрева. Партия, залитая одним импортом, шла по прогреву в ногу и в один
+ * час перешла к переписке и знакомству по номерам друг с другом — отпечаток
+ * фермы (номера в контакты прогрев с тех пор не добавляет вовсе: своим пишет
+ * по открытому диалогу или @нику, ник аккаунт заводит сам). Сдвиг по хэшу id —
+ * не скачет. Та же формула — warm_lag в warmup-activity.py: по ней идут сами
+ * действия, здесь — срок и выпуск.
+ */
+export const WARM_LAG_MAX = 2;
+export function warmLag(id) {
+  const h = createHash('sha256').update(`${id}:lag`).digest('hex');
+  return parseInt(h.slice(0, 8), 16) % (WARM_LAG_MAX + 1);
 }
 
 /**
@@ -249,8 +288,12 @@ export function makeWarmup({ readCsv, accounts }) {
    * он за эти сутки не сделал ничего, а полоса всё равно росла — панель
    * показывала «день 3», когда аккаунт только-только начал. Честно считать
    * прогресс по ДНЯМ С ДЕЙСТВИЕМ: дата с хотя бы одним успешным действием
-   * прогрева (warmup.csv, note=ok) или отправленным/черновиком письма
-   * (drafts.csv). Пустой день прогресс не двигает.
+   * прогрева (warmup.csv, note=ok; завести @ник — тоже) или отправленным/
+   * черновиком письма (drafts.csv). Пустой день прогресс не двигает: отказы и
+   * пустые заходы («пусто», «ники заняты» и пр.) в журнале есть, но не в счёт.
+   * Вопрос к SpamBot — не
+   * действие: его задают и простаивающему, и замороженному (у партии 18.10
+   * день с одним SpamBot засчитывался). Так же считает warmup-activity.py.
    *
    * Дату берём по Екб (UTC+5), чтобы «день» совпадал с окном прогрева.
    * Кэш на 30с: список аккаунтов панель опрашивает каждые 2с, а гранулярность
@@ -272,7 +315,7 @@ export function makeWarmup({ readCsv, accounts }) {
       let s = map.get(id); if (!s) map.set(id, s = new Set());
       s.add(d);
     };
-    for (const r of readCsv('warmup.csv')) if (r.note === 'ok') add(r.account, r.at);
+    for (const r of readCsv('warmup.csv')) if (r.note === 'ok' && r.action !== 'spam') add(r.account, r.at);
     for (const r of readCsv('drafts.csv')) if (r.ok === 'true' || r.sent === 'true') add(r.account, r.at);
     activeCache = { at: Date.now(), map };
     return map;
@@ -315,11 +358,10 @@ export function makeWarmup({ readCsv, accounts }) {
     const fromDate = new Date(from + 5 * 3600_000).toISOString().slice(0, 10);   // дата warmFrom по Екб
     const set = activeDaysMap().get(acc.id);
     const active = set ? [...set].filter((d) => d >= fromDate).length : 0;
-    // ЗРЕЛЫЙ аккаунт — уже в рассылке (role=send), выпущен (graduated) или пришёл
-    // поработавшим (prewarmed): зрелость по активным дням НЕ пересчитываем, иначе
+    // ЗРЕЛЫЙ аккаунт (isMature): зрелость по активным дням НЕ пересчитываем, иначе
     // бурстовая отправка, работа в другом наборе или простой прокси задним числом
     // срезали бы дневной лимит с плато до ступени разгона. Ему — календарный день.
-    const mature = acc.graduated === true || acc.role === 'send' || acc.prewarmed === true;
+    const mature = isMature(acc);
     // греющийся — по реальным дням активности, но НЕ опережая календарь (защита от
     // «двух дат за сутки» на границе полуночи); зрелый — по календарю.
     const day = !restDone ? 0
@@ -336,11 +378,16 @@ export function makeWarmup({ readCsv, accounts }) {
       : mature ? warmDays
       : (autoDays || warmDays);
     const steps = planFor(effDays);
+    // РАЗНОС ПАРТИИ: у греющегося ступени сдвинуты на 0–2 активных дня (warmLag),
+    // ровно как в warmup-activity.py, — и «прогрет» он на столько же позже.
+    // Зрелому сдвига нет: его лимит и выпуск не трогаем
+    const lag = mature ? 0 : warmLag(acc.id);
+    const planDay = day > 0 ? Math.max(1, day - lag) : 0;
     let step = steps[0];
-    for (const p of steps) if (day >= p.day) step = p;
+    for (const p of steps) if (planDay >= p.day) step = p;
     const resting = step.cap === 0;
     const lastStep = steps[steps.length - 1];
-    const fullDay = lastStep.day;   // когда «прогрет»
+    const fullDay = lastStep.day + lag;   // когда «прогрет» (активный день)
     let cap = step.cap;
     // общий потолок меняет только ПЛАТО (созревший аккаунт) — разгон не трогаем
     if (maxCap > 0 && step === lastStep) cap = maxCap;

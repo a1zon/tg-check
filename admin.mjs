@@ -53,7 +53,7 @@ import { makeProxyGuard } from './server/proxyguard.mjs';
 import * as desktop from './server/desktop.mjs';
 import { buildKit, buildPult, kitProxy } from './server/kit.mjs';
 import { makeAsocks, ASOCKS_EVERY } from './server/asocks.mjs';
-import { makeOwnProxy, ASOCKS_GATEWAY, OWN_COUNTRY } from './server/ownproxy.mjs';
+import { makeOwnProxy, ownDormant, ASOCKS_GATEWAY, OWN_COUNTRY } from './server/ownproxy.mjs';
 import { makeLlmUsage, LLM_EVERY } from './server/llmusage.mjs';
 import * as vercel from './server/vercel.mjs';
 
@@ -253,8 +253,12 @@ const proxyGuard = makeProxyGuard({
   proxies: () => accounts.list().filter((a) => accounts.hasSession(a)).map((a) => a.proxy).filter(Boolean),
   // личная ссылка перезапуска модема ИМЕННО этого порта (у мобильного
   // dedicated бэкенд-устройство отваливается поштучно и порт отвечает «404 not
-  // found in region»); не нашли — общий линк смены IP, как раньше
-  rotateLink: async (raw) => (raw ? await asocks.refreshLinkFor(raw) : '') || warmup.rotate || auto.rotate || '',
+  // found in region»); не нашли — общий линк смены IP, как раньше.
+  // Строка общего пула Asocks (своя сессия «-pool-…-session-…») — не порт: ни
+  // личной, ни общей ссылки у неё нет, и чужой линк модема её не лечит. Её
+  // меняет замена своих строк ниже («своя сессия умерла — новая сама»)
+  rotateLink: async (raw) => (/-pool-/.test(String(raw || '')) ? ''
+    : (raw ? await asocks.refreshLinkFor(raw) : '') || warmup.rotate || auto.rotate || ''),
   rotateIp: (url) => rotateIp(url),
   note: (icon, text) => events.note(icon, text),
   // Пока мы сами переключаем модем, прокси и должен не отвечать. Без этого
@@ -302,7 +306,8 @@ function otherProfilesProxies() {
   } catch {}
   const out = [];
   for (const f of files) {
-    try { for (const a of JSON.parse(fs.readFileSync(f, 'utf8'))) if (a.proxy) out.push(a.proxy); } catch {}
+    // замороженные соседи к Telegram почти не ходят — их IP занятым не считаем
+    try { for (const a of JSON.parse(fs.readFileSync(f, 'utf8'))) if (a.proxy && !ownDormant(a)) out.push(a.proxy); } catch {}
   }
   return out;
 }
@@ -310,7 +315,11 @@ const ownProxy = makeOwnProxy({
   dir: DIR, asocks,
   gateway: process.env.TG_ASOCKS_GATEWAY || ASOCKS_GATEWAY,
   listAccounts: () => accounts.list(),
+  // без сессии строка — первая выдача до входа, не смена IP (в историю смен не идёт)
+  hasSession: (a) => accounts.hasSession(a),
   otherProxies: otherProfilesProxies,
+  // живой IP по данным сторожа — свободный IP выдачи сверяем с ним, а не с записью
+  liveIp: (raw) => { const i = proxyGuard.info(raw); return i.down ? '' : (i.ip || ''); },
   setProxy: (id, raw, prev) => {
     accounts.setProxy(id, raw);
     accounts.setField(id, { proxyPrev: prev, proxyOwn: true });
@@ -337,16 +346,41 @@ if (DIR === CODE) {
  * Сторож объявляет такой прокси лежащим, аккаунт встаёт без засчитанного сбоя —
  * и стоял бы, пока человек не нажмёт кнопку. Теперь: лежит своя сессия дольше
  * 5 минут — панель выдаёт этому аккаунту новую (та же проверка, что у кнопки).
+ *
+ * Стабильный IP важнее уникальности любой ценой. Asocks сам переводит метки на
+ * соседние модемы, и правило «тот же IP — меняем» за 19 ч 24.10 дало 59 смен в
+ * prod с часовым ритмом у одних и тех же свежих аккаунтов. Поэтому:
+ *   • замороженных и выведенных не трогаем вовсе (ownDormant) — и их IP занятым не считаем;
+ *   • из пары-дубля меняем младшего: зрелый (рассылка, выпускник, пришёл поработавшим)
+ *     и раньше заведённый остаются на своём IP, при равенстве — меняем того, кто
+ *     на этот адрес «приехал» позже;
+ *   • дубль подтверждаем двумя пробами сторожа у обоих, а не двумя тиками;
+ *   • из-за дубля — не больше OWN_DAY_MAX смен IP аккаунту за сутки и только в
+ *     его же регионе; дальше дубль терпим (одновременно с одного IP панель их не
+ *     водит) и пишем в ленту. Лежащую строку и выезд из страны меняем всегда, но
+ *     эти смены тоже идут в счёт (история — в asocks-sessions.json, переживает рестарт).
  */
 const OWN_DEAD_AFTER = 5 * 60_000;       // лежит столько — меняем строку
 const OWN_REPLACE_GAP = 60 * 60_000;     // не чаще раза в час на аккаунт — чтобы не гонять по кругу
-const OWN_INFO_FRESH = 15 * 60_000;      // данные сторожа считаем свежими столько (проверка раз в 10 мин)
+const OWN_RETRY_FAIL = 15 * 60_000;      // замена не вышла — повтор через 15 мин, а не каждую минуту
+const OWN_RETRY_MAX = 2 * 3600_000;      // дубль: дальше вдвое дольше после каждой неудачи, но не реже раза в 2 ч
+const OWN_DAY_MAX = 2;                   // смен IP за сутки, после которых дубль больше не лечим
+const OWN_INFO_FRESH = 15 * 60_000;      // данные сторожа считаем свежими столько (проверка раз в 4 мин)
+const OWN_DRIFT_FRESH = 15 * 60_000;     // выезд из страны, замеченный задачей (driftAt), свеж столько
 const ownDownSince = new Map();          // id -> когда впервые увидели, что лежит
 const ownLastReplace = new Map();        // id -> когда последний раз меняли (анти-флап)
-const ownDupSince = new Map();           // id -> с какого момента держится дубль IP (нужно 2 проверки подряд)
+const ownFailN = new Map();              // id -> сколько замен подряд не вышло
+const ownDupSince = new Map();           // id -> { ip, at } — когда впервые увидели в дубле
+const ownCapNoted = new Map();           // id -> когда сказали в ленту, что упёрлись в предел смен
+// кто в паре-дубле остаётся на своём IP: зрелый, потом раньше заведённый (по дню),
+// потом тот, кто сидит на этом адресе дольше
+const ownMature = (a) => a.role === 'send' || a.graduated === true || a.prewarmed === true;
+const ownKeepFirst = (x, y) => (ownMature(y.a) - ownMature(x.a))
+  || String(x.a.added || '').slice(0, 10).localeCompare(String(y.a.added || '').slice(0, 10))
+  || ((x.i.ipSince || 0) - (y.i.ipSince || 0));
 setInterval(() => {
   if (!asocks.enabled() || ownProxy.busy()) return;
-  const own = accounts.list().filter((a) => a.proxyOwn && accounts.hasSession(a));
+  const own = accounts.list().filter((a) => a.proxyOwn && accounts.hasSession(a) && !ownDormant(a));
   if (own.length < 2) return;
   // Если лежит больше половины своих строк — это сбой самого шлюза Asocks или
   // кончился баланс, а не 9 отдельных поломок. Менять всё разом нельзя: после
@@ -358,7 +392,7 @@ setInterval(() => {
   const canReplace = (id) => now - (ownLastReplace.get(id) || 0) >= OWN_REPLACE_GAP;
   // 1) лежит дольше OWN_DEAD_AFTER
   for (const a of accounts.list()) {
-    if (!a.proxyOwn || !accounts.hasSession(a) || !proxyGuard.down(a.proxy)) { ownDownSince.delete(a.id); continue; }
+    if (!a.proxyOwn || !accounts.hasSession(a) || ownDormant(a) || !proxyGuard.down(a.proxy)) { ownDownSince.delete(a.id); continue; }
     if (!ownDownSince.has(a.id)) ownDownSince.set(a.id, now);
     else if (now - ownDownSince.get(a.id) >= OWN_DEAD_AFTER && canReplace(a.id)) bad.set(a.id, 'лежит 5+ минут');
   }
@@ -368,35 +402,82 @@ setInterval(() => {
     if (i.down || !i.ip || now - (i.ipAt || 0) > OWN_INFO_FRESH) continue;
     if (i.country && i.country !== OWN_COUNTRY && canReplace(a.id)) bad.set(a.id, `выход из ${i.country}`);
   }
-  // 3) тот же IP, что у соседа — только если у ОБОИХ данные свежие и дубль держится
-  //    две проверки подряд (мобильный CGNAT даёт короткие случайные совпадения)
+  // 2б) выезд, который увидела сама задача (tglib.require_country перед подключением
+  //     или сторож страны посреди задачи пишут driftCountry/driftIp/driftAt): сторож
+  //     опрашивает живых раз в 4 мин и короткий выезд пропускает, а задача на нём уже
+  //     отказала. Берём свежий и про ЭТУ строку (позже её выдачи); если сторож после
+  //     него видел строку на другом IP уже в стране — выезд кончился сам, не трогаем
+  const given = ownProxy.assigned();
+  for (const a of own) {
+    const at = Date.parse(a.driftAt || '') || 0;
+    const c = String(a.driftCountry || '').toUpperCase();
+    if (!at || now - at > OWN_DRIFT_FRESH || !/^[A-Z]{2}$/.test(c) || c === OWN_COUNTRY) continue;
+    if (at <= (Date.parse(given[a.id]?.at || '') || 0)) continue;       // выезд прежней строки
+    const i = proxyGuard.info(a.proxy);
+    if ((i.ipAt || 0) > at && !i.down && i.ip && i.ip !== (a.driftIp || '') && i.country === OWN_COUNTRY) continue;
+    // идёт задача или вход на ПК — после них: задача держит старую строку до конца
+    if (bad.has(a.id) || !canReplace(a.id) || running.has(a.id) || accessBusy.has(a.id)) continue;
+    bad.set(a.id, `выход из ${c}`);
+  }
+  // 3) тот же IP, что у соседа — только по свежим данным у обоих
   const byIp = new Map();
   for (const a of own) {
     const i = proxyGuard.info(a.proxy);
     if (i.down || !i.ip || now - (i.ipAt || 0) > OWN_INFO_FRESH) continue;
-    if (byIp.has(i.ip)) {
-      const b = byIp.get(i.ip);
-      const key = [a.id, b.id].sort().join('|');
-      if (!ownDupSince.has(key)) ownDupSince.set(key, now);
-      else if (now - ownDupSince.get(key) >= 60_000) {   // держится ≥ минуты (2 тика)
-        if (canReplace(a.id)) bad.set(a.id, `тот же IP, что у ${b.title}`);
+    let g = byIp.get(i.ip); if (!g) byIp.set(i.ip, g = []); g.push({ a, i });
+  }
+  const dayN = ownProxy.changes(now - 864e5);         // id -> смен IP за сутки
+  const inDup = new Set();
+  for (const [ip, g] of byIp) {
+    if (g.length < 2) continue;
+    g.sort(ownKeepFirst);
+    const keep = g[0];
+    if (bad.has(keep.a.id)) continue;           // остающийся и так уезжает (выход из страны) — дубль уйдёт сам
+    for (const x of g.slice(1)) {
+      const id = x.a.id;
+      inDup.add(id);
+      // дубль держится, только если ОБА перепроверены сторожем после того, как
+      // совпадение заметили: мобильный CGNAT даёт короткие случайные совпадения,
+      // а два тика по минуте видели одну и ту же пробу (живые — раз в 4 мин)
+      const seen = ownDupSince.get(id);
+      if (!seen || seen.ip !== ip) { ownDupSince.set(id, { ip, at: now }); continue; }
+      if ((x.i.ipAt || 0) <= seen.at || (keep.i.ipAt || 0) <= seen.at) continue;
+      if (bad.has(id) || !canReplace(id)) continue;
+      // идёт задача или вход на ПК — меняем, когда закончит: задача держит старую
+      // строку до конца, и новая выдача её IP не учла бы
+      if (running.has(id) || accessBusy.has(id)) continue;
+      const n = dayN.get(id) || 0;
+      if (n >= OWN_DAY_MAX) {
+        if (now - (ownCapNoted.get(id) || 0) >= 864e5) {
+          ownCapNoted.set(id, now);
+          events.note('🌐', `«${x.a.title}» на том же IP ${ip}, что и «${keep.a.title}», но смен IP у него ` +
+            `за сутки уже ${n} (предел ${OWN_DAY_MAX}) — больше не трогаю: стабильный адрес важнее, ` +
+            'а одновременно с одного IP панель их не водит', x.a.title);
+        }
+        continue;
       }
-    } else byIp.set(i.ip, a);
+      bad.set(id, `тот же IP, что у ${keep.a.title}`);
+    }
   }
-  // чистим ключи дублей, которых больше нет
-  const liveIps = new Set(own.map((a) => proxyGuard.info(a.proxy).ip).filter(Boolean));
-  for (const key of [...ownDupSince.keys()]) {
-    const [x, y] = key.split('|');
-    const ix = proxyGuard.info((own.find((a) => a.id === x) || {}).proxy).ip;
-    const iy = proxyGuard.info((own.find((a) => a.id === y) || {}).proxy).ip;
-    if (!ix || ix !== iy || !liveIps.has(ix)) ownDupSince.delete(key);
-  }
+  for (const id of [...ownDupSince.keys()]) if (!inDup.has(id)) ownDupSince.delete(id);
   if (!bad.size) return;
   const list = own.filter((a) => bad.has(a.id));
   push(`\n🌐 своя строка Asocks под замену: ${list.map((a) => `${a.title} (${bad.get(a.id)})`).join(', ')}`);
   for (const a of list) ownLastReplace.set(a.id, now);   // ставим ДО запуска, чтобы не задвоить
-  ownProxy.assign({ ids: list.map((a) => a.id), country: OWN_COUNTRY }).then((r) => {
-    for (const x of r) { ownDownSince.delete(x.id); if (!x.ok) ownLastReplace.delete(x.id); }
+  ownProxy.assign({ ids: list.map((a) => a.id), country: OWN_COUNTRY,
+                    reasons: Object.fromEntries(bad),
+                    // дубль меняем внутри своего региона (см. ownproxy.assign)
+                    keepRegion: list.filter((a) => /^тот же IP/.test(bad.get(a.id))).map((a) => a.id) }).then((r) => {
+    for (const x of r) {
+      ownDownSince.delete(x.id);
+      if (x.ok) { ownFailN.delete(x.id); continue; }
+      // дубль в тонком регионе: свободного IP там может не быть часами — не крутим
+      // выдачу по кругу, отступ растёт. Лежащую строку пробуем каждые 15 минут
+      const n = (ownFailN.get(x.id) || 0) + 1;
+      ownFailN.set(x.id, n);
+      const wait = /^тот же IP/.test(bad.get(x.id) || '') ? Math.min(OWN_RETRY_FAIL * 2 ** (n - 1), OWN_RETRY_MAX) : OWN_RETRY_FAIL;
+      ownLastReplace.set(x.id, Date.now() - OWN_REPLACE_GAP + wait);
+    }
     const ok = r.filter((x) => x.ok).length;
     events.note('🌐', `замена своих строк Asocks: ${ok} из ${r.length} (${[...new Set(list.map((a) => bad.get(a.id)))].join('; ')})` +
       (ok < r.length ? ' — не вышло: ' + r.filter((x) => !x.ok).map((x) => x.why).join('; ') : ''));
@@ -478,6 +559,21 @@ const TASKS = {
 const isPhone = (key) => String(key || '').startsWith('+');
 
 /**
+ * Без прокси к Telegram не подключаемся (tglib.client_proxy): аккаунт вышел бы
+ * с IP сервера. Прямой выход — только нарочно, TG_ALLOW_DIRECT=1, как у задач.
+ * Без прокси можно лишь проверку прокси (сессию Telegram не открывает) и перенос
+ * сессии (import-account сам выдаст свой IP). '' — можно, иначе причина отказа.
+ */
+const ALLOW_DIRECT = process.env.TG_ALLOW_DIRECT === '1';
+const NO_PROXY_OK = new Set(['proxy', 'migrate']);
+function noProxyWhy(acc, task = '') {
+  if (ALLOW_DIRECT || NO_PROXY_OK.has(task) || String(acc?.proxy || '').trim()) return '';
+  return `«${acc.title}»: не задан прокси — к Telegram без него не подключаю (вышел бы с IP сервера). ` +
+    (accounts.hasSession(acc) ? 'Задай прокси в строке аккаунта или «Свой IP каждому»'
+      : 'Задай прокси или подключи аккаунт файлом сессии — тогда свой IP панель выдаст сама');
+}
+
+/**
  * Аккаунт на карантине: @SpamBot сказал, что на нём ограничение.
  *
  * Отметку ставит сама задача, когда спрашивает бота перед заходом. Держим
@@ -512,6 +608,32 @@ const push = (line) => {
 
 /** Метка строки с итогом пачки: её печатает tglib.state() в конце задачи. */
 const STATE_MARK = '\u2301STATE ';
+
+/**
+ * Задача упала из-за связи или прокси, а не из-за аккаунта. Признаки печатает
+ * tglib: отказ без прокси (client_proxy), страна выхода не та или не узнать
+ * (require_country), сторож страны оборвал связь посреди задачи (ExitDrift),
+ * NO_NET («не достучаться до Telegram по MTProto», в том числе «прокси
+ * отказал (…)»). Такой сбой — пауза до починки прокси, а не «задача падает» и
+ * не выбывание из прогона. Точная причина важнее общего «нет связи».
+ */
+const NET_FAIL = [
+  [/не задан прокси — к Telegram не подключаю/, () => 'не задан прокси'],
+  [/прокси посреди задачи вышел из ([A-Z]{2})/, (m) => `прокси посреди задачи вышел из ${m[1]}`],
+  [/страну выхода прокси .* не подтвердить/, () => 'страну выхода прокси не подтвердить'],
+  [/прокси сейчас выходит из ([A-Z]{2}), а не/, (m) => `прокси выходит из ${m[1]}`],
+  [/не узнать, из какой страны сейчас выходит прокси/, () => 'не узнать страну выхода прокси'],
+  [/прокси отказал \(/, () => 'прокси отказал'],
+];
+// общее «нет связи»: NO_NET, обрыв, о котором сказала сама задача, и Telethon,
+// когда не переподключился
+const NET_WEAK = new RegExp(['не достучаться до Telegram по MTProto', 'связь с Telegram оборвана',
+  'Connection to Telegram failed \\d+ time', 'Automatic reconnection failed \\d+ time',
+  'Cannot send requests while disconnected'].join('|'));
+function netFail(line) {
+  for (const [re, why] of NET_FAIL) { const m = line.match(re); if (m) return { why: why(m), weak: false }; }
+  return NET_WEAK.test(line) ? { why: 'нет связи с Telegram', weak: true } : null;
+}
 
 /**
  * Уборка после выхода из аккаунтов: панель становится как новая, а числа
@@ -598,7 +720,7 @@ function manualHold() {
 function run(key, tag, title, cmd, args, onDone, set = baseSet) {
   // Python-задаче говорим, с каким набором получателей работать (tglib.py)
   const child = spawn(cmd, args, { cwd: DIR, env: { ...process.env, TG_SET: set } });
-  const rec = { child, title, since: Date.now(), state: null, by: launchedBy };
+  const rec = { child, title, since: Date.now(), state: null, by: launchedBy, net: '', netWeak: false };
   running.set(key, rec);
   push(`\n▶ ${title}: ${args.map((a) => path.basename(a)).join(' ')}`);
   // Последняя строка задачи — итог для панели, а не для человека: сколько
@@ -609,6 +731,11 @@ function run(key, tag, title, cmd, args, onDone, set = baseSet) {
       try { rec.state = JSON.parse(l.slice(STATE_MARK.length)); } catch {}
       return;
     }
+    // «связь/прокси, а не аккаунт» (NET_FAIL) — третьим аргументом в onDone
+    if (!rec.net || rec.netWeak) {
+      const n = netFail(l);
+      if (n && (!rec.net || !n.weak)) { rec.net = n.why; rec.netWeak = n.weak; }
+    }
     push(`[${tag}] ${l}`);
     events.fromTask(tag, title, l);
   });
@@ -618,7 +745,7 @@ function run(key, tag, title, cmd, args, onDone, set = baseSet) {
     push(`■ ${title} завершено (код ${code})`);
     running.delete(key);
     if (rec.by === 'manual') manualUntil = Date.now() + MANUAL_GRACE;
-    onDone?.(code, rec.state);
+    onDone?.(code, rec.state, rec.net);
   });
 }
 
@@ -638,6 +765,17 @@ function start(name, opts, onDone) {
   if (cur) return { ok: false, reason: `«${acc.title}» уже занят: ${cur.title}` };
   // на этом аккаунте сейчас создают вход или выгоняют устройство — та же сессия
   if (accessBusy.has(acc.id)) return { ok: false, reason: `«${acc.title}»: идёт вход/выгон на компьютер — подожди` };
+  // Без прокси к Telegram не подключаемся (noProxyWhy) — отказ сразу и словами,
+  // а не падение задачи. pause: дело не в аккаунте — автоматика ждёт, сбой не считает
+  const noProxy = noProxyWhy(acc, name);
+  if (noProxy) return { ok: false, reason: noProxy, pause: true };
+  // Автоматика (прогон, прогрев, читатели, SpamBot) двоих с одного ВЫХОДНОГО IP
+  // разом не водит (см. ipKey) — даже если вызвавший сам этого не проверил.
+  // Ручной запуск — решение человека, его не держим
+  if (launchedBy !== 'manual') {
+    const other = busyIps(acc.id).get(ipKey(acc.proxy));
+    if (other) return { ok: false, reason: `«${acc.title}»: с того же IP сейчас работает «${title(other)}» — подожди`, pause: true };
+  }
 
   // задачи, которым нужна живая сессия: без входа запускать бессмысленно —
   // раньше это молча падало «нет сессии» и путало (проверка/рассылка вхолостую)
@@ -765,6 +903,8 @@ function start(name, opts, onDone) {
   if (name === 'warmup' && opts.what) args.push('--what', String(opts.what));
   // временно ограничен SpamBot, но разрешено комментировать (comments.held_accounts)
   if (name === 'warmup' && opts.held) args.push('--held');
+  // внеплановый вопрос к SpamBot (spamRecheckAt): мимо «сегодня уже спрашивали» и кэша вердикта
+  if (name === 'warmup' && opts.recheck) args.push('--recheck');
   // «(с отправкой)» — только у рассылки: у проверки ответов это читалось так,
   // будто аккаунт пишет людям, хотя он лишь смотрит диалоги
   const tag = t.voice && voice ? ' (голосовое)' : t.send && send && name !== 'follow' ? ' (с отправкой)' : '';
@@ -797,6 +937,8 @@ const WARM_TICK = 30_000;                 // как часто смотрим, �
 const WARM_GAP = [120, 240];              // пауза между действиями, сек
 const WARM_NAP = [2 * 3600, 4 * 3600];    // сон между сессиями, сек
 const WARM_SESSION = [2, 3];              // столько действий в одной сессии
+const WARM_NET_WAIT = 10 * 60_000;        // задача упала из-за связи/прокси — зайдём через столько,
+const WARM_NET_MAX = 60 * 60_000;         //   подряд — вдвое дольше, но не реже раза в час
 
 const rnd = (a, b) => Math.round(a + Math.random() * (b - a));
 
@@ -915,15 +1057,60 @@ function warmLoad() {
  *
  * Нельзя, если они выходят с ОДНОГО адреса: два аккаунта, активничающие с
  * одного IP в одну минуту, — это первое, за что Telegram выдаёт ограничения.
- * Одинаковый прокси у двоих — один адрес. Пустой прокси у двоих — тоже один
- * адрес, адрес самого сервера. Свой прокси у каждого — тогда можно.
+ * Адрес — ВЫХОДНОЙ IP, а не строка прокси (ipKey): у своих строк Asocks метки
+ * -session-… всегда разные, а модемы под ними общие — 24.10 a18, c8 и a26
+ * сидели на одном IP при трёх разных строках, и панель пускала их разом.
+ * Пустой прокси у двоих — тоже один адрес, адрес самого сервера.
  */
 function ownProxyEach() {
+  const live = accounts.list().filter((a) => accounts.hasSession(a) && accounts.isAuthed(a));
+  if (live.length < 2) return true;
+  if (live.some((a) => !a.proxy)) return false;
+  return new Set(live.map((a) => ipKey(a.proxy))).size === live.length;
+}
+
+/**
+ * Своя СТРОКА прокси у каждого — старый признак «прокси один на всех». По нему
+ * прогон встаёт в очередь по одному (со сменой IP), а панель подсказывает про
+ * общую строку. Дубль выходного IP при своих строках так не лечим — одна пара
+ * поставила бы в очередь весь прогон; его разводит гейт по IP в start().
+ */
+function ownStringEach() {
   const live = accounts.list().filter((a) => accounts.hasSession(a) && accounts.isAuthed(a));
   if (live.length < 2) return true;
   const list = live.map((a) => String(a.proxy || ''));
   if (list.some((p) => !p)) return false;
   return new Set(list).size === list.length;
+}
+
+/**
+ * Ключ адреса для развязки параллели: живой выходной IP по данным сторожа;
+ * пока не знаем — сама строка; без прокси — адрес самого сервера.
+ */
+function ipKey(raw) {
+  return raw ? (proxyGuard.info(raw).ip || String(raw)) : 'direct';
+}
+
+/** С каких адресов прямо сейчас идут задачи аккаунтов: ipKey -> id (кроме except). */
+function busyIps(except = '') {
+  const byId = new Map(accounts.list().map((a) => [a.id, a]));
+  const out = new Map();
+  for (const id of running.keys()) {
+    const a = byId.get(id);           // '_base', '_pack' — не аккаунты, адреса не держат
+    if (a && id !== except) out.set(ipKey(a.proxy), id);
+  }
+  return out;
+}
+
+/** Адреса, на которых сидит больше одного вошедшего аккаунта. */
+function sharedIps() {
+  const n = new Map();
+  for (const a of accounts.list()) {
+    if (!accounts.hasSession(a) || !accounts.isAuthed(a)) continue;
+    const k = ipKey(a.proxy);
+    n.set(k, (n.get(k) || 0) + 1);
+  }
+  return new Set([...n].filter(([, c]) => c > 1).map(([k]) => k));
 }
 
 /** Смена IP перед следующим аккаунтом прогрева. */
@@ -981,11 +1168,13 @@ function warmTick() {
   if (!warmup.on) return;
   if (manualBusy()) return;
   const now = Date.now();
-  // общий адрес — значит строго по одному за раз
-  const alone = !ownProxyEach() || auto.serial || !!auto.rotate || !!warmup.rotate;
+  // одна строка на всех или смена IP по ссылке — строго по одному за раз.
+  // Свои строки у каждого — параллель, но двоих с одного выходного IP нет (ниже)
+  const alone = !ownStringEach() || auto.serial || !!auto.rotate || !!warmup.rotate;
   if (alone && running.size) return;
   if (auto.on && auto.serial && now < auto.holdUntil) return;
   if (now < warmup.holdUntil) return;
+  const busyIp = busyIps();
 
   /**
    * Кого спрашиваем первым.
@@ -1006,6 +1195,7 @@ function warmTick() {
     if (running.size >= MAX_RUNNING) return;     // сервер маленький — больше разом не пускаем
     if (running.has(acc.id)) continue;
     if (proxyGuard.down(acc.proxy)) continue;
+    if (busyIp.has(ipKey(acc.proxy))) continue;   // с того же выходного IP работает другой — ждём его
     // полный отдых после заморозки — не трогаем вовсе; «без рассылки» — греем
     // (скрипт сам перейдёт на догрев после заморозки: реакции и свои)
     if (accounts.fullRestLeft(acc)) continue;
@@ -1102,8 +1292,20 @@ function warmTick() {
     const livelyCaps = lively && accounts.inOutreach(acc);
     const r = start('warmup', { account: acc.id, warm: false, between, lively: livelyCaps,
                                 held: heldComment,
-                                what: heldComment ? 'comment' : frozenCheck ? 'spam' : '' }, (code, state) => {
+                                what: heldComment ? 'comment' : frozenCheck ? 'spam' : '' }, (code, state, net) => {
       const s = warmOf(acc.id);
+      if (code !== 0 && net) {
+        // упала из-за связи или прокси (NET_FAIL), а не из-за аккаунта: действия
+        // не было — счётчик сессии не трогаем и не усыпляем на часы, зайдём позже.
+        // Свою строку при выезде из страны панель меняет сама (замена своих строк)
+        s.netN = (s.netN || 0) + 1;
+        s.nextAt = Date.now() + Math.min(WARM_NET_WAIT * 2 ** (s.netN - 1), WARM_NET_MAX);
+        s.note = `нет связи: ${net}`;
+        if (between) s.betweenFor = 0;      // этот промежуток между пачками не потрачен
+        warmSave();
+        return;
+      }
+      s.netN = 0;
       s.left = Math.max(0, s.left - 1);
       if (state?.act) s.act = state.act;   // что аккаунт сделал последним
       s.actAt = Date.now();
@@ -1151,6 +1353,7 @@ function warmTick() {
     launchedBy = 'manual';
 
     if (r.ok) {
+      busyIp.set(ipKey(acc.proxy), acc.id);
       warmup.lastId = acc.id;
       warmup.fresh = false;
       warmup.pending = '';
@@ -1164,6 +1367,106 @@ function warmTick() {
     if (alone) return;                    // по одному за раз
   }
 }
+
+/**
+ * SpamBot вне прогрева.
+ *
+ * Читатели (поиск лидов) не греются, а суточный вопрос к SpamBot задаёт прогрев,
+ * поэтому про их заморозку панель не узнавала вовсе (n8 не спрашивали с 22.10).
+ * Теперь им — раз в сутки один вопрос в окне прогрева, в свободную минуту между
+ * их задачами: поиск лидов не прерываем и с одного IP разом не ходим.
+ *
+ * И любому аккаунту — внеплановый вопрос, если задача увидела признак заморозки
+ * и попросила (tglib.request_spam_recheck: spamRecheckAt свежее spamAt). Ночи
+ * не ждём: заморозку надо увидеть в тот же час, а не утром. Бот ответил (spamAt
+ * свежее просьбы) — просьбу снимаем; не дозвонились — ещё раз через 15 минут,
+ * после трёх неудач снимаем и пишем в ленту.
+ */
+const SPAM_RECHECK_GAP = 10 * 60_000;    // внеплановый — не раньше 10 мин после прошлого ответа бота
+const SPAM_RETRY = 15 * 60_000;          // не дозвонились до бота — повтор через столько
+const SPAM_RECHECK_TRIES = 3;
+const spamDaily = new Map();             // id -> { day, at, done } — суточный вопрос читателю
+const spamAsk = new Map();               // id -> { req, n, at } — внеплановые попытки по просьбе req
+
+function spamTick() {
+  if (manualBusy()) return;
+  const now = Date.now();
+  // панель сама меняет IP по ссылке — модем сейчас вне сети, спросим после (как прогрев)
+  if ((auto.on && auto.serial && now < auto.holdUntil) || now < warmup.holdUntil) return;
+  // одна строка на всех или смена IP по ссылке — по одному за раз, как у прогрева
+  const alone = !ownStringEach() || auto.serial || !!auto.rotate || !!warmup.rotate;
+  if (alone && running.size) return;
+  const busyIp = busyIps();
+  const day = ekbDay();
+  const h = workHour();
+  const inWindow = h >= LIVELY_FROM && h < LIVELY_TO;
+  for (const a of accounts.list()) {
+    if (running.size >= MAX_RUNNING) return;
+    if (!accounts.hasSession(a) || !accounts.isAuthed(a) || a.retired) continue;
+    if (running.has(a.id) || accessBusy.has(a.id) || proxyGuard.down(a.proxy)) continue;
+    if (noProxyWhy(a, 'warmup')) continue;   // без прокси к боту не пойдём — ждём строку
+    // полный отдых — к Telegram ни ногой; на отлёжке скрипт и сам ничего не делает
+    if (accounts.fullRestLeft(a) || warm(a).resting) continue;
+    const req = Date.parse(a.spamRecheckAt || '') || 0;
+    const said = Date.parse(a.spamAt || '') || 0;
+    let recheck = false;
+    if (req > said && now - said >= SPAM_RECHECK_GAP) {
+      const t = spamAsk.get(a.id);
+      if (t && t.req === req && now < t.at) continue;
+      recheck = true;
+    } else if (a.role === 'read' && inWindow) {
+      // время вопроса на сегодня — случайное в первые полтора часа, а не всем разом
+      const p = spamDaily.get(a.id);
+      if (!p || p.day !== day) { spamDaily.set(a.id, { day, at: now + rnd(0, 90 * 60) * 1000, done: false }); continue; }
+      if (p.done || now < p.at) continue;
+    } else continue;
+    const key = ipKey(a.proxy);
+    if (busyIp.has(key)) continue;          // с того же выходного IP работает другой — ждём его
+    const reqRaw = String(a.spamRecheckAt || '');
+    launchedBy = 'warm';
+    const r = start('warmup', { account: a.id, warm: false, what: 'spam', recheck },
+      (code, _st, net) => spamAfter(a.id, recheck, req, reqRaw, code, net));
+    launchedBy = 'manual';
+    if (r.ok) { busyIp.set(key, a.id); if (alone) return; continue; }
+    // не запустилась (занят, не вошёл) — зайдём позже, попыткой это не считаем
+    if (recheck) {
+      const t = spamAsk.get(a.id);
+      spamAsk.set(a.id, { req, n: t && t.req === req ? t.n : 0, at: now + 5 * 60_000 });
+    } else spamDaily.get(a.id).at = now + SPAM_RETRY;
+  }
+}
+
+function spamAfter(id, recheck, req, reqRaw, code, net = '') {
+  const now = Date.now();
+  if (!recheck) {
+    // код 0 — спросили (или скрипт сам сказал «сегодня уже»/«отлёжка»): до завтра
+    const p = spamDaily.get(id);
+    if (p) { if (code === 0) p.done = true; else p.at = now + SPAM_RETRY; }
+    return;
+  }
+  const a = accounts.list().find((x) => x.id === id);
+  if (!a) { spamAsk.delete(id); return; }
+  if ((Date.parse(a.spamAt || '') || 0) >= req) {
+    // бот ответил — просьбу снимаем; пришла новая, пока спрашивали, — её не трогаем
+    if (String(a.spamRecheckAt || '') === reqRaw) accounts.setField(id, { spamRecheckAt: '', spamRecheckWhy: '' });
+    spamAsk.delete(id);
+    const p = spamDaily.get(id);
+    if (p && p.day === ekbDay()) p.done = true;
+    return;
+  }
+  const t = spamAsk.get(id);
+  // до бота не дошли из-за связи или прокси (NET_FAIL; бывает и с кодом 0 — ошибку
+  // запроса к боту задача пишет строкой) — это не попытка: просьба висит, спросим
+  // через 15 минут (иначе за 45 минут простоя прокси она снялась бы)
+  if (net) { spamAsk.set(id, { req, n: t && t.req === req ? t.n : 0, at: now + SPAM_RETRY }); return; }
+  const n = (t && t.req === req ? t.n : 0) + 1;
+  if (n < SPAM_RECHECK_TRIES) { spamAsk.set(id, { req, n, at: now + SPAM_RETRY }); return; }
+  spamAsk.delete(id);
+  if (String(a.spamRecheckAt || '') === reqRaw) accounts.setField(id, { spamRecheckAt: '', spamRecheckWhy: '' });
+  events.note('⚠', `внеплановый вопрос к SpamBot (${a.spamRecheckWhy || 'признак заморозки'}) не прошёл ` +
+    `${n} раза — просьбу снял, спрошу в обычный суточный заход`, a.title);
+}
+setInterval(spamTick, WARM_TICK);
 
 function warmStart() {
   if (warmup.timer) return;
@@ -1183,15 +1486,24 @@ function warmStop(why) {
 
 /** Человеческая фраза последнего действия прогрева из истории warmup.csv. */
 function warmActPhrase(r) {
-  const t = (r.target || '').split('#')[0];
-  const bad = r.note && r.note !== 'ok' ? ` (${r.note})` : '';
+  const raw = (r.target || '').split('#')[0].trim();   // у dm — «@ник» или имя своего
+  const t = raw.replace(/^@/, '');
+  const n = r.note || '';
+  const ok = !n || n === 'ok';
+  const bad = ok ? '' : ` (${n})`;
+  // стоп всего захода пишется без цели — не «подписался на @ (заморожен)»
+  if (!raw && n === 'заморожен') return 'Telegram заморозил аккаунт — заход остановлен';
+  if (!raw && n === 'peer_flood') return 'Telegram придержал аккаунт (PEER_FLOOD) — отлёжка';
+  // react/dm/bot/nick: не вышло или делать было нечего («пусто», «чужой ник»,
+  // «без реакций»…) — так и пишем, а не «поставил реакцию» / «написал своему»
   switch (r.action) {
     case 'sub':   return `подписался на @${t}${bad}`;
     case 'chat':  return `вступил в @${t}${bad}`;
-    case 'react': return `почитал ленту, поставил реакцию в @${t}`;
-    case 'dm':    return 'написал своему аккаунту';
-    case 'bot':   return `запустил бота @${t}`;
-    case 'spam':  return 'спросил у SpamBot про лимиты';
+    case 'react': return ok ? `почитал ленту, поставил реакцию в @${t}` : `реакцию в @${t} не поставил${bad}`;
+    case 'dm':    return ok ? 'написал своему аккаунту' : `не написал своему${raw ? ' ' + raw : ''}${bad}`;
+    case 'bot':   return ok ? `запустил бота @${t}` : `не запустил бота @${t}${bad}`;
+    case 'nick':  return ok ? `завёл себе @${t}` : `не завёл себе ${t ? '@' + t : '@ник'}${bad}`;
+    case 'spam':  return `спросил у SpamBot про лимиты${bad}`;
     default:      return r.action || '';
   }
 }
@@ -1242,6 +1554,7 @@ function warmView() {
         pct: w.pct,
         restPct: w.resting ? Math.round((1 - (w.restLeft || 0) / 86400) * 100) : 100,
         spam: a.spam || '', spamOk: a.spamOk !== false, spamAt: a.spamAt || '',
+        spamRaw: String(a.spamRaw || '').slice(0, 500),
       };
     });
     })();
@@ -1253,7 +1566,8 @@ function warmView() {
     warmDays: getWarmDays(),
     between: warmup.between,
     only: warmup.only,
-    alone: !ownProxyEach() || !!warmup.rotate,
+    // подсказка «одна строка на всех» — про строку прокси, а не про выходной IP
+    alone: !ownStringEach() || !!warmup.rotate,
     // честный признак простоя: прогрев включён, сейчас рабочее окно, но у части
     // (или всех) аккаунтов лежит прокси — значит по ним НЕ идёт, и панель должна
     // сказать это прямо, а не рисовать прогресс
@@ -1825,8 +2139,11 @@ function autoTick() {
     // уже идут номера) отвечал ошибкой «Cannot read properties of undefined» —
     // ровно в тот момент, когда второй набор оказывался пустым и завершался сам.
     .filter((id) => auto.per.has(id) && auto.live[setOf(id)]);
-  // параллель на общем IP — запуски разводим по времени (см. launchHold)
-  const spread = !auto.serial && !ownProxyEach();
+  // параллель на общем IP — запуски разводим по времени (см. launchHold). Общий —
+  // по ВЫХОДНОМУ IP (ipKey), а не по строке: свои строки Asocks всегда разные
+  const shared = sharedIps();
+  const spread = (k) => !auto.serial && shared.has(k);
+  const busyIp = busyIps();
 
   for (const id of queue) {
     if (running.size >= MAX_RUNNING) break;      // потолок одновременных задач (см. MAX_RUNNING)
@@ -1836,8 +2153,10 @@ function autoTick() {
     // подключения. «Без рассылки» сюда не относится: писем ему и так не дадут
     // (inOutreach), а посмотреть ответы на прежние письма можно
     if (accounts.fullRestLeft(byId.get(id))) continue;
-    const pkey = proxyOf(id) || 'direct';
-    if (spread && now < (launchHold.get(pkey) || 0)) continue;   // возьмётся следующим тиком
+    const pkey = ipKey(proxyOf(id));
+    // с этого же выходного IP сейчас работает другой аккаунт — ждём его, сбоем не считаем
+    if (busyIp.has(pkey)) continue;
+    if (spread(pkey) && now < (launchHold.get(pkey) || 0)) continue;   // возьмётся следующим тиком
     const s = auto.per.get(id);
     const set = setOf(id);
     const left = lefts[set];
@@ -1897,7 +2216,7 @@ function autoTick() {
       warm: o.warm !== false,
       // параллель с одного IP: без разноса аккаунты уходят залпом в одну
       // секунду (14.10 так и было) — по очереди этого не бывает
-      sendGap: job.name === 'drafts' && !auto.serial && !ownProxyEach(),
+      sendGap: job.name === 'drafts' && spread(pkey),
       // второе письмо — это всегда отправка: черновиком ссылку не оставишь,
       // человек уже ответил и ждёт
       // второе письмо (follow) уходит только при включённом втором шаге;
@@ -1905,10 +2224,11 @@ function autoTick() {
       send: o.send && !o.voice && (job.name === 'drafts'
         || (job.name === 'follow' && o.funnel && !s.stopped && !accounts.sendHoldLeft(byId.get(id)))),
       voice: job.name === 'drafts' && o.voice,
-    }, (code, st) => autoAfter(id, code, st));
+    }, (code, st, net) => autoAfter(id, code, st, net));
     launchedBy = 'manual';
 
     if (r.ok) {
+      busyIp.set(pkey, id);
       if (!s.stopped) s.note = '';
       s.lastAt = now;
       // по очереди — значит один за раз: следующего позовём, когда этот
@@ -1916,7 +2236,7 @@ function autoTick() {
       if (auto.serial) { auto.fresh = false; return; }
       // слот занимают только задачи, что пишут людям или заводят контакты;
       // «смотрит ответы» лишь читает диалоги — из-за неё ждал бы следующий
-      if (spread && (job.name === 'drafts' || job.name === 'check')) {
+      if (spread(pkey) && (job.name === 'drafts' || job.name === 'check')) {
         launchHold.set(pkey, now + rnd(LAUNCH_SPREAD[0], LAUNCH_SPREAD[1]) * 1000);
       }
       continue;
@@ -1927,6 +2247,13 @@ function autoTick() {
     if (s.restUntil) {
       s.nextAt = Math.max(s.nextAt, s.restUntil);
       s.restUntil = 0;
+      continue;
+    }
+    // не запустилось не из-за аккаунта (нет прокси, с того же выходного IP
+    // работает другой) — ждём, сбоем не считаем: из прогона за это не выводим
+    if (r.pause) {
+      s.nextAt = now + AUTO_FAIL_WAIT * 1000;
+      s.note = r.reason || 'ждёт прокси';
       continue;
     }
     // не запустилось (нет сессии, аккаунт занят чужой задачей) — не долбимся
@@ -1954,8 +2281,26 @@ function autoFail(id, s) {
   }
 }
 
+/**
+ * Задача упала из-за связи или прокси (NET_FAIL): ждём, сбоем аккаунта не
+ * считаем и из прогона не выводим. Подряд — вдвое дольше (5 → 10 → 20 → 30
+ * мин): прокси, который не чинится, не дёргаем каждые 5 минут. В журнал — раз
+ * на причину, а не на каждый заход.
+ */
+const AUTO_NET_WAIT = [5 * 60_000, 30 * 60_000];
+function autoNetPause(id, s, why) {
+  s.netN = (s.netN || 0) + 1;
+  const wait = Math.min(AUTO_NET_WAIT[0] * 2 ** (s.netN - 1), AUTO_NET_WAIT[1]);
+  s.nextAt = Date.now() + wait;
+  s.note = `нет связи: ${why}`;
+  if (s.netNoted !== why) {
+    s.netNoted = why;
+    push(`⏸ «${title(id)}» — ${why}: пауза ${Math.round(wait / 60_000)} мин. Это прокси, а не аккаунт — сбоем не считаю`);
+  }
+}
+
 /** Пачка кончилась: решаем, когда звать этот аккаунт снова. */
-function autoAfter(id, code, st) {
+function autoAfter(id, code, st, net = '') {
   const s = auto.per.get(id);
   if (!s || !auto.on) return;
   // снятый за ограничение только смотрел ответы — его отдых и отметки не трогаем
@@ -1973,7 +2318,7 @@ function autoAfter(id, code, st) {
     const frozen = accounts.list().find((a) => a.id === id)?.spamKind === 'frozen';
     s.note = frozen ? 'аккаунт заморожен' : 'ограничение Telegram';
     push(frozen
-      ? `⛔ «${title(id)}» ЗАМОРОЖЕН Telegram (блокировка по жалобам) — снят с рассылки, нужен разбан через @SpamBot`
+      ? `⛔ «${title(id)}» заморожен Telegram (SpamBot) — снят с рассылки, нужен разбан через @SpamBot`
       : `⏹ «${title(id)}» снят с рассылки: на нём ограничение Telegram`);
     return;
   }
@@ -2019,6 +2364,13 @@ function autoAfter(id, code, st) {
     push(`⏸ «${title(id)}» отдыхает до ${hhmm(s.nextAt)} — ${s.note}`);
     return;
   }
+  if (code !== 0 && net) {
+    // задача сама сказала, что дело в связи или прокси (нет строки, страна выхода
+    // не та или не узнать, сторож страны оборвал связь, NO_NET) — не в аккаунте
+    autoNetPause(id, s, net);
+    if (restUntil) s.nextAt = Math.max(s.nextAt, restUntil);
+    return;
+  }
   if (code !== 0) {
     // задача упала, итога не прислала: сеть, мёртвая сессия, прокси.
     // Сначала спрашиваем сторожа: если лёг прокси, аккаунт ни при чём
@@ -2034,6 +2386,7 @@ function autoAfter(id, code, st) {
     return;
   }
   s.fails = 0;
+  s.netN = 0; s.netNoted = '';
   s.batches++;
   // «смотрит ответы» могла пройти посреди долгого отдыха (флуд, «на сегодня всё»,
   // «проверки на сегодня»): причину отдыха она не меняет — не затираем её, иначе
@@ -2276,12 +2629,14 @@ function autoStart(o) {
   // Два аккаунта, пишущие с одного IP одновременно, — это то, за что Telegram
   // раздаёт ограничения быстрее всего, и полагаться тут на внимательность
   // человека нельзя.
-  const shared = !ownProxyEach();
+  // (общая СТРОКА прокси; дубль выходного IP при своих строках разводит гейт в start)
+  const shared = !ownStringEach();
   // Общий адрес по умолчанию держит очередь (три акка с одного IP = риск бана).
   // Но пользователь может ЯВНО включить параллель на одном IP (o.parallel) —
   // тогда идём параллельно, под его ответственность, и честно предупреждаем.
   if (shared && o.parallel && !o.serial && !rotate) {
-    push('⚠ параллельно на ОДНОМ IP — так просил; риск ограничений от Telegram выше. Для безопасной параллели нужны разные прокси.');
+    push('⚠ параллель на ОДНОМ IP — так просил, но двоих с одного адреса разом панель всё равно не водит: ' +
+      'аккаунты на общем IP пойдут друг за другом, без смены IP. Для настоящей параллели нужны разные прокси.');
   }
   // Настройки — свои у каждого режима: «по номерам» может идти с проверкой и
   // паузой в час, «по чатам» — только письмами и по сорок минут.
@@ -2612,7 +2967,7 @@ function autoView() {
  * как раньше; у каждого свой — все свободные разом.
  */
 function parseCrew() {
-  const busyProxy = new Set([...running.keys()].map((id) => proxyOf(id) || 'direct'));
+  const busyProxy = new Set(busyIps().keys());      // по выходному IP, не по строке (см. ipKey)
   const byProxy = new Map();
   for (const a of accounts.list()) {
     if (!accounts.hasSession(a) || !accounts.isAuthed(a)) continue;
@@ -2620,7 +2975,8 @@ function parseCrew() {
     if (accounts.fullRestLeft(a)) continue;                       // полный отдых: к Telegram ни ногой
     if (a.spamOk === false && a.spamKind === 'frozen') continue;  // замороженный ничего не прочтёт
     if (warm(a).resting) continue;                                // первые сутки аккаунт не трогаем
-    const key = a.proxy || 'direct';
+    if (noProxyWhy(a, 'parse')) continue;                         // без прокси не запустится — доля чатов пропала бы
+    const key = ipKey(a.proxy);
     if (busyProxy.has(key) || proxyGuard.down(a.proxy) || byProxy.has(key)) continue;
     byProxy.set(key, a);
   }
@@ -3016,13 +3372,23 @@ async function handler(req, res) {
         codeWait: codeWait(a.id),
         // что сказал @SpamBot и не снят ли аккаунт с рассылки
         spam: a.spam || '', spamAt: a.spamAt || '', quarantine: inQuarantine(a),
+        // дословный ответ бота (или ошибка FROZEN_* из задачи) — в подсказку, не в строку
+        spamRaw: String(a.spamRaw || '').slice(0, 500),
         // под каким устройством аккаунт заходит: у каждого своё, и это видно
         device: a.device?.device_model || '',
+        // в списке хозяина «защищённых» (🛡): прогрев не сводит его с покупными
+        protect: a.protect === true,
       })));
     }
 
     if (u.pathname === '/api/accounts/add' && req.method === 'POST') {
       const { title, proxy, method, phone } = await body(req);
+      // вход по QR и по коду без прокси не запустится (noProxyWhy) — зря не заводим.
+      // Файлом сессии можно: импорт сам выдаст свой IP
+      if (method !== 'file' && !String(proxy || '').trim() && !ALLOW_DIRECT) {
+        return json(res, 200, { ok: false, reason: 'без прокси вход по QR и по коду не запускаю: аккаунт вышел бы в Telegram ' +
+          'с IP сервера. Вставь строку прокси или подключи аккаунт файлом сессии — тогда свой IP панель выдаст сама' });
+      }
       const acc = accounts.add(title);
       // прокси ставим ДО входа: сессия должна привязаться сразу к нужному адресу,
       // иначе Telegram увидит один IP при логине и другой при работе
@@ -3051,7 +3417,8 @@ async function handler(req, res) {
       push(`\n+ заведён «${acc.title}» (${accounts.proxyLabel(proxy)}) — сейчас откроется окно с QR-кодом`);
       if (warn) push(`⚠ ${warn}`);
       await freshIpForLogin();
-      start('login', { account: acc.id });
+      const r = start('login', { account: acc.id });
+      if (!r.ok) { accounts.remove(acc.id); return json(res, 200, r); }
       return json(res, 200, { ok: true, id: acc.id, warn });
     }
 
@@ -3103,6 +3470,7 @@ async function handler(req, res) {
       if (!acc) return json(res, 200, { ok: false, reason: 'аккаунт не найден' });
       if (running.has(id)) return json(res, 200, { ok: false, reason: 'аккаунт сейчас занят' });
       if (!accounts.hasSession(acc)) return json(res, 200, { ok: false, reason: 'аккаунт не вошёл' });
+      if (noProxyWhy(acc)) return json(res, 200, { ok: false, reason: noProxyWhy(acc) });
       const args = [path.join(CODE, 'profile.py'), '--account', id];
       for (const [k, v] of [['name', name], ['last', last], ['about', about], ['username', username]]) {
         if (v !== undefined && v !== null) args.push(`--${k}`, String(v));
@@ -3121,6 +3489,7 @@ async function handler(req, res) {
       if (!acc) return json(res, 200, { ok: false, reason: 'аккаунт не найден' });
       if (running.has(id)) return json(res, 200, { ok: false, reason: 'аккаунт сейчас занят — попробуй через минуту' });
       if (!accounts.hasSession(acc)) return json(res, 200, { ok: false, reason: 'аккаунт не вошёл' });
+      if (noProxyWhy(acc)) return json(res, 200, { ok: false, reason: noProxyWhy(acc) });
       const uname = String(username || '').trim().replace(/^@/, '');
       if (uname && !/^[A-Za-z][A-Za-z0-9_]{4,31}$/.test(uname)) {
         return json(res, 200, { ok: false, reason: 'ник канала: 5–32 знака, латиница, цифры и _, первая — буква' });
@@ -3142,6 +3511,7 @@ async function handler(req, res) {
       const acc = accounts.list().find((a) => a.id === id);
       if (!acc) return json(res, 200, { ok: false, reason: 'аккаунт не найден' });
       if (running.has(id)) return json(res, 200, { ok: false, reason: 'аккаунт сейчас занят' });
+      if (noProxyWhy(acc)) return json(res, 200, { ok: false, reason: noProxyWhy(acc) });
       const name = decodeURIComponent(req.headers['x-filename'] || '').split(/[\\/]/).pop();
       if (!name || !/\.(jpg|jpeg|png|webp)$/i.test(name)) {
         return json(res, 200, { ok: false, reason: 'нужна картинка .jpg или .png' });
@@ -3160,8 +3530,9 @@ async function handler(req, res) {
     // одно описание/имя ВСЕМ вошедшим аккаунтам сразу
     if (u.pathname === '/api/accounts/profile-all' && req.method === 'POST') {
       const { about, name, last } = await body(req);
-      const list = accounts.list().filter((a) => accounts.hasSession(a) && !running.has(a.id));
-      if (!list.length) return json(res, 200, { ok: false, reason: 'нет свободных вошедших аккаунтов' });
+      // без прокси profile.py к Telegram не подключится — таких не берём
+      const list = accounts.list().filter((a) => accounts.hasSession(a) && !running.has(a.id) && !noProxyWhy(a));
+      if (!list.length) return json(res, 200, { ok: false, reason: 'нет свободных вошедших аккаунтов с прокси' });
       for (const acc of list) {
         const args = [path.join(CODE, 'profile.py'), '--account', acc.id];
         for (const [k, v] of [['name', name], ['last', last], ['about', about]]) {
@@ -3181,8 +3552,8 @@ async function handler(req, res) {
       }
       let buf;
       try { buf = await rawBody(req, 12 * 1024 * 1024); } catch (e) { return json(res, 200, { ok: false, reason: e.message }); }
-      const list = accounts.list().filter((a) => accounts.hasSession(a) && !running.has(a.id));
-      if (!list.length) return json(res, 200, { ok: false, reason: 'нет свободных вошедших аккаунтов' });
+      const list = accounts.list().filter((a) => accounts.hasSession(a) && !running.has(a.id) && !noProxyWhy(a));
+      if (!list.length) return json(res, 200, { ok: false, reason: 'нет свободных вошедших аккаунтов с прокси' });
       fs.mkdirSync(UPLOADS, { recursive: true });
       const dest = path.join(UPLOADS, `avatar-all-${Date.now()}-${name.replace(/[^\p{L}\p{N}._ -]/gu, '_')}`);
       fs.writeFileSync(dest, buf);
@@ -3514,6 +3885,18 @@ async function handler(req, res) {
 
     if (u.pathname === '/api/accounts/proxy' && req.method === 'POST') {
       const { id, proxy, all } = await body(req);
+      // Пустая строка раньше значила «с IP сервера»; теперь без прокси к Telegram
+      // не подключаемся вовсе (tglib.client_proxy). Аккаунту с сессией её не
+      // ставим — он молча встал бы. Без сессии можно: импорт выдаст свой IP
+      if (!String(proxy || '').trim() && !ALLOW_DIRECT) {
+        const withSession = accounts.list().filter((a) => (all || a.id === id) && accounts.hasSession(a));
+        if (withSession.length) {
+          return json(res, 200, { ok: false, reason: all
+            ? `пустой прокси всем нельзя: у ${withSession.length} акк. есть сессия, а без прокси панель к Telegram не подключает`
+            : `у «${withSession[0].title}» есть сессия — без прокси панель его к Telegram не подключает. ` +
+              'Вставь строку прокси (или «Свой IP каждому»)' });
+        }
+      }
       // один мобильный прокси на всех — обычное дело, и прокликивать его
       // по каждому аккаунту руками незачем
       if (all) {
@@ -3553,12 +3936,16 @@ async function handler(req, res) {
       if (ownProxy.busy()) return json(res, 200, { ok: false, reason: 'раздача уже идёт — дождись её' });
       let list = accounts.list().filter((a) => accounts.hasSession(a));
       if (Array.isArray(ids) && ids.length) list = list.filter((a) => ids.includes(a.id));
+      // «всем» — без замороженных и выведенных: их строку не меняем (ownDormant).
+      // Названного по id — меняем, раз просили
+      else list = list.filter((a) => !ownDormant(a));
       // «2»: общий прокси, лежит или своя строка старого вида (готовая сессия без «-session-»)
       if (down) list = list.filter((a) => !a.proxyOwn || proxyGuard.down(a.proxy) || !/-session-/.test(a.proxy || ''));
       if (!list.length) return json(res, 200, { ok: false, reason: down ? 'у всех уже свой живой IP' : 'нет вошедших аккаунтов' });
       const cc = /^[A-Z]{2}$/.test(String(country || '')) ? country : 'KZ';
       push(`\n🌐 свой IP каждому: ${list.length} акк., своя постоянная строка Asocks (${cc}, регион + своя сессия) — проверяю по одной`);
-      ownProxy.assign({ ids: list.map((a) => a.id), country: cc }).then((r) => {
+      ownProxy.assign({ ids: list.map((a) => a.id), country: cc,
+                        reasons: Object.fromEntries(list.map((a) => [a.id, 'вручную'])) }).then((r) => {
         const ok = r.filter((x) => x.ok).length;
         push(`🌐 готово: свой IP у ${ok} из ${r.length}` + (ok < r.length
           ? '. Не вышло: ' + r.filter((x) => !x.ok).map((x) => `${x.id} — ${x.why}`).join('; ') : '') +
@@ -4202,6 +4589,7 @@ async function handler(req, res) {
       let acc; try { acc = accounts.resolve(account); } catch { return json(res, 200, { ok: false, reason: 'выбери аккаунт-искатель' }); }
       if (!accounts.hasSession(acc)) return json(res, 200, { ok: false, reason: `у «${acc.title}» нет сессии` });
       if (running.get(acc.id)) return json(res, 200, { ok: false, reason: `«${acc.title}» занят: ${running.get(acc.id).title}` });
+      if (noProxyWhy(acc)) return json(res, 200, { ok: false, reason: noProxyWhy(acc) });
       if (!String(seeds || '').trim()) return json(res, 200, { ok: false, reason: 'укажи 1–3 канала-семени' });
       if (!String(niche || '').trim()) return json(res, 200, { ok: false, reason: 'укажи нишу' });
       const args = [path.join(CODE, 'discover-chats.py'),

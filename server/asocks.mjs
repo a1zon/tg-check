@@ -176,6 +176,11 @@ export function makeAsocks({ dir }) {
     const k = key();
     if (!k || !raw) return '';
     const mLogin = /:\/\/([^:/@]+):/.exec(String(raw));   // http://ЛОГИН:пароль@…
+    // Строка общего пула (в том числе своя сессия «…-pool-…-session-…») — не порт:
+    // личного refresh у неё нет. Запасной поиск по шлюз:порт находил для неё
+    // порт-шаблон 242130836 (у всех сессий шлюз 190.2.137.56:9999) и рефрешил
+    // его — сессию это не лечит, а порт общий. Нет ссылки — нет и refresh.
+    if (mLogin && /-pool-/.test(mLogin[1])) return '';
     const mHp = /@([^@/]+:\d+)/.exec(String(raw));        // @шлюз:порт
     const idx = await portIndex();
     const id = (mLogin && idx.get(decodeURIComponent(mLogin[1])))

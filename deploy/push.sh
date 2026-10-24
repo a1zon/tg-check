@@ -101,6 +101,10 @@ EXCLUDES=(
   './comment-persona.txt' './llm-usage.json'
   './tgapi.json' './personas'
   '*.xlsx' '*.session' './_backup_*' './_reset_backup_*' '.DS_Store' '.send-gap.*'
+  # замок выдачи своих строк (импорт, оба профиля): чужой файл подменил бы inode
+  # замка под идущим импортом; журнал ответов SpamBot; временные файлы атомарной
+  # записи (accounts.json.tmp.<pid>, asocks-sessions.json.tmp.<pid> / .tmp.py<pid>)
+  './.own-proxy.lock' './spam-log.jsonl' '*.json.tmp.*'
 )
 
 # Имена файлов, которых в архиве быть не должно. Совпадает с EXCLUDES по смыслу,
@@ -120,6 +124,7 @@ DATA_GUARD=(
   comments.csv comment-leads.csv 'comment-plan.json*' 'comments-pending.json*' 'comments-decisions.json*' comment-persona.txt llm-usage.json
   tgapi.json personas
   'auto-run.paused-*.json' 'egrul-*.log'
+  .own-proxy.lock spam-log.jsonl '.send-gap.*' '*.json.tmp.*'
 )
 
 TMP_ARCHIVE=""

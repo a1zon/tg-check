@@ -56,6 +56,8 @@ export function makeProxyGuard({ parseProxy, label, proxies, rotateLink, rotateI
                                  switching = () => false }) {
   const st = new Map();       // строка прокси -> состояние
   let timer = null;
+  // строки общего пула Asocks (`-pool-…`) рефрешить нельзя: см. revive и dedup
+  const noRefresh = (raw) => /-pool-/.test(String(raw || ''));
 
   const stateOf = (p) => {
     if (!st.has(p)) st.set(p, { down: false, fails: 0, ip: '', reason: '', since: 0,
@@ -125,7 +127,12 @@ export function makeProxyGuard({ parseProxy, label, proxies, rotateLink, rotateI
         }
         // при «живой, но без свежего IP» (сайт отдал 429) прежние ip/страну не теряем
         Object.assign(s, { down: false, fails: 0, reason: '', since: Date.now() });
-        if (r.ip) { s.ip = r.ip; s.country = r.country || ''; s.ipAt = Date.now(); }
+        if (r.ip) {
+          // когда строка вышла на этот адрес: в паре-дубле так видно, кто «приехал» к
+          // соседу. Первая проба после старта — 0: когда приехал, не знаем
+          if (r.ip !== s.ip) s.ipSince = s.ip ? Date.now() : 0;
+          s.ip = r.ip; s.country = r.country || ''; s.ipAt = Date.now();
+        }
         return true;
       }
       s.fails++;
@@ -133,7 +140,10 @@ export function makeProxyGuard({ parseProxy, label, proxies, rotateLink, rotateI
       if (!s.down && s.fails >= DOWN_AFTER) {
         Object.assign(s, { down: true, since: Date.now(), revivedAt: Date.now() });
         note('⛔', `прокси ${label(raw)} лежит: ${r.reason}. Прогон и прогрев на паузе, ` +
-          'аккаунтам это сбоем не считается. Проверяю каждые 30 с и раз в 5 минут перезапускаю модем');
+          'аккаунтам это сбоем не считается. ' + (noRefresh(raw)
+            ? 'Это строка общего пула Asocks — перезапуска модема у неё нет; проверяю каждые 30 с, ' +
+              'не поднимется за 5 минут — панель сменит строку (замороженным — нет)'
+            : 'Проверяю каждые 30 с и раз в 2 минуты перезапускаю модем'));
       }
       return false;
     });
@@ -144,6 +154,11 @@ export function makeProxyGuard({ parseProxy, label, proxies, rotateLink, rotateI
     // интервал проверяем ДО поиска ссылки: у своих портов ссылка личная и
     // достаётся запросом в кабинет (с кэшем) — незачем дёргать его каждый тик
     if (Date.now() - s.revivedAt < REVIVE_EVERY) return;
+    // строка общего пула (в том числе своя сессия «-pool-…-session-…») — не порт:
+    // личной ссылки у неё нет, а «запасная» находила порт-шаблон 242130836 и
+    // рефрешила его. Сессию это не лечит (24.10 ни разу не помогло), порт общий,
+    // а в журнале стояло «перезапустил модем». Такую строку лечит замена в панели
+    if (noRefresh(raw)) return;
     // личная ссылка перезапуска именно этого порта (у мобильного dedicated
     // бэкенд отваливается поштучно); если её нет — общий линк смены IP
     const link = await rotateLink(raw);
@@ -171,7 +186,7 @@ export function makeProxyGuard({ parseProxy, label, proxies, rotateLink, rotateI
     const byIp = new Map();
     for (const raw of new Set(proxies())) {
       const s = st.get(raw);
-      if (!s || s.down || !s.ip || /-pool-/.test(raw)) continue;
+      if (!s || s.down || !s.ip || noRefresh(raw)) continue;
       let g = byIp.get(s.ip); if (!g) byIp.set(s.ip, g = []); g.push([raw, s]);
     }
     // IP уникален — дубля на порте нет: сбрасываем счётчик залипания, чтобы
@@ -224,7 +239,7 @@ export function makeProxyGuard({ parseProxy, label, proxies, rotateLink, rotateI
     /** Лежит ли прокси этого аккаунта прямо сейчас. */
     down: (raw) => !!raw && !!st.get(raw)?.down,
     /** Что сторож видел на этом прокси последним: IP и страна выхода. */
-    info: (raw) => { const s = raw && st.get(raw); return s ? { ip: s.ip, country: s.country || '', down: !!s.down, ipAt: s.ipAt || 0 } : {}; },
+    info: (raw) => { const s = raw && st.get(raw); return s ? { ip: s.ip, country: s.country || '', down: !!s.down, ipAt: s.ipAt || 0, ipSince: s.ipSince || 0 } : {}; },
     /** Для шапки панели: без паролей. */
     summary: () => [...new Set(proxies())].map((raw) => {
       const s = stateOf(raw);

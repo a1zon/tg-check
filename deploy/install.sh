@@ -114,7 +114,8 @@ if [ ! -x "$DIR/venv-tg/bin/python" ]; then
 fi
 PY="$DIR/venv-tg/bin/python"
 as_owner "$PY" -m pip install -q --upgrade pip
-as_owner "$PY" -m pip install -q telethon python-socks qrcode openpyxl
+# Telethon — ровно как на сервере: обновление меняет слой протокола сразу у всех аккаунтов
+as_owner "$PY" -m pip install -q telethon==1.45.0 python-socks qrcode openpyxl
 echo "  telethon, python-socks, qrcode, openpyxl — есть"
 if [ "$WITH_TDATA" = 1 ]; then
   echo "  доставляю opentele (импорт TDATA)…"

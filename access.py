@@ -67,6 +67,8 @@ async def new_login(client, proxy, out: Path, password=""):
 
     # Представляемся обычным Telegram Desktop: именно так человек и выглядит
     # в списке устройств, и именно такой вход Telegram считает нормальным.
+    # api_id здесь нарочно 2040, а не api_for(acc): этот ключ уедет в tdata и
+    # будет жить в настоящем Telegram Desktop, а его api_id — 2040.
     fresh = TelegramClient(StringSession(), tglib.API_ID, tglib.API_HASH, proxy=proxy,
                            device_model="Windows", system_version="10",
                            app_version="5.7.3", connection_retries=5, timeout=30)
@@ -151,6 +153,9 @@ async def main():
     kill = str(tglib.arg("kill", "") or "")
     kill_others = tglib.flag("kill-others")
 
+    # без прокси и не из той страны к Telegram не идём — как все задачи
+    await tglib.require_country(acc)
+
     # Мобильный прокси при смене адреса уходит из сети на полминуты — первое
     # подключение может не успеть. Поэтому несколько попыток, а не одна.
     client = tglib.make_client(acc)
@@ -207,7 +212,10 @@ async def main():
         # cloud.json. Так на аккаунтах с 2FA вход собирается без ручного ввода.
         pw = os.environ.get("TG_CLOUD_PASS", "") or stored_cloud_pass(acc.get("id", ""))
         say(f"{acc.get('title')}: создаю отдельный вход ({tglib.proxy_label(acc.get('proxy'))})…")
-        n = await new_login(client, tglib.parse_proxy(acc.get("proxy")), Path(out), password=pw)
+        # новая авторизация: её первый IP Telegram запишет в устройства — страну
+        # проверяем ещё раз прямо перед ней (до этого шли попытки подключения)
+        await tglib.require_country(acc)
+        n = await new_login(client, tglib.client_proxy(acc), Path(out), password=pw)
         say(f"готово: вход создан, файлов в tdata {n}")
         say("в списке устройств аккаунта он виден как обычный Telegram Desktop — "
             "выгоняется из панели одной кнопкой")

@@ -413,6 +413,31 @@ def drop_rejected():
 
 # ------------------------------------------------------------------ Telegram
 
+def _fatal(client, e):
+    """
+    Не сбой чата, а конец захода: заморозка (FROZEN_*) или связь оборвана
+    насовсем (сторож страны выхода, Telethon не переподключился). Такое не
+    глотаем — наверх, прогрев остановит аккаунт (warmup-activity.main).
+    """
+    return tglib.is_frozen_error(e) or (isinstance(e, ConnectionError) and not client.is_connected())
+
+
+@contextlib.contextmanager
+def _quiet(client):
+    """Как suppress(Exception), но заморозку и обрыв связи пропускает наверх."""
+    try:
+        yield
+    except Exception as e:
+        if _fatal(client, e):
+            raise
+
+
+def _method(e):
+    """На каком методе Telegram ответил ошибкой (SendMessage, JoinChannel…) — в журнал заморозок."""
+    req = getattr(e, "request", None)
+    return type(req).__name__.removesuffix("Request") if req is not None else type(e).__name__
+
+
 async def _send(client, ent, text, reply_to, cfg):
     """«Печатает…» по длине текста, потом ответ на сообщение."""
     lo, hi = cfg["typing"]
@@ -420,7 +445,9 @@ async def _send(client, ent, text, reply_to, cfg):
     try:
         async with client.action(ent, "typing"):
             await asyncio.sleep(t)
-    except Exception:
+    except Exception as e:
+        if _fatal(client, e):
+            raise
         await asyncio.sleep(t)
     return await client.send_message(ent, text, reply_to=reply_to, link_preview=False)
 
@@ -512,14 +539,14 @@ async def visit(client, acc, u, st, cfg, own_ids, system, recent, allow_join, re
         if msgs:
             st["last_seen_before"] = int(st.get("last_seen") or 0)
             st["last_seen"] = max(m.id for m in msgs)
-            with contextlib.suppress(Exception):
+            with _quiet(client):
                 await client.send_read_acknowledge(ent, max_id=st["last_seen"])
         return "none", "обживаюсь после вступления — пока только читаю"
     if not msgs:
         return "none", "нового нет"
     st["last_seen_before"] = int(st.get("last_seen") or 0)
     st["last_seen"] = max(m.id for m in msgs)
-    with contextlib.suppress(Exception):
+    with _quiet(client):
         await client.send_read_acknowledge(ent, max_id=st["last_seen"])
 
     ours = {int(c["id"]): int(c.get("depth", 1)) for c in st.get("comments", [])}
@@ -549,7 +576,7 @@ async def visit(client, acc, u, st, cfg, own_ids, system, recent, allow_join, re
     # мало нового — подтягиваем чуть старше, чтобы модель видела разговор
     need = int(cfg["context"]) - len(fresh)
     if need > 0 and int(st.get("last_seen_before") or 0):
-        with contextlib.suppress(Exception):
+        with _quiet(client):
             older = await client.get_messages(ent, limit=need, max_id=min(m.id for m in fresh))
             fresh = sorted(list(older) + fresh, key=lambda m: m.id)
     # «читаем»
@@ -617,7 +644,9 @@ async def send_approved(client, acc, plan, cfg):
             sent = await _send(client, ent, it["reply"], int(it["msg_id"]), cfg)
         except Exception as e:
             from telethon.errors import FloodWaitError, PeerFloodError
-            if isinstance(e, (FloodWaitError, PeerFloodError)):
+            # флуд, заморозка, обрыв связи — про аккаунт, а не про комментарий:
+            # одобренное не списываем в failed, оно уйдёт в следующий заход
+            if isinstance(e, (FloodWaitError, PeerFloodError)) or _fatal(client, e):
                 raise
             mark_item(it["id"], "failed")
             log_row(acc["id"], it["chat"], it["msg_id"], "", "failed", it["reply"], str(e)[:120])
@@ -635,9 +664,23 @@ async def do_comment(client, acc, data, joined_today, may_join=True):
     Действие прогрева → (итог, что было, чат). Итог: True — комментарий ушёл
     (или встал на одобрение), None — отвечать было не на что, False — не вышло.
     «Что было»: sent | queued | joined | none. FloodWait и PeerFlood поднимает
-    наверх — их обрабатывает прогрев (отлёжка). may_join=False (между пачками,
-    догрев, ограниченный) — в новые чаты не вступаем, только дочитываем свои.
+    наверх — их обрабатывает прогрев (отлёжка). Заморозку (FROZEN_*) — тоже:
+    отмечаем её сразу (с методом, на котором Telegram её сказал), стоп захода —
+    у прогрева; ExitDrift (сторож страны выхода) не ловим вовсе. may_join=False
+    (между пачками, догрев, ограниченный) — в новые чаты не вступаем, только
+    дочитываем свои.
     """
+    try:
+        return await _comment(client, acc, data, joined_today, may_join)
+    except Exception as e:
+        if tglib.is_frozen_error(e):
+            # прогрев отметит ещё раз — mark_frozen на уже замороженном ничего не меняет
+            with contextlib.suppress(Exception):
+                tglib.mark_frozen(acc["id"], f"{type(e).__name__}: {e}", f"comments:{_method(e)}")
+        raise
+
+
+async def _comment(client, acc, data, joined_today, may_join):
     cfg = config(data)
     if not cfg["on"]:
         say("комментарии выключены (warm-list.json → comments.on)")

@@ -10,6 +10,12 @@ Telegram считает связкой. Сторож в панели держи�
 лишние, пока не разойдутся. При отсутствии дублей ничего не делает (тихо).
 
 Деньги не тратит: refresh мобильного порта бесплатен (платим за трафик).
+
+Свои строки Asocks (`…-pool-…-session-<метка>`, с 23.10 — у всех) — не порты:
+refresh у них нет, а проверка через каждую стоит платного трафика. Их скрипт
+пропускает (дубли таких строк разводит замена в самой панели) и, если других
+не осталось, молча выходит, не трогая ни прокси, ни кабинет.
+
 Запуск: cd /opt/tg-panel && venv-tg/bin/python dedup-proxies.py
 cron:   */30 * * * * cd /opt/tg-panel && flock -n /tmp/dedup.lock venv-tg/bin/python dedup-proxies.py >> dedup.log 2>&1
 """
@@ -41,10 +47,20 @@ def port_index(k):
     return {p.get("login"): p["id"] for p in ps if p.get("login")}
 
 
+def own_session(proxy):
+    """Своя строка Asocks (логин …-session-<метка>): это не порт, refresh у неё нет."""
+    m = re.match(r"\w+://([^:@/]+)", proxy or "")
+    return bool(m) and "-session-" in m.group(1)
+
+
 def exit_ip(proxy):
+    # прокси — через окружение, а не аргументом: пароль не светится в списке
+    # процессов; no_proxy убираем, иначе curl пошёл бы напрямую
+    env = {k: v for k, v in os.environ.items() if k.lower() != "no_proxy"}
+    env.update(http_proxy=proxy, https_proxy=proxy, HTTPS_PROXY=proxy, ALL_PROXY=proxy)
     try:
-        out = subprocess.run(["curl", "-s", "--max-time", "18", "-x", proxy, "https://api.ipify.org"],
-                             capture_output=True, text=True, timeout=24).stdout.strip()
+        out = subprocess.run(["curl", "-s", "--max-time", "18", "https://api.ipify.org"],
+                             capture_output=True, text=True, timeout=24, env=env).stdout.strip()
         return out if re.match(r"\d+\.\d+\.\d+\.\d+$", out) else "DOWN"
     except Exception:
         return "DOWN"
@@ -63,22 +79,23 @@ def refresh(proxy, idmap, k):
 
 
 def main():
-    try:
-        k = api_key()
-        idmap = port_index(k)
-    except Exception as e:
-        log(f"нет ключа/портов Asocks: {e}")
-        return 1
     prox = {}
     for prof, fn in PROFILES:
         path = os.path.join(CODE, fn)
         if not os.path.exists(path):
             continue
         for a in json.load(open(path)):
-            if a.get("proxy"):
+            # свои строки Asocks не трогаем: refresh у них нет — проба только жжёт трафик
+            if a.get("proxy") and not own_session(a["proxy"]):
                 prox[f"{prof}/{a['id']}"] = a["proxy"]
     if not prox:
-        return 0
+        return 0          # рефрешить нечего — тихо, без кабинета и без проб
+    try:
+        k = api_key()
+        idmap = port_index(k)
+    except Exception as e:
+        log(f"нет ключа/портов Asocks: {e}")
+        return 1
     cur = {a: exit_ip(p) for a, p in prox.items()}
     acted = False
     for _ in range(ROUNDS):

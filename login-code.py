@@ -91,13 +91,18 @@ async def main():
     dest.parent.mkdir(parents=True, exist_ok=True)
     say(f"аккаунт: {acc['title']}  |  вход по коду на {phone}  |  "
         f"{tglib.proxy_label(acc.get('proxy'))}  |  Telethon")
+    # без прокси и не из той страны вход не начинаем: первый IP новой сессии
+    # Telegram запоминает (до клиента — файл сессии ещё не заведён)
+    _, country = await tglib.require_country(acc)
 
     tglib.ensure_device(acc)   # свой отпечаток ДО входа
     dev = tglib.device_for(acc)
     say(f"устройство: {dev['device_model']} · {dev['system_version']} · Telegram {dev['app_version']}")
     existed = dest.exists()
-    client = TelegramClient(str(dest.with_suffix("")), tglib.API_ID, tglib.API_HASH,
-                            proxy=tglib.parse_proxy(acc.get("proxy")), **dev)
+    # api_id тот же, что у задач (make_client): отпечаток ensure_device выбран под него
+    api_id, api_hash = tglib.api_for(acc)
+    client = TelegramClient(str(dest.with_suffix("")), api_id, api_hash,
+                            proxy=tglib.client_proxy(acc), **dev)
     try:
         await client.connect()
     except (OSError, asyncio.TimeoutError) as e:
@@ -107,6 +112,9 @@ async def main():
         if not existed:
             dest.unlink(missing_ok=True)
         raise SystemExit(f"{type(e).__name__}: " + tglib.NO_NET % acc["id"])
+    if country:
+        # код ждём минутами — переподключение за это время не должно увести вход в чужую страну
+        tglib.guard_exit(client, acc, country)
     if await client.is_user_authorized():
         say("этот аккаунт уже подключён — вход не нужен")
         await tglib.aclose(client)

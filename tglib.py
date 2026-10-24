@@ -427,18 +427,38 @@ def parse_proxy(raw):
         cred, rest = rest.rsplit("@", 1)
         user, _, password = cred.partition(":")
     parts = rest.split(":")
+    # строку в текст ошибки не кладём ни целиком, ни кусками: в ней логин и
+    # пароль, а текст уходит в журнал любой задачи
+    bad = ("не разобрал прокси — нужно host:port, host:port:логин:пароль "
+           "или схема://логин:пароль@host:port")
     if len(parts) == 4:                       # host:port:user:pass
         host, port, user, password = parts
     elif len(parts) == 2:
         host, port = parts
     else:
-        raise SystemExit(f"не разобрал прокси «{s}» — нужно host:port")
+        raise SystemExit(bad)
     if not host or not port.isdigit():
-        raise SystemExit(f"не разобрал прокси «{s}» — нужно host:port")
+        raise SystemExit(bad)
     kind = "socks5" if "socks5" in scheme else "socks4" if "socks4" in scheme else "http"
     if user:
         return (kind, host, int(port), True, user, password or "")
     return (kind, host, int(port))
+
+
+def client_proxy(acc):
+    """
+    Прокси аккаунта для Telethon. Без прокси аккаунт вышел бы в Telegram с IP
+    самого сервера (московский дата-центр, один на все такие аккаунты) — этого
+    не делаем никогда: пустое поле значит «не подключаю», а не «прямой IP».
+    Прямой выход — только нарочно, TG_ALLOW_DIRECT=1 (запуск на своём
+    компьютере через VPN).
+    """
+    p = parse_proxy(acc.get("proxy"))
+    if p is None and os.environ.get("TG_ALLOW_DIRECT") != "1":
+        raise SystemExit(f"у «{acc.get('title', acc.get('id'))}» не задан прокси — к Telegram не подключаю: "
+                         "без него аккаунт вышел бы с IP сервера. Задай прокси в панели "
+                         "(прямой выход нарочно — TG_ALLOW_DIRECT=1)")
+    return p
 
 
 def proxy_label(raw):
@@ -476,7 +496,7 @@ def make_client(acc, **kw):
     opts.update(kw)
     api_id, api_hash = api_for(acc)
     return TelegramClient(str(path.with_suffix("")), api_id, api_hash,
-                          proxy=parse_proxy(acc.get("proxy")),
+                          proxy=client_proxy(acc),
                           connection_retries=3, timeout=20, **opts)
 
 
@@ -565,6 +585,9 @@ async def aclose(client):
     ни ронять задачу, ни маскировать настоящую причину трейсбеком.
     Перед отключением записываем трафик задачи (traffic.csv).
     """
+    watch = getattr(client, "_tg_exit_watch", None)
+    if watch is not None:
+        watch.cancel()          # сторож страны выхода живёт ровно пока клиент
     try:
         _log_traffic(client)
     except Exception:
@@ -575,24 +598,266 @@ async def aclose(client):
         pass
 
 
-def _exit_country(proxy_raw):
-    """Код страны выхода через прокси (ipinfo по http, ~1 КБ). None — не определили."""
+# ------------------------------------------------------- страна выхода прокси
+
+# Откуда прокси выходит в интернет. Сервисов три, по очереди, как в
+# proxy_buy._exit_ip: любой может лимитить (429) или лежать, а «страну не
+# узнали» теперь значит «не подключаю» — одного ipinfo для этого мало.
+# (адрес, формат ответа, где ip, где страна ISO-2)
+EXIT_PROBES = (
+    ("http://ipinfo.io/json", "json", "ip", "country"),
+    ("http://ip-api.com/line/?fields=query,countryCode", "line", 0, 1),
+    ("https://ifconfig.co/json", "json", "ip", "country_iso"),
+)
+EXIT_PROBE_TIMEOUT = 12        # сек на один сервис; все три — не дольше ~40 с
+
+# Последняя проверка выхода аккаунта в этом процессе: id -> {ip, country, at}.
+# По ip разносим письма разных аккаунтов (wait_send_gap): разные строки прокси
+# бывают одним выходным IP.
+EXIT_SEEN = {}
+
+
+async def _curl_via(conf, target):
+    """
+    Ответ сервиса через прокси, "" — не вышло. Строка прокси с паролем уходит
+    curl'у конфигом в stdin (-K -), а не аргументом: аргументы процесса видны
+    в ps любому на сервере.
+    """
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "curl", "-s", "-m", str(EXIT_PROBE_TIMEOUT), "-K", "-", target,
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL)
+    except Exception:
+        return ""
+    try:
+        out, _ = await asyncio.wait_for(proc.communicate(conf.encode()), EXIT_PROBE_TIMEOUT + 5)
+        return out.decode("utf-8", "replace").strip()
+    except Exception:
+        return ""
+    finally:
+        # таймаут или задачу отменили — curl висеть не оставляем
+        if proc.returncode is None:
+            with _contextlib.suppress(Exception):
+                proc.kill()
+
+
+async def exit_info(proxy_raw):
+    """(выходной IP, страна ISO-2) прокси. Страна None — ни один сервис не ответил."""
     try:
         p = parse_proxy(proxy_raw)
     except SystemExit:
-        return None
+        return None, None
     if not p:
-        return None
-    kind, host, port = p[0], p[1], p[2]
+        return None, None
     cred = f"{p[4]}:{p[5]}@" if len(p) > 4 and p[4] else ""
-    url = f"{kind}://{cred}{host}:{port}"
-    import subprocess
+    url = f"{p[0]}://{cred}{p[1]}:{p[2]}"
+    conf = 'proxy = "' + url.replace("\\", "\\\\").replace('"', '\\"') + '"\n'
+    ip = None
+    for target, fmt, k_ip, k_c in EXIT_PROBES:
+        out = await _curl_via(conf, target)
+        got = c = None
+        try:
+            if fmt == "json":
+                d = json.loads(out) or {}
+                got, c = d.get(k_ip), d.get(k_c)
+            else:
+                parts = out.split()
+                if len(parts) >= 2 and parts[0][:1].isdigit():
+                    got, c = parts[k_ip], parts[k_c]
+        except Exception:
+            pass
+        ip = got or ip
+        if c and len(str(c)) == 2:
+            return ip, str(c).upper()
+    return ip, None
+
+
+def need_country():
+    """Из какой страны аккаунтам положено выходить (TG_REQUIRE_COUNTRY, KZ); "" — проверка выключена."""
+    need = str(os.environ.get("TG_REQUIRE_COUNTRY", "KZ") or "").strip().upper()
+    return "" if need in ("", "OFF") else need
+
+
+def exit_ip(acc):
+    """Выходной IP аккаунта по последней проверке в этом процессе, "" — не проверяли."""
+    return (EXIT_SEEN.get(acc.get("id")) or {}).get("ip") or ""
+
+
+async def require_country(acc):
+    """
+    Защита от входа из чужой страны — ПЕРЕД любым подключением к Telegram
+    (задачи, вход по QR и коду, отдельный вход на ПК, комплект).
+
+    Мобильный пул иногда выпускает «казахстанский» прокси через другую страну
+    (видели Марокко, Колумбию, Германию, Бразилию), а скачки страны между
+    входами Telegram считает угоном и сбрасывает сессию. Поэтому: не та страна —
+    не подключаемся вовсе; страну не узнал ни один из трёх сервисов — тоже не
+    подключаемся (вслепую можно выйти откуда угодно). Без прокси — отказ
+    (client_proxy), прямой выход нарочно (TG_ALLOW_DIRECT=1) не проверяем.
+    Выключается TG_REQUIRE_COUNTRY=off.
+
+    Возвращает (ip, страна); проверки не было — (None, None).
+    """
+    if client_proxy(acc) is None:
+        return None, None
+    need = need_country()
+    if not need:
+        return None, None
+    title = acc.get("title", acc["id"])
+    ip, c = await exit_info(acc.get("proxy"))
+    if not c:
+        raise SystemExit(f"не узнать, из какой страны сейчас выходит прокси «{title}» — ipinfo, ip-api и "
+                         "ifconfig.co не ответили; не подключаю (вслепую можно выйти не из той страны). "
+                         "Прокси, скорее всего, лежит или меняет IP — повторить позже.")
+    if c != need:
+        # по этой отметке панель видит, что строку пора менять (выход из c)
+        set_field(acc["id"], driftCountry=c, driftIp=ip or "", driftAt=now_iso())
+        raise SystemExit(f"прокси сейчас выходит из {c}, а не {need} — не подключаю "
+                         f"«{title}» (чтобы Telegram не увидел вход из-за границы). "
+                         "Сменить IP и повторить.")
+    EXIT_SEEN[acc["id"]] = {"ip": ip, "country": c, "at": time.time()}
+    return ip, c
+
+
+# Страну проверяем перед подключением, но задача держит соединение минутами:
+# письма ждут паузы, поиск — флуд-паузы. Если модем под строкой сменился, TCP
+# рвётся, и Telethon сам переподключается через ту же строку — уже с нового
+# выхода (23.10 a16 и n7 так ~5 минут выходили из Бразилии). Поэтому в долгой
+# задаче страну перепроверяем: раз в 10 минут и сразу после каждого
+# переподключения — тогда запросы ждут, пока страна не подтвердится.
+EXIT_RECHECK = 10 * 60          # плановая перепроверка
+EXIT_RECHECK_SOON = 2 * 60      # страну не узнали — следующая проба раньше
+EXIT_RECHECK_GAP = 60           # чаще раза в минуту не пробуем, даже если связь дёргается
+EXIT_UNKNOWN_MAX = 3            # столько раз подряд «не узнали» — задачу останавливаем
+
+
+class ExitDrift(SystemExit):
+    """Прокси посреди задачи вышел не из той страны (или страну не подтвердить) — связь оборвана."""
+
+
+def guard_exit(client, acc, need):
+    """
+    Сторож страны выхода на время жизни клиента (connect ставит его сам, вход
+    по QR/коду — после своего connect). Обёртка над запросами Telethon
+    (client._call) и над его обратным вызовом после переподключения; фоновая
+    проба — отдельной задачей, aclose её гасит. Пробы — не чаще раза в минуту,
+    и после трёх «не узнали» подряд сторож сдаётся, а не крутится.
+    """
+    sender = getattr(client, "_sender", None)
+    orig_call = client._call
+    g = {"acc": acc, "need": need, "last": time.monotonic(), "dirty": False, "tripped": "",
+         "unknown": 0, "lock": asyncio.Lock(), "wake": asyncio.Event(),
+         "owner": asyncio.current_task()}
+
+    async def guarded_call(sender_, request, *a, **kw):
+        # после переподключения ни одного запроса, пока страна не подтвердится
+        while g["dirty"] and not g["tripped"]:
+            try:
+                await _exit_recheck(client, g)
+            except Exception:
+                g["dirty"] = False      # сломался сам сторож — задачу им не держим
+                break
+        if g["tripped"]:
+            # сама задача останавливается; фоновые задачи Telethon — просто «нет связи»
+            if asyncio.current_task() is g["owner"]:
+                raise ExitDrift(g["tripped"])
+            raise ConnectionError(g["tripped"])
+        return await orig_call(sender_, request, *a, **kw)
+
+    client._call = guarded_call
+
+    orig_cb = getattr(sender, "_auto_reconnect_callback", None)
+    if sender is not None:
+        async def on_reconnect():
+            g["dirty"] = True
+            g["wake"].set()
+            if orig_cb is not None:
+                await orig_cb()
+        sender._auto_reconnect_callback = on_reconnect
+
+    client._tg_exit_watch = asyncio.get_running_loop().create_task(_exit_watch(client, g))
+
+
+async def _exit_watch(client, g):
+    """Фоновая перепроверка, пока клиент подключён и сторож не сработал."""
     try:
-        out = subprocess.run(["curl", "-s", "-m", "15", "-x", url, "http://ipinfo.io/json"],
-                             capture_output=True, text=True, timeout=20).stdout
-        return (json.loads(out) or {}).get("country") or None
+        while not g["tripped"] and client.is_connected():
+            g["wake"].clear()
+            period = EXIT_RECHECK_SOON if g["unknown"] else EXIT_RECHECK
+            left = 0 if g["dirty"] else g["last"] + period - time.monotonic()
+            if left > 0:
+                try:
+                    await asyncio.wait_for(g["wake"].wait(), left)
+                except asyncio.TimeoutError:
+                    pass
+                continue
+            await _exit_recheck(client, g)
+    except asyncio.CancelledError:
+        raise
     except Exception:
-        return None
+        pass    # сторож вспомогательный — задачу из-за его сбоя не роняем
+
+
+async def _exit_recheck(client, g):
+    """Одна проба страны (под замком: сторож и запросы не пробуют вдвоём)."""
+    async with g["lock"]:
+        period = EXIT_RECHECK_SOON if g["unknown"] else EXIT_RECHECK
+        if g["tripped"] or not (g["dirty"] or time.monotonic() - g["last"] >= period):
+            return          # пока ждали замок, проверил другой
+        wait = g["last"] + EXIT_RECHECK_GAP - time.monotonic()
+        if wait > 0:
+            await asyncio.sleep(wait)
+        reconnected, g["dirty"] = g["dirty"], False
+        acc, need = g["acc"], g["need"]
+        ip, c = await exit_info(acc.get("proxy"))
+        g["last"] = time.monotonic()
+        title = acc.get("title", acc["id"])
+        if c == need:
+            g["unknown"] = 0
+            old = exit_ip(acc)
+            EXIT_SEEN[acc["id"]] = {"ip": ip, "country": c, "at": time.time()}
+            if ip and old and ip != old:
+                say(f"прокси сменил IP посреди задачи: {old} → {ip} ({c}) — работаю дальше")
+            return
+        if c:
+            with _contextlib.suppress(Exception):
+                set_field(acc["id"], driftCountry=c, driftIp=ip or "", driftAt=now_iso())
+            why = (f"прокси посреди задачи вышел из {c}, а не {need} — оборвал связь «{title}» "
+                   "(чтобы Telegram не видел аккаунт из-за границы). Сменить IP и повторить.")
+        else:
+            g["unknown"] += 1
+            if g["unknown"] < EXIT_UNKNOWN_MAX:
+                # после переподключения запросы так и ждут подтверждения
+                g["dirty"] = g["dirty"] or reconnected
+                return
+            why = (f"страну выхода прокси «{title}» не подтвердить {g['unknown']} раза подряд — "
+                   "оборвал связь, повторить позже.")
+        g["tripped"] = why
+        g["wake"].set()         # фоновый сторож выходит сразу, а не по таймеру
+    await _exit_cut(client, why)
+    with _contextlib.suppress(Exception):
+        say(why)
+
+
+async def _exit_cut(client, why):
+    """
+    Оборвать связь сразу и без авто-переподключения: висящие запросы получат
+    ConnectionError (задачи понимают её как «нет связи»), а не отмену.
+    """
+    sender = getattr(client, "_sender", None)
+    try:
+        if sender is not None and hasattr(sender, "_disconnect"):
+            await sender._disconnect(error=ConnectionError(why))
+        else:
+            await client.disconnect()
+    except Exception:
+        pass
+
+
+def _is_proxy_error(e) -> bool:
+    """Отказ самого прокси (python_socks: CONNECT 404/407 и т.п.) — он не OSError."""
+    return any(c.__name__ == "ProxyException" for c in type(e).__mro__)
 
 
 async def connect(acc, **kw):
@@ -614,21 +879,9 @@ async def connect(acc, **kw):
         raise SystemExit(f"«{acc.get('title', acc['id'])}» на полном отдыхе после заморозки ещё "
                          f"{rest // 3600} ч {rest % 3600 // 60} мин — к Telegram не подключаю")
 
-    # Защита от входа из чужой страны. Мобильный пул иногда выпускает «казахстанский»
-    # прокси через другую страну (видели выход из Марокко/Колумбии/Германии), а
-    # скачки страны между входами Telegram считает угоном и сбрасывает сессию.
-    # Поэтому ПЕРЕД подключением к Telegram проверяем страну выхода: не KZ — не
-    # подключаемся вовсе (Telegram не увидит аккаунт из-за границы). Если страну
-    # не определили (прокси молчит/429) — не блокируем, это решит сторож.
-    # Выключается TG_REQUIRE_COUNTRY=off.
-    need = os.environ.get("TG_REQUIRE_COUNTRY", "KZ")
-    if need and need != "off" and acc.get("proxy"):
-        c = _exit_country(acc.get("proxy"))
-        if c and c != need:
-            set_field(acc["id"], driftCountry=c, driftAt=now_iso())
-            raise SystemExit(f"прокси сейчас выходит из {c}, а не {need} — не подключаю "
-                             f"«{acc.get('title', acc['id'])}» (чтобы Telegram не увидел вход из-за границы). "
-                             "Сменить IP и повторить.")
+    # Без прокси не подключаемся, страну выхода проверяем ДО Telegram
+    # (require_country), а пока задача идёт — сторож страны (guard_exit).
+    ip, country = await require_country(acc)
 
     quiet_telethon()
     client = make_client(acc, **kw)
@@ -645,10 +898,20 @@ async def connect(acc, **kw):
     except (OSError, asyncio.TimeoutError) as e:
         await aclose(client)
         raise SystemExit(f"{type(e).__name__}: " + NO_NET % acc["id"])
+    except Exception as e:
+        # прокси ответил отказом (Asocks «404 not found in region», 407) — это
+        # тоже «нет связи», а не поломка задачи с трейсбеком
+        if not _is_proxy_error(e):
+            raise
+        await aclose(client)
+        why = str(e).splitlines()[0][:100] if str(e) else type(e).__name__
+        raise SystemExit(f"прокси отказал ({why}): " + NO_NET % acc["id"])
     if not await client.is_user_authorized():
         set_field(acc["id"], authed=False)
         await aclose(client)
         raise SystemExit(f"сессия «{acc.get('title', acc['id'])}» мертва или отозвана — подключи заново")
+    if country:
+        guard_exit(client, acc, country)
     me = await client.get_me()
     remember(acc, me)
     await save_avatar(client, acc, me)
@@ -985,8 +1248,10 @@ SPAM_LIMITED = (
     "я боюсь",
 )
 
-# Заморозка — это НЕ временный лимит. Telegram блокирует аккаунт по жалобам
-# получателей после ручной модерации; сам срок не снимается, нужен разбан.
+# Заморозка — это НЕ временный лимит: аккаунт в режиме «только чтение», сам
+# срок не снимается, нужен разбан. Бывает и без единой жалобы (партия 18.10
+# замёрзла без холодных писем), поэтому в панели пишем «заморожен», а не «по
+# жалобам»; что дословно сказал Telegram — в spamRaw и spam-log.jsonl.
 # SpamBot отвечает так даже замороженному аккаунту, поэтому ловим именно текст.
 SPAM_BLOCK = (
     "your account was blocked",
@@ -994,12 +1259,17 @@ SPAM_BLOCK = (
     "violations of the telegram terms of service",
     "confirmed by our moderators",
     "account was frozen",
+    "account is frozen",
+    "account has been frozen",
     "ваш аккаунт заблокирован",
     "аккаунт был заблокирован",
     "аккаунт заморожен",
     "ваш аккаунт заморожен",
+    "аккаунт был заморожен",
     "нарушение условий использования",
 )
+FROZEN_NOTE = "заморожен Telegram — снимается только разбаном через @SpamBot/поддержку"
+SPAM_LOG = DIR / "spam-log.jsonl"   # что дословно говорил Telegram о заморозках и лимитах
 
 # «Ограничения будут автоматически сняты 29 Sep 2026, 08:32 UTC» /
 # «will be automatically released on 29 Sep 2026, 08:32 UTC» — дата снятия
@@ -1055,7 +1325,7 @@ def spam_verdict(text):
 
 
 def spam_blocked(text) -> bool:
-    """Заморожен ли аккаунт — жёсткая блокировка по жалобам (ToS), не временный лимит."""
+    """Заморожен ли аккаунт — режим «только чтение» до разбана, не временный лимит."""
     low = " ".join(str(text or "").replace("’", "'").split()).lower()
     return any(w in low for w in SPAM_BLOCK)
 
@@ -1066,8 +1336,103 @@ def is_frozen_error(e) -> bool:
     а не случайная строка со словом frozen (frozenset, frozen dataclass и т.п.).
     Замороженному аккаунту Telegram валит FROZEN_* почти на любой метод отправки.
     """
-    s = (str(e) + " " + type(e).__name__).upper()
-    return "FROZEN_" in s or "FROZENMETHOD" in s
+    # Только ошибки Telegram: в тексте ValueError/SystemExit бывает чужой ник или
+    # ссылка («@frozen_food_ekb»), и здоровый аккаунт записали бы в замороженные.
+    # Код ошибки — в e.message (FROZEN_METHOD_INVALID), у известных Telethon —
+    # ещё и имя класса (FrozenMethodInvalidError, FrozenParticipantMissingError…)
+    try:
+        from telethon.errors import RPCError
+    except ImportError:
+        return False
+    if not isinstance(e, RPCError):
+        return False
+    return (type(e).__name__.startswith("Frozen")
+            or str(getattr(e, "message", "") or "").upper().startswith("FROZEN_"))
+
+
+def _iso_ts(v):
+    """ISO-время в секундах эпохи, None — нет или не разобрать."""
+    try:
+        t = datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+        return (t if t.tzinfo else t.replace(tzinfo=timezone.utc)).timestamp()
+    except Exception:
+        return None
+
+
+def spam_recheck_pending(a) -> bool:
+    """Панель попросили перепроверить SpamBot, а ответа новее просьбы ещё нет."""
+    asked, said = _iso_ts(a.get("spamRecheckAt")), _iso_ts(a.get("spamAt"))
+    return asked is not None and (said is None or asked > said)
+
+
+def _spam_log(acc_id, kind, raw, source):
+    """
+    Строка в spam-log.jsonl: что дословно сказал Telegram и откуда узнали.
+    Только дозапись одним write() (O_APPEND), как append_row. Сбой журнала
+    вердикт не трогает — он уже в реестре.
+    """
+    line = json.dumps({"at": now_iso(), "id": acc_id, "kind": kind,
+                       "raw": str(raw or "")[:500], "source": source}, ensure_ascii=False) + "\n"
+    try:
+        with SPAM_LOG.open("a", encoding="utf-8") as f:
+            f.write(line)
+    except Exception:
+        pass
+
+
+def _frozen_fields(raw):
+    """Поля реестра для замороженного — те же, что ставит проверка SpamBot."""
+    return dict(spamKind="frozen", spamOk=False, spamUntil="", spam=cell(FROZEN_NOTE),
+                spamRaw=" ".join(str(raw or "").split())[:500], spamAt=now_iso())
+
+
+def mark_frozen(acc_id, raw, source):
+    """
+    Аккаунт заморожен — записать это сразу, не дожидаясь утреннего SpamBot.
+    Зовут задачи, которым Telegram ответил FROZEN_* (is_frozen_error): поля те
+    же, что у проверки SpamBot (spamKind=frozen, spamOk=False, spam, spamRaw,
+    spamAt), плюс строка в spam-log.jsonl с источником (source: задача/метод).
+
+    Повторный вызов на уже замороженном ничего не меняет и в журнал не пишет —
+    задачи зовут его на каждой FROZEN_*-ошибке. Исключение: висит просьба
+    перепроверить (spamRecheckAt новее spamAt) — тогда обновляем spamAt:
+    заморозку только что подтвердил сам Telegram, спрашивать бота незачем.
+    Возвращает True, если пометили сейчас.
+    """
+    fields = _frozen_fields(raw)
+    with _accounts_lock():
+        lst = load_accounts()
+        a = next((x for x in lst if x.get("id") == acc_id), None)
+        if a is None:
+            return False
+        if a.get("spamKind") == "frozen" and a.get("spamOk") is False:
+            if spam_recheck_pending(a):
+                a["spamAt"] = fields["spamAt"]
+                save_accounts(lst)
+            return False
+        a.update(fields)
+        save_accounts(lst)
+    _spam_log(acc_id, "frozen", fields["spamRaw"], source)
+    return True
+
+
+def request_spam_recheck(acc_id, reason):
+    """
+    Попросить панель спросить @SpamBot про аккаунт вне расписания, а не завтра
+    утром: задача увидела признак беды (свои видят его удалённым, странные
+    отказы). К Telegram сама не ходит — только ставит spamRecheckAt/
+    spamRecheckWhy; панель увидит, что просьба новее ответа бота (spamAt), и
+    спросит, когда аккаунт свободен. Уже висящую просьбу не перебиваем.
+    Возвращает True, если попросили сейчас.
+    """
+    with _accounts_lock():
+        lst = load_accounts()
+        a = next((x for x in lst if x.get("id") == acc_id), None)
+        if a is None or spam_recheck_pending(a):
+            return False
+        a.update(spamRecheckAt=now_iso(), spamRecheckWhy=cell(reason)[:200])
+        save_accounts(lst)
+    return True
 
 
 def _until_left(acc, key) -> int:
@@ -1105,9 +1470,11 @@ def send_hold_left(acc) -> int:
     return max(_until_left(acc, "sendHoldUntil"), full_rest_left(acc))
 
 
-# когда с какого прокси последний раз уходило письмо — общий на профиль
-SEND_GAP = DIR / ".send-gap.json"
-SEND_GAP_LOCK = DIR / ".send-gap.lock"
+# когда с какого выходного IP последний раз уходило письмо. Файл общий на все
+# профили (лежит рядом с кодом): ключ — IP, а один IP мог достаться аккаунтам
+# разных профилей
+SEND_GAP = CODE / ".send-gap.json"
+SEND_GAP_LOCK = CODE / ".send-gap.lock"
 SEND_GAP_GIVE_UP = 15 * 60     # дольше ждать соседей незачем — что-то не так, пишем
 
 
@@ -1120,8 +1487,11 @@ async def wait_send_gap(acc, gap_min, gap_max):
     адреса в одну секунду (14.10: a3 и a2 в 18:10:57–58, a1 через 5 с после a2,
     и a1 заморозили). Для Telegram это прямой признак фермы.
 
-    Перед каждым письмом смотрим, когда с ЭТОГО ЖЕ прокси последний раз уходило
-    письмо любым аккаунтом профиля, и если раньше паузы — ждём и смотрим снова.
+    Перед каждым письмом смотрим, когда с ЭТОГО ЖЕ выходного IP последний раз
+    уходило письмо любым аккаунтом, и если раньше паузы — ждём и смотрим снова.
+    IP — тот, что показала проверка страны при подключении (и сторож по ходу
+    задачи): разные строки прокси выходят и с одного адреса. Не проверяли
+    (страна выключена) — ключом остаётся сама строка прокси.
     Свою паузу между своими письмами аккаунт держит как раньше, тут только
     разводим разных между собой. Возвращает, сколько прождали, сек.
 
@@ -1143,7 +1513,7 @@ async def _wait_send_gap(acc, gap_min, gap_max):
     import fcntl
     import random
     import time
-    key = str(acc.get("proxy") or "").strip() or "direct"
+    key = exit_ip(acc) or str(acc.get("proxy") or "").strip() or "direct"
     gap = random.uniform(gap_min, max(gap_min, gap_max))
     waited = 0.0
     while True:
@@ -1206,8 +1576,10 @@ async def spam_check(client, acc, force=False):
     """
     # force=True — не доверять кэшу: перед реальной отправкой холодным нужен
     # свежий ответ бота, иначе заморозка в пределах получаса после чистого
-    # вердикта не видна на старте прогона (кэш вернёт «свободен»).
-    if not force and acc.get("spamOk") is True and acc.get("spamAt"):
+    # вердикта не видна на старте прогона (кэш вернёт «свободен»). Просьба
+    # перепроверить (spamRecheckAt новее spamAt) кэш тоже отменяет: иначе она
+    # висела бы, а панель звала бы проверку снова и снова.
+    if not force and not spam_recheck_pending(acc) and acc.get("spamOk") is True and acc.get("spamAt"):
         try:
             age = (datetime.now(timezone.utc) - datetime.fromisoformat(
                 str(acc["spamAt"]).replace("Z", "+00:00"))).total_seconds()
@@ -1224,12 +1596,15 @@ async def spam_check(client, acc, force=False):
         # Замороженный аккаунт валится FROZEN_* уже на обращении к боту —
         # это не «не дозвонились», а приговор: помечаем и уводим в карантин,
         # иначе main пойдёт «по прошлому вердикту» и пустит его в отправку.
+        # Это ответ на проверку, поэтому spamAt обновляем всегда (не mark_frozen,
+        # который на уже замороженном молчит).
         if is_frozen_error(e):
-            set_field(acc["id"], spamOk=False, spamUntil="", spamKind="frozen",
-                      spamAt=now_iso(), spam=cell(
-                          "заморожен — блокировка по жалобам (ToS), "
-                          "снимается только разбаном через @SpamBot/поддержку"))
-            return False, "заморожен — блокировка по жалобам (ToS)"
+            raw = f"{type(e).__name__}: {e}"
+            fields = _frozen_fields(raw)
+            set_field(acc["id"], **fields)
+            acc.update(fields)
+            _spam_log(acc["id"], "frozen", fields["spamRaw"], "spambot")
+            return False, FROZEN_NOTE
         # не дозвонились до бота — это не приговор аккаунту, прошлый вердикт
         # остаётся в силе
         return None, f"{type(e).__name__}: {str(e).splitlines()[0][:80]}"
@@ -1238,10 +1613,10 @@ async def spam_check(client, acc, force=False):
     # у заморозки нет срока снятия — until не ставим, даже если в тексте мелькнёт
     # дата, иначе карантин по дате сам отпустит бессрочно замороженный акк
     until = "" if (ok or frozen) else spam_until(text)
-    # заморозка (жалобы+модерация) / временно (есть дата снятия) / бессрочно
+    # заморозка / временно (есть дата снятия) / бессрочно
     kind = "" if ok else ("frozen" if frozen else "temp" if until else "perm")
     if frozen:
-        note = "заморожен — блокировка по жалобам (ToS), снимается только разбаном через @SpamBot/поддержку"
+        note = FROZEN_NOTE
     elif not ok and not note.startswith("не понял"):
         when = ""
         if until:
@@ -1249,13 +1624,17 @@ async def spam_check(client, acc, force=False):
                 timezone(timedelta(hours=5)))
             when = f"временно, до {local:%d.%m %H:%M} по Екб"
         note = f"{when or 'бессрочно'} — {spam_reason(text)}"
+    # в spam — короткая выжимка для панели, в spamRaw — ответ бота дословно:
+    # по выжимке не понять, что именно сказал Telegram
+    raw = " ".join(str(text).split())[:500]
     fields = dict(spam=cell(note), spamAt=now_iso(), spamOk=ok,
-                  spamUntil=until, spamKind=kind)
+                  spamUntil=until, spamKind=kind, spamRaw=raw)
     # бот сказал «свободен» после ограничения или заморозки — отдых без рассылки
     if ok and acc.get("spamOk") is False:
         fields.update(hold_after_restriction(acc["id"]))
     set_field(acc["id"], **fields)
     acc.update(fields)   # задача дальше смотрит на свежий вердикт и отдых
+    _spam_log(acc["id"], kind or "ok", raw, "spambot")
     return ok, note
 
 
@@ -1404,11 +1783,48 @@ def can_write(row, acc_id) -> bool:
     аккаунт-сборщик написал бы ему без всяких проблем.
     """
     key = str(row.get("phone", ""))
+    # лид, которого профиль показал продавцом: в очереди он уже лежит (разбор
+    # кладёт лидов сразу), но писать ему не будет ни одна рассылка
+    if row.get("by", "") == "lead" and key in lead_excluded():
+        return False
     # человек лежит в контактах проверившего аккаунта — пишет только он:
     # чужой потратил бы квоту на повторное добавление
     if row.get("kept") == "1":
         return row.get("by", "") == acc_id
-    return not key.startswith("id:") or row.get("by", "") == acc_id
+    if not key.startswith("id:") or row.get("by", "") == acc_id:
+        return True
+    # лид обогащения: у него сохранено сообщение в чате (chat_id + msg_id).
+    # Любой писатель откроет это сообщение и получит СВОЙ доступ к человеку
+    # (draft-messages.find_member), поэтому лид без @username — общий. Но только
+    # строка, которую положил сам разбор (by=lead): человека, собранного раньше
+    # parse-chat, по-прежнему пишет его сборщик — у того доступ уже есть
+    return row.get("by", "") == "lead" and key in lead_refs()
+
+
+_LEADS_CACHE = {"mtime": None, "refs": {}, "excluded": set()}
+
+
+def _leads_cache():
+    """leads.json раскладом для рассылки; перечитываем при правке файла."""
+    f = DIR / "enrich" / "leads.json"
+    try:
+        mtime = f.stat().st_mtime
+    except OSError:
+        return {"refs": {}, "excluded": set()}
+    if mtime != _LEADS_CACHE["mtime"]:
+        import enrich          # здесь, а не наверху: enrich сам импортирует tglib
+        _LEADS_CACHE.update(mtime=mtime, refs=enrich.lead_refs(), excluded=enrich.excluded_keys())
+    return _LEADS_CACHE
+
+
+def lead_refs():
+    """Ключ получателя -> карточка лида (leads.json), без исключённых."""
+    return _leads_cache()["refs"]
+
+
+def lead_excluded():
+    """Ключи лидов, которых профиль показал продавцами."""
+    return _leads_cache()["excluded"]
 
 
 def now_iso():

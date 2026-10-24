@@ -36,18 +36,68 @@ const KZ_REGIONS = ['Almaty', 'Shymkent', 'Karaganda', 'Pavlodar Region', 'Qosta
 export const OWN_REGIONS = (process.env.TG_ASOCKS_REGIONS
   ? process.env.TG_ASOCKS_REGIONS.split(',').map((s) => s.trim()).filter(Boolean)
   : KZ_REGIONS);
+// Регион не дал свободного IP за maxTries — пробуем самые свободные соседние
+// регионы профиля (по ESCAPE_TRIES строк в каждом). Замер 24.10, 8 новых сессий:
+// Karaganda дала 3 разных IP, Almaty — 7. Привязка к тонкому региону без выхода
+// сажала аккаунты на одни и те же модемы.
+const ESCAPE_TRIES = 3;
+const ESCAPE_REGIONS = 3;
 const TG_DC = '149.154.167.51:443';       // DC2: прокси должен пускать к нему (MTProto)
 const BASE_TTL = 24 * 3600_000;           // логин/пароль/регионы кабинета перечитываем раз в сутки
 const PROBE_URL = 'http://ipinfo.io/json'; // http, без TLS: ~1 КБ трафика на проверку
+const OTHERS_FRESH = 2 * 60_000;          // снимок IP соседнего профиля старше — пробуем заново
+const CHANGES_KEEP = 7 * 864e5;           // историю смен IP аккаунта держим неделю
+const CHANGES_MAX = 20;                   // и не больше стольких записей на аккаунт
+const PRUNE_AFTER = 3600_000;             // запись аккаунта, которого нет в реестре, старше — вычищаем
 
+// Замороженный и выведенный из работы к Telegram почти не ходят: их строку не
+// меняем, а их IP занятым не считаем — в тонком пуле он отнимал адрес у живых
+// (замороженный c5 держал за собой IP Караганды и получил ещё 3 новые строки).
+export const ownDormant = (a) => a?.spamKind === 'frozen' || !!a?.retired;
+
+// hasSession(a) — есть ли у аккаунта сессия Telegram. Нет — строка ему первая
+// выдача до входа (Telegram этот IP ещё не видел): в историю смен (changes) не
+// пишем, как proxy_buy.first_assignment при импорте. Не передали — у всех есть.
 export function makeOwnProxy({ dir, asocks, gateway = ASOCKS_GATEWAY, listAccounts, otherProxies = () => [],
-                               setProxy, note = () => {}, regions = OWN_REGIONS }) {
+                               liveIp = () => '', setProxy, note = () => {}, regions = OWN_REGIONS,
+                               hasSession = () => true }) {
   const FILE = path.join(dir, 'asocks-sessions.json');
   const load = () => { try { return JSON.parse(fs.readFileSync(FILE, 'utf8')) || {}; } catch { return {}; } };
   const save = (d) => {
-    fs.writeFileSync(FILE + '.tmp', JSON.stringify(d, null, 1) + '\n', { mode: 0o600 });
-    fs.renameSync(FILE + '.tmp', FILE);
+    // временный файл — свой у процесса: тот же файл пишет и импорт (Python)
+    const tmp = `${FILE}.tmp.${process.pid}`;
+    fs.writeFileSync(tmp, JSON.stringify(d, null, 1) + '\n', { mode: 0o600 });
+    fs.renameSync(tmp, FILE);
   };
+
+  /**
+   * Записи аккаунтов, которых больше нет в реестре: их IP блокировали выдачу
+   * (c1/c4/c5/n2 месяц спустя), а новый аккаунт с тем же id унаследовал бы чужой
+   * регион. Свежие (до часа) не трогаем — импорт пишет запись раньше, чем
+   * аккаунт появляется в реестре. Возвращает, вычистили ли что-нибудь.
+   */
+  function prune(d) {
+    const ids = new Set(listAccounts().map((a) => a.id));
+    const old = Date.now() - PRUNE_AFTER;
+    let cut = false;
+    for (const [id, v] of Object.entries(d.assigned || {})) {
+      if (!ids.has(id) && !(Date.parse(v?.at || '') > old)) { delete d.assigned[id]; cut = true; }
+    }
+    for (const [id, h] of Object.entries(d.changes || {})) {
+      const last = Array.isArray(h) && h.length ? Date.parse(h[h.length - 1].at || '') : 0;
+      if (!ids.has(id) && !(last > old)) { delete d.changes[id]; cut = true; }
+    }
+    return cut;
+  }
+
+  /** Сколько раз аккаунтам меняли IP начиная с since (мс): id -> число. Переживает перезапуск. */
+  function changes(since) {
+    const out = new Map();
+    for (const [id, h] of Object.entries(load().changes || {})) {
+      out.set(id, (Array.isArray(h) ? h : []).filter((x) => Date.parse(x.at || '') >= since).length);
+    }
+    return out;
+  }
 
   /** Логин строки — по нему сверяем, не занята ли она. */
   const sessionId = (s) => {
@@ -72,7 +122,11 @@ export function makeOwnProxy({ dir, asocks, gateway = ASOCKS_GATEWAY, listAccoun
   /** Выход через прокси: { ip, country, city, org } или {} — не ответил. */
   function exitIp(raw) {
     return new Promise((done) => {
-      const c = spawn('curl', ['-s', '--max-time', '20', '-x', raw, PROBE_URL]);
+      // прокси — через окружение, а не аргументом: в списке процессов пароль не
+      // светится (как в стороже). no_proxy убираем: с ним curl пошёл бы напрямую
+      const env = { ...process.env, http_proxy: raw, https_proxy: raw, HTTPS_PROXY: raw, ALL_PROXY: raw };
+      delete env.no_proxy; delete env.NO_PROXY;
+      const c = spawn('curl', ['-s', '--max-time', '20', PROBE_URL], { env });
       let out = '';
       c.stdout.on('data', (b) => { out += b; });
       c.on('error', () => done({}));
@@ -122,8 +176,11 @@ export function makeOwnProxy({ dir, asocks, gateway = ASOCKS_GATEWAY, listAccoun
   /**
    * Выдать своим строкам аккаунтам ids. Возвращает [{ id, ok, ip, org, region, why, tries }].
    * Одновременно идёт одна выдача: две параллельные могли бы дать двоим один IP.
+   *   reasons    — id -> почему меняем (уходит в историю смен IP);
+   *   keepRegion — эти id меняем только внутри закреплённого региона, без выхода
+   *                в соседние (замена из-за дубля: см. ниже).
    */
-  async function assign({ ids, country = OWN_COUNTRY, maxTries = 6 }) {
+  async function assign({ ids, country = OWN_COUNTRY, maxTries = 6, reasons = {}, keepRegion = [] }) {
     if (busy) throw new Error('раздача уже идёт — дождись её');
     busy = true;
     try {
@@ -132,44 +189,94 @@ export function makeOwnProxy({ dir, asocks, gateway = ASOCKS_GATEWAY, listAccoun
       const targets = all.filter((a) => ids.includes(a.id));
       const d0 = load();
       const prevAssigned = d0.assigned || {};
-      const usedIps = new Set(Object.entries(prevAssigned)
-        .filter(([id]) => !ids.includes(id)).map(([, v]) => v.ip).filter(Boolean));
+      // Занятые IP — по ЖИВЫМ данным сторожа, запись из выдачи только запасом:
+      // Asocks сам меняет устройство под строкой, записанный IP устаревает, и
+      // сверка по нему пропускала новую строку на адрес, который уже держит сосед.
+      const usedIps = new Set();
+      for (const a of all) {
+        if (ids.includes(a.id) || !a.proxy || ownDormant(a)) continue;
+        const ip = liveIp(a.proxy) || prevAssigned[a.id]?.ip;
+        if (ip) usedIps.add(ip);
+      }
+      // и IP соседнего профиля, вживую: регионы у профилей разные, но пулы
+      // Asocks на краях пересекаются (Almaty иногда выходит через Павлодар).
+      // Выдача с выходом в соседние регионы идёт минутами, а сосед за это время
+      // может уехать на новый адрес — снимок старше OTHERS_FRESH пробуем заново
+      let otherIps = new Set(), othersAt = 0;
+      const othersHave = async (ip) => {
+        if (Date.now() - othersAt >= OTHERS_FRESH) {
+          const r = await Promise.all(otherProxies().map((p) => exitIp(p)));
+          otherIps = new Set(r.map((x) => x.ip).filter(Boolean));
+          othersAt = Date.now();
+        }
+        return otherIps.has(ip);
+      };
       const byName = new Map(b.states.map((s) => [s.name, s]));
       const pool = regions.filter((r) => byName.has(r));
       if (!pool.length) throw new Error(`ни одного из регионов ${regions.join(', ')} нет у Asocks для ${country}`);
-      // регион аккаунта закреплён: был — тот же; нового раскладываем по кругу (по месту в списке)
+      // сколько аккаунтов уже сидит в каждом регионе профиля (кроме тех, кого меняем)
+      const regionLoad = new Map(pool.map((r) => [r, 0]));
+      for (const a of all) {
+        const r = prevAssigned[a.id]?.region;
+        if (!ids.includes(a.id) && !ownDormant(a) && regionLoad.has(r)) regionLoad.set(r, regionLoad.get(r) + 1);
+      }
+      const byLoad = () => [...pool].sort((x, y) => regionLoad.get(x) - regionLoad.get(y));
       const res = [];
       for (const a of targets) {
+        // регион закреплён, пока он в списке профиля; выпал из списка или его не
+        // было — самый свободный. Не нашли свободный IP в своём — соседние.
+        // Но не для дубля (keepRegion): живой аккаунт, который лишь делит модем
+        // с соседом, за 1000 км ради уникальности не переносим — стабильный IP
+        // важнее, а одновременно с одного адреса панель их и так не водит
         const was = prevAssigned[a.id]?.region;
-        const region = was && byName.has(was) ? was : pool[Math.max(0, all.findIndex((x) => x.id === a.id)) % pool.length];
-        const st = byName.get(region);
-        let got = null, why = '', tries = 0;
-        while (tries < maxTries) {
-          tries++;
-          const s = build(b, st.id);
-          const c = await check(s, country);
-          if (!c.ok) { why = c.why; continue; }
-          if (usedIps.has(c.ip)) { why = 'такой IP уже у другого аккаунта'; continue; }
-          got = { s, ...c };
-          break;
+        const pinned = !!was && pool.includes(was);
+        const first = pinned ? was : byLoad()[0];
+        const order = pinned && keepRegion.includes(a.id) ? [first]
+          : [first, ...byLoad().filter((r) => r !== first)].slice(0, 1 + ESCAPE_REGIONS);
+        let got = null, why = '', tries = 0, region = first;
+        for (const [k, r] of order.entries()) {
+          const st = byName.get(r);
+          for (let n = 0; n < (k === 0 ? maxTries : ESCAPE_TRIES); n++) {
+            tries++;
+            const s = build(b, st.id);
+            const c = await check(s, country);
+            if (!c.ok) { why = c.why; continue; }
+            if (usedIps.has(c.ip) || await othersHave(c.ip)) { why = 'такой IP уже у другого аккаунта'; continue; }
+            got = { s, ...c };
+            region = r;
+            break;
+          }
+          if (got) break;
         }
-        if (!got) { res.push({ id: a.id, ok: false, region, why: `${tries} строк подряд не подошли (${why})`, tries }); continue; }
+        if (!got) { res.push({ id: a.id, ok: false, region: first, why: `${tries} строк подряд не подошли (${why})`, tries }); continue; }
         setProxy(a.id, got.s, a.proxy || '');
         usedIps.add(got.ip);
-        const d = load();
+        regionLoad.set(region, regionLoad.get(region) + 1);
+        const d = load();     // перечитываем перед записью: файл пишет и импорт
+        const at = new Date().toISOString();
         d.assigned = { ...(d.assigned || {}),
           [a.id]: { session: sessionId(got.s), region, ip: got.ip, city: got.city, org: got.org, country: got.country,
-                    at: new Date().toISOString() } };
+                    at } };
+        // история смен IP: по ней панель держит предел смен в сутки, и он
+        // переживает перезапуск панели. Без сессии — первая выдача, не смена
+        if (hasSession(a)) {
+          const hist = ((d.changes || {})[a.id] || []).filter((x) => Date.parse(x.at || '') > Date.now() - CHANGES_KEEP);
+          hist.push({ at, ip: got.ip, region, why: String(reasons[a.id] || '').slice(0, 80) });
+          d.changes = { ...(d.changes || {}), [a.id]: hist.slice(-CHANGES_MAX) };
+        }
+        prune(d);
         save(d);
         note(a, got, region);
         res.push({ id: a.id, ok: true, ip: got.ip, org: got.org, region, tries });
       }
+      // ни одной удачной — записи удалённых всё равно вычищаем
+      if (!res.some((x) => x.ok)) { const d = load(); if (prune(d)) save(d); }
       return res;
     } finally {
       busy = false;
     }
   }
 
-  return { check, assign, sessionId, exitIp, reachesTelegram,
+  return { check, assign, sessionId, exitIp, reachesTelegram, changes,
            assigned: () => load().assigned || {}, busy: () => busy };
 }

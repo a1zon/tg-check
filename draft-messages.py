@@ -109,6 +109,22 @@ async def find_member(client, key):
                          "тот аккаунт, который разбирал чат")
 
 
+def rpc_method(e):
+    """На каком методе Telegram ответил ошибкой (ImportContacts, SendMessage…) — в журнал заморозок."""
+    req = getattr(e, "request", None)
+    return type(req).__name__.removesuffix("Request") if req is not None else type(e).__name__
+
+
+def cut_off(client, e):
+    """Связь оборвана насовсем (сторож страны выхода, Telethon не переподключился) — любой запрос дальше упадёт."""
+    return isinstance(e, ConnectionError) and not client.is_connected()
+
+
+def settled(good, sent_flag, sending):
+    """С человеком в этом шаге всё решилось: письмо ушло, черновик лёг (без отправки), пропуск."""
+    return sent_flag == "true" or good == "skip" or (good is True and not sending)
+
+
 CONTACT_LABEL = re.compile(r"^\d{10}$")
 
 
@@ -517,21 +533,35 @@ async def main():
                 say("  Продолжать нельзя — дай ему отлежаться или работай другим аккаунтом.")
                 stop, cooldown = "flood", COOLDOWN_FLOOD
                 break
+            except tglib.ExitDrift:
+                # прокси посреди захода вышел не из той страны — сторож оборвал
+                # связь, задача кончается (панель разберёт как сбой сети). Человек
+                # ни при чём: если с ним ничего не решилось, попытку не считаем
+                record = record and settled(good, sent_flag, send or voice)
+                raise
             except Exception as e:
                 msg = str(e).splitlines()[0][:120] if str(e) else type(e).__name__
-                # Заморозка (блокировка по жалобам/ToS) всплывает как RPC-ошибка с
-                # FROZEN_* — это не временный сбой, дальше писать нечем. Снимаем акк
-                # сразу: помечаем frozen и уходим в карантин, чтобы панель не слала
-                # в пустоту и показала заморозку, а не ждала следующего опроса SpamBot.
+                # Заморозка всплывает как RPC-ошибка FROZEN_* — это не временный
+                # сбой, дальше писать нечем. Отмечаем сразу (те же поля, что у
+                # SpamBot, и строка в spam-log) и уходим в карантин, чтобы панель
+                # не слала в пустоту и не ждала утреннего опроса SpamBot.
                 if tglib.is_frozen_error(e):
-                    say("\nстоп: аккаунт заморожен Telegram (блокировка по жалобам/ToS).")
-                    say("  Писать с него нельзя — нужен разбан через @SpamBot/поддержку.")
-                    tglib.set_field(acc["id"], spamKind="frozen", spamOk=False,
-                                    spamUntil="", spamAt=now_iso(),
-                                    spam=tglib.cell("заморожен — блокировка по жалобам (ToS), "
-                                                    "снимается только разбаном через @SpamBot/поддержку"))
+                    say(f"\nстоп: аккаунт заморожен Telegram ({msg}).")
+                    say("  Писать с него нельзя — снимается только разбаном через @SpamBot/поддержку.")
+                    try:
+                        tglib.mark_frozen(acc["id"], f"{type(e).__name__}: {e}",
+                                          f"draft-messages:{rpc_method(e)}")
+                    except Exception as x:
+                        say(f"  отметить заморозку в реестре не вышло: {type(x).__name__}: {x}")
+                    # заморозка — про аккаунт, а не про человека: попытку ему не считаем
+                    record = record and settled(good, sent_flag, send or voice)
                     stop, cooldown = "quarantine", 0
                     break
+                if cut_off(client, e):
+                    # запрос висел, когда связь оборвали (сторож страны или Telethon
+                    # сдался) — дальше всё упадёт так же; людям попытки не считаем
+                    record = record and settled(good, sent_flag, send or voice)
+                    raise SystemExit(f"связь с Telegram оборвана ({msg}) — повторить позже") from e
                 say(f"[{i + 1}/{len(todo)}] {phone} — {msg}")
                 fails_row += 1
             finally:

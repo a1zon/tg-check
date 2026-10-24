@@ -49,6 +49,8 @@ async def main():
             continue
         say(f"{title}: беру ключ ({tglib.proxy_label(acc.get('proxy'))})…")
         try:
+            # без прокси и не из той страны не подключаем — этот аккаунт пропускаем
+            await tglib.require_country(acc)
             client = tglib.make_client(acc)
             await client.connect()
             if not await client.is_user_authorized():
@@ -58,8 +60,8 @@ async def main():
                 continue
             tdesk = await TDesktop.FromTelethon(client, flag=UseCurrentSession)
             await tglib.aclose(client)
-        except Exception as e:
-            say(f"{title}: не вышло — {type(e).__name__}: {str(e).splitlines()[0][:90]}")
+        except (SystemExit, Exception) as e:
+            say(f"{title}: не вышло — {type(e).__name__}: {(str(e).splitlines() or [''])[0][:90]}")
             failed.append(title)
             continue
 

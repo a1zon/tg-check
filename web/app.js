@@ -44,6 +44,8 @@ const esc = (v) => String(v ?? '').replace(/[&<>"']/g,
 const accReady = (a) => a.session && a.authed;
 // какие прокси сторож сейчас считает лежащими (по подписи без пароля) — из state()
 let proxyDownLabels = new Set();
+// дословный ответ SpamBot (или ошибка FROZEN_* из задачи) — подсказкой при наведении
+const spamTip = (a) => { const t = String(a.spamRaw || a.spam || '').slice(0, 500); return t ? ` title="${esc(t)}"` : ''; };
 const accBadge = (a) =>
   // «Подключение сессии — Вася» в бейдж не влезает и дёргает вёрстку;
   // при заливке показываем короткое и понятное
@@ -51,12 +53,12 @@ const accBadge = (a) =>
   : a.busy ? `<span class="st st-run">${esc(a.busy)}</span>`
   // карантин важнее «вошёл»: аккаунт живой, но писать с него нельзя,
   // и человек должен видеть это первым, а не искать в журнале
-  : a.quarantine ? `<span class="st st-no">${a.spamUntil
+  : a.quarantine ? `<span class="st st-no"${spamTip(a)}>${a.spamUntil
       ? 'ограничен до ' + new Intl.DateTimeFormat('ru-RU', {timeZone: 'Asia/Yekaterinburg',
           day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'}).format(new Date(a.spamUntil))
       : a.spamKind === 'frozen' ? 'заморожен' : a.spamKind === 'perm' ? 'ограничен бессрочно' : 'ограничен'}</span>`
   // «вошёл» — это только файл сессии; без живого прокси работать он не будет
-  : accReady(a) && !a.proxy ? '<span class="st st-no" title="Прокси не задан — аккаунт пойдёт в Telegram с IP сервера">без прокси</span>'
+  : accReady(a) && !a.proxy ? '<span class="st st-no" title="Прокси не задан — без него панель к Telegram его не подключает: задай прокси или «Свой IP каждому»">без прокси</span>'
   : accReady(a) && proxyDownLabels.has(a.proxyLabel) ? '<span class="st st-no">прокси не отвечает</span>'
   : accReady(a) ? '<span class="st st-ok">вошёл</span>'
   : a.profile && !a.session ? '<span class="st st-no">нужен перенос</span>'
@@ -95,9 +97,9 @@ const warmLine = (a) => {
   if (a.restUntil) return `😴 отдыхает после заморозки до ${ekbAt(a.restUntil)} — в Telegram не заходит`;
   if (a.holdUntil) return `🌿 после заморозки до ${ekbAt(a.holdUntil)} только греется, людям не пишет`;
   if (a.quarantine) {
-    // полный ответ SpamBot — в подсказке: в строке он занимал три строчки
-    const tip = esc((a.spam || '').slice(0, 300));
-    return `<span title="${tip}">` + (a.spamKind === 'frozen' ? '⛔ заморожен — нужен разбан через @SpamBot'
+    // ответ SpamBot (дословный, если есть) — в подсказке: в строке он занимал три строчки
+    const tip = esc(String(a.spamRaw || a.spam || '').slice(0, 500));
+    return `<span title="${tip}">` + (a.spamKind === 'frozen' ? '⛔ заморожен Telegram (SpamBot) — нужен разбан через @SpamBot'
       : a.spamKind === 'perm' ? '⛔ ограничен бессрочно'
       : '⛔ ограничен — вернётся в рассылку сам') + '</span>';
   }
@@ -185,7 +187,8 @@ function paintAccounts() {
     <div class="acc ${a.id === cur ? 'sel' : ''}">
       ${a.avatar ? `<img class="ava" src="/api/avatar?id=${a.id}&v=${a.avatar}" alt="">`
         : `<span class="ava ava-none">${esc((a.name || a.title || '?').trim().charAt(0).toUpperCase())}</span>`}
-      <span class="nm"><b class="acc-name">${esc(a.name || a.title)} ${accBadge(a)} ${
+      <span class="nm"><b class="acc-name">${esc(a.name || a.title)}${a.protect
+          ? ' <span title="Защищённый: прогрев не сводит его перепиской с покупными аккаунтами">🛡</span>' : ''} ${accBadge(a)} ${
           accReady(a) ? rolePill(a) : ''} ${where(a)}</b>
         <span class="${accReady(a) ? 'on' : 'off'}">${accSub(a)}</span>
         <span>${ipLine(a)} · написал ${a.sent}${
@@ -413,7 +416,7 @@ function paintAccounts() {
   document.querySelectorAll('[data-prx]').forEach(b => b.onclick = async (e) => {
     e.preventDefault();
     const a = accs.find(x => x.id === b.dataset.prx);
-    const t = prompt(`Через какой прокси ходит «${a.title}»?\n\nФормат: host:port  либо  host:port:логин:пароль\nМожно с протоколом: socks5://host:port\n\nПустая строка — ходить напрямую, со своего IP.`, a.proxy);
+    const t = prompt(`Через какой прокси ходит «${a.title}»?\n\nФормат: host:port  либо  host:port:логин:пароль\nМожно с протоколом: socks5://host:port\n\nПустая строка — без прокси: можно только аккаунту без сессии (без прокси панель к Telegram не подключает).`, a.proxy);
     if (t === null) return;
     const r = await post('/api/accounts/proxy', {id: a.id, proxy: t});
     if (!r.ok) alert(r.reason || 'не удалось');
@@ -1670,7 +1673,7 @@ $('#b-prxall').onclick = async () => {
   const cur = accs.find(a => a.proxy)?.proxy || '';
   const p = prompt('Какой прокси поставить ВСЕМ аккаунтам?\n\n' +
     'Формат: host:port  либо  host:port:логин:пароль\n' +
-    'Можно с протоколом: socks5://host:port\n\nПустая строка — снять прокси со всех.', cur);
+    'Можно с протоколом: socks5://host:port\n\nПустая строка — снять со всех (нельзя, если у кого-то есть сессия: без прокси к Telegram не подключаю).', cur);
   if (p === null) return;
   const r = await post('/api/accounts/proxy', {proxy: p, all: true});
   if (!r.ok) alert(r.reason || 'не у всех получилось');
@@ -1868,7 +1871,7 @@ $('#b-bulk').onclick = () => {
     if (!files.length) return;
     const p = prompt('Через какой прокси будут ходить эти аккаунты?\n\n' +
       'Формат: host:port  либо  host:port:логин:пароль\n' +
-      'Пустая строка — напрямую, со своего IP.\n\nОдин прокси на всю пачку.',
+      'Пустая строка — каждому свой IP: панель выдаст его сама при подключении.\n\nСтрока прокси — одна на всю пачку.',
       accs.find(a => a.proxy)?.proxy || '');
     if (p === null) return;
     if (!confirm(`Залить ${files.length} сесси(й)?\n\nПанель заведёт по аккаунту на файл и подключит их по очереди.`)) return;
@@ -1894,7 +1897,7 @@ $('#b-bulk').onclick = () => {
 $('#b-add').onclick = async () => {
   const t = prompt('Как назвать аккаунт? (например: Андрей, рабочий)', `Аккаунт ${accs.length + 1}`);
   if (t === null) return;
-  const p = prompt(`Через какой прокси заходить «${t}»?\n\nФормат: host:port  либо  host:port:логин:пароль\nМожно с протоколом: socks5://host:port\n\nПустая строка — заходить напрямую, со своего IP.`, '');
+  const p = prompt(`Через какой прокси заходить «${t}»?\n\nФормат: host:port  либо  host:port:логин:пароль\nМожно с протоколом: socks5://host:port\n\nПустая строка — без прокси: так можно только файлом сессии (свой IP панель выдаст сама), по QR и по коду — нет.`, '');
   if (p === null) return;
   const how = prompt('Как подключить аккаунт?\n\n  1 — по QR-коду (вход телефоном)\n' +
     '  2 — готовой сессией: TDATA (.zip) или .session (можно .zip с .session и .json)\n' +
@@ -2229,7 +2232,7 @@ const warmup = async () => {
       return `
       <div class="arow">
         <b>${esc(a.name || a.title)}</b>
-        <span style="color:${a.spam && !a.spamOk ? 'var(--no)' : 'var(--mut)'};font-size:12px">${
+        <span style="color:${a.spam && !a.spamOk ? 'var(--no)' : 'var(--mut)'};font-size:12px"${spamTip(a)}>${
           esc(a.spam ? a.spam.slice(0, 70) : 'SpamBot ещё не спрашивали')}${
           warmOn ? ` · сегодня осталось ${Math.max(0, a.dayLeft)}` : ''}</span>
         <span class="w" style="color:${col}">${esc(now)}</span>
